@@ -2,6 +2,7 @@
 //! Connect-request block parsers (ARBlockReq, IOCRBlockReq, ExpectedSubmoduleBlockReq,
 //! AlarmCRBlockReq) needed to establish an Application Relationship (AR).
 
+pub mod ar;
 pub mod block;
 pub mod connect;
 pub mod control;
@@ -9,6 +10,10 @@ pub mod model;
 pub mod status;
 pub mod write;
 
+pub use ar::{
+    AbortReason, Action, Ar, ArContext, ArState, Event, ACTIVITY_TIMEOUT_UNIT,
+    APP_READY_MAX_ATTEMPTS, APP_READY_TIMEOUT,
+};
 pub use block::{
     ty, AlarmCrBlockReq, ArBlockReq, BlockHeader, Cursor, DataDescription, ExpectedApi,
     ExpectedSubmodule, ExpectedSubmoduleBlockReq, IocrApi, IocrBlockReq, IocrObject,
