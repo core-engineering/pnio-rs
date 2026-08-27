@@ -3,12 +3,16 @@
 //! AlarmCRBlockReq) needed to establish an Application Relationship (AR).
 
 pub mod block;
+pub mod connect;
+pub mod model;
 pub mod status;
 
 pub use block::{
     ty, AlarmCrBlockReq, ArBlockReq, BlockHeader, Cursor, DataDescription, ExpectedApi,
     ExpectedSubmodule, ExpectedSubmoduleBlockReq, IocrApi, IocrBlockReq, IocrObject,
 };
+pub use connect::{build_connect_res, validate, ArParams, ConnectReq, IocrParams};
+pub use model::{DeviceModel, SlotModel, SubmoduleModel};
 pub use status::{ConnectBlock, PnioStatus};
 
 use crate::rpc::Uuid;
