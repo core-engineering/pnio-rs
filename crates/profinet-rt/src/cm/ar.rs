@@ -242,7 +242,11 @@ impl Ar {
     fn handle_write(&mut self, req: WriteReq, now: Instant) -> Vec<Action> {
         match self.state {
             ArState::Idle => vec![wrong_state()],
-            ArState::Connected | ArState::AppReadySent => {
+            // Activity timer is armed on Connect and re-armed on Write only while
+            // still in Connected; once PrmEnd has started the ApplicationReady
+            // phase (AppReadySent) or the AR is in Data, a Write stores records
+            // and touches no timer.
+            ArState::Connected => {
                 let blocks = build_write_res(&req);
                 let factor = self
                     .ctx
@@ -251,17 +255,17 @@ impl Ar {
                     .params
                     .activity_timeout_factor;
                 let ctx = self.ctx.as_mut().expect("ctx present outside Idle");
-                ctx.records = req.records;
+                ctx.records.extend(req.records);
                 self.activity_deadline = Some(now + ACTIVITY_TIMEOUT_UNIT * factor as u32);
                 vec![Action::Respond {
                     status: PnioStatus::OK,
                     blocks,
                 }]
             }
-            ArState::Data => {
+            ArState::AppReadySent | ArState::Data => {
                 let blocks = build_write_res(&req);
                 let ctx = self.ctx.as_mut().expect("ctx present outside Idle");
-                ctx.records = req.records;
+                ctx.records.extend(req.records);
                 vec![Action::Respond {
                     status: PnioStatus::OK,
                     blocks,
@@ -417,6 +421,34 @@ mod tests {
             Action::Respond { status, blocks } if status.is_ok() => blocks,
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A Release request block (built by mutating a parsed PrmEnd request, same as
+    /// the original `release_aborts_and_answers` test does inline).
+    fn release_block() -> ControlBlock {
+        let mut rel = ControlBlock::parse(&golden("prmend_req")[BLOCKS..]).unwrap();
+        rel.block_type = ty::RELEASE_BLOCK_REQ;
+        rel.command = cmd::RELEASE;
+        rel
+    }
+
+    /// Drive a fresh `Ar` all the way to `Data` via the nominal path (Connect,
+    /// Write, PrmEnd, AppReadyRsp ok), for tests of the Data row of the transition
+    /// table. Returns the machine and the `now` used throughout.
+    fn to_data() -> (Ar, Instant) {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        ar.on(write(), now);
+        ar.on(prm_end(), now);
+        ar.on(
+            Event::AppReadyRsp {
+                status: PnioStatus::OK,
+            },
+            now,
+        );
+        assert_eq!(ar.state(), ArState::Data);
+        (ar, now)
     }
 
     #[test]
@@ -597,5 +629,232 @@ mod tests {
         assert!(ar.context().is_none());
         let a = ar.on(connect(), now);
         assert_eq!(respond_ok(&a), &golden("connect_res")[BLOCKS..]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix round 1: records accumulate; the activity timer is armed only while
+    // Connected; and one test per remaining, previously-untested transition
+    // table cell.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn records_accumulate_across_writes() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        ar.on(write(), now);
+        assert_eq!(ar.context().unwrap().records.len(), 5);
+        ar.on(write(), now);
+        assert_eq!(ar.context().unwrap().records.len(), 10);
+    }
+
+    #[test]
+    fn write_in_app_ready_sent_does_not_touch_timers() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        ar.on(prm_end(), now);
+        assert_eq!(ar.next_deadline(), Some(now + APP_READY_TIMEOUT));
+        let a = ar.on(write(), now);
+        assert_eq!(respond_ok(&a), &golden("write_res")[BLOCKS..]);
+        assert_eq!(ar.context().unwrap().records.len(), 5);
+        assert_eq!(ar.next_deadline(), Some(now + APP_READY_TIMEOUT));
+    }
+
+    // --- Idle ---
+
+    #[test]
+    fn idle_release_answers_without_abort() {
+        let mut ar = ar();
+        let a = ar.on(Event::ReleaseReq(release_block()), t0());
+        assert_eq!(a.len(), 1);
+        assert!(
+            matches!(&a[0], Action::Respond { status, blocks } if status.is_ok() && blocks[0..2] == [0x81, 0x14])
+        );
+        assert_eq!(ar.state(), ArState::Idle);
+        assert!(ar.context().is_none());
+    }
+
+    #[test]
+    fn idle_app_ready_rsp_is_ignored() {
+        let mut ar = ar();
+        let a = ar.on(
+            Event::AppReadyRsp {
+                status: PnioStatus::OK,
+            },
+            t0(),
+        );
+        assert!(a.is_empty());
+        assert_eq!(ar.state(), ArState::Idle);
+    }
+
+    #[test]
+    fn idle_tick_is_noop() {
+        let mut ar = ar();
+        let a = ar.on(Event::Tick, t0());
+        assert!(a.is_empty());
+        assert_eq!(ar.next_deadline(), None);
+    }
+
+    // --- Connected ---
+
+    #[test]
+    fn connected_app_ready_rsp_is_ignored() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        let a = ar.on(
+            Event::AppReadyRsp {
+                status: PnioStatus::OK,
+            },
+            now,
+        );
+        assert!(a.is_empty());
+        assert_eq!(ar.state(), ArState::Connected);
+    }
+
+    #[test]
+    fn connected_tick_before_deadline_is_noop() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now); // factor 200 -> 20 s deadline
+        let a = ar.on(Event::Tick, now + Duration::from_secs(1));
+        assert!(a.is_empty());
+        assert_eq!(ar.state(), ArState::Connected);
+    }
+
+    #[test]
+    fn connected_write_rearms_activity_deadline_from_now() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        let now2 = now + Duration::from_secs(5);
+        ar.on(write(), now2);
+        assert_eq!(ar.next_deadline(), Some(now2 + Duration::from_secs(20)));
+    }
+
+    // --- AppReadySent ---
+
+    #[test]
+    fn app_ready_sent_connect_same_uuid_is_idempotent() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        ar.on(prm_end(), now);
+        let a = ar.on(connect(), now);
+        assert_eq!(respond_ok(&a), &golden("connect_res")[BLOCKS..]);
+        assert_eq!(ar.state(), ArState::AppReadySent);
+    }
+
+    #[test]
+    fn app_ready_sent_prm_end_again_is_idempotent_without_new_call() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        ar.on(prm_end(), now);
+        let a = ar.on(prm_end(), now);
+        assert_eq!(a.len(), 1);
+        assert_eq!(respond_ok(&a), &golden("prmend_res")[BLOCKS..]);
+        // No re-arm/retry happened: the deadline is unchanged, so attempts is too.
+        assert_eq!(ar.next_deadline(), Some(now + APP_READY_TIMEOUT));
+    }
+
+    #[test]
+    fn app_ready_sent_release_aborts() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        ar.on(prm_end(), now);
+        let a = ar.on(Event::ReleaseReq(release_block()), now);
+        assert!(
+            matches!(&a[0], Action::Respond { status, blocks } if status.is_ok() && blocks[0..2] == [0x81, 0x14])
+        );
+        assert!(matches!(
+            a[1],
+            Action::Notify {
+                state: ArState::Idle,
+                reason: Some(AbortReason::ControllerRelease)
+            }
+        ));
+        assert_eq!(ar.state(), ArState::Idle);
+    }
+
+    // --- Data ---
+
+    #[test]
+    fn data_connect_other_uuid_is_rejected() {
+        let (mut ar, now) = to_data();
+        let mut other = match connect() {
+            Event::ConnectReq(c) => c,
+            _ => unreachable!(),
+        };
+        other.ar.ar_uuid = crate::rpc::Uuid([7; 16]);
+        let a = ar.on(Event::ConnectReq(other), now);
+        assert!(
+            matches!(&a[0], Action::Respond { status, .. } if *status == PnioStatus::connect_ar_already_exists())
+        );
+        assert_eq!(ar.state(), ArState::Data);
+    }
+
+    #[test]
+    fn data_connect_same_uuid_resends_cached_bytes() {
+        let (mut ar, now) = to_data();
+        let a = ar.on(connect(), now);
+        assert_eq!(respond_ok(&a), &golden("connect_res")[BLOCKS..]);
+        assert_eq!(ar.state(), ArState::Data);
+    }
+
+    #[test]
+    fn data_write_stores_records_and_touches_no_timer() {
+        let (mut ar, now) = to_data();
+        let a = ar.on(write(), now);
+        assert_eq!(respond_ok(&a), &golden("write_res")[BLOCKS..]);
+        assert_eq!(ar.next_deadline(), None);
+    }
+
+    #[test]
+    fn data_prm_end_is_idempotent() {
+        let (mut ar, now) = to_data();
+        let a = ar.on(prm_end(), now);
+        assert_eq!(respond_ok(&a), &golden("prmend_res")[BLOCKS..]);
+        assert_eq!(ar.state(), ArState::Data);
+    }
+
+    #[test]
+    fn data_release_aborts() {
+        let (mut ar, now) = to_data();
+        let a = ar.on(Event::ReleaseReq(release_block()), now);
+        assert!(
+            matches!(&a[0], Action::Respond { status, blocks } if status.is_ok() && blocks[0..2] == [0x81, 0x14])
+        );
+        assert!(matches!(
+            a[1],
+            Action::Notify {
+                state: ArState::Idle,
+                reason: Some(AbortReason::ControllerRelease)
+            }
+        ));
+        assert_eq!(ar.state(), ArState::Idle);
+    }
+
+    #[test]
+    fn data_app_ready_rsp_is_ignored() {
+        let (mut ar, now) = to_data();
+        let a = ar.on(
+            Event::AppReadyRsp {
+                status: PnioStatus::OK,
+            },
+            now,
+        );
+        assert!(a.is_empty());
+        assert_eq!(ar.state(), ArState::Data);
+    }
+
+    #[test]
+    fn data_tick_is_noop() {
+        let (mut ar, now) = to_data();
+        let a = ar.on(Event::Tick, now + Duration::from_secs(100));
+        assert!(a.is_empty());
+        assert_eq!(ar.state(), ArState::Data);
     }
 }
