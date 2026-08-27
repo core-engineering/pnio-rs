@@ -78,14 +78,17 @@ fn parse_one(buf: &[u8]) -> Result<(Record, usize), BlockError> {
     let _padding = c.bytes(24)?;
 
     let header_end = BlockHeader::LEN + body.len();
-    if buf.len() < header_end + record_data_length {
-        return Err(BlockError::TooShort {
-            need: header_end + record_data_length,
-            have: buf.len(),
-        });
-    }
-    let data = buf[header_end..header_end + record_data_length].to_vec();
-    let consumed = header_end + record_data_length;
+    let data_end = match header_end.checked_add(record_data_length) {
+        Some(end) if end <= buf.len() => end,
+        _ => {
+            return Err(BlockError::TooShort {
+                need: header_end.saturating_add(record_data_length),
+                have: buf.len(),
+            })
+        }
+    };
+    let data = buf[header_end..data_end].to_vec();
+    let consumed = data_end;
 
     Ok((
         Record {
@@ -178,6 +181,22 @@ mod tests {
         assert_eq!(w.records.len(), 1);
         assert_eq!(w.records[0].data, vec![0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(build_write_res(&w).len(), 64);
+    }
+
+    #[test]
+    fn huge_record_length_is_rejected_not_panic() {
+        // Same hand-built buffer as `single_record_write`, but with
+        // `record_data_length` set to `0xffff_ffff` — must be rejected with a typed
+        // error, not panic via overflow/inverted-range slicing on 32-bit `usize`.
+        let mut b = Vec::new();
+        b.extend_from_slice(&[0x00, 0x08, 0x00, 0x3c, 0x01, 0x00, 0x00, 0x05]);
+        b.extend_from_slice(&[0x11; 16]); // ar_uuid
+        b.extend_from_slice(&[
+            0, 0, 0, 0, 0, 3, 0, 1, 0, 0, 0, 0x7b, 0xff, 0xff, 0xff, 0xff,
+        ]);
+        b.extend_from_slice(&[0; 24]);
+        b.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert!(matches!(WriteReq::parse(&b), Err(CmError::Block(_))));
     }
 
     #[test]
