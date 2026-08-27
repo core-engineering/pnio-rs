@@ -3,11 +3,15 @@
 pub mod block;
 pub mod frame;
 pub mod identify;
+pub mod set;
 
 pub use block::{parse_blocks, write_blocks, DcpBlock};
 pub use frame::{DcpHeader, FrameId, ServiceId, ServiceType, DCP_MULTICAST_MAC};
 pub use identify::{
     build_identify_response, parse_identify_request, DeviceProperties, IdentifyFilter,
+};
+pub use set::{
+    build_set_response, decide_set, parse_set_request, SetBlock, SetBlockError, SetRequest,
 };
 
 use thiserror::Error;
@@ -74,6 +78,25 @@ pub fn handle_dcp_frame(frame: &[u8], cfg: &DeviceConfig) -> Result<Option<Vec<u
             } else {
                 Ok(None)
             }
+        }
+        Some(FrameId::GetSet) => {
+            let (header, blocks) = DcpHeader::parse(&payload[2..])?;
+            if header.service_id != ServiceId::Set || header.service_type != ServiceType::Request {
+                log::debug!(
+                    "ignoring DCP Get/Set-response frame (service_id={:?}, service_type={:?})",
+                    header.service_id,
+                    header.service_type
+                );
+                return Ok(None);
+            }
+            let req = parse_set_request(blocks)?;
+            let results = decide_set(&req, cfg.properties.ip);
+            for (option, suboption, err) in &results {
+                log::info!("DCP Set block ({option}, {suboption}) -> {err:?}");
+            }
+            Ok(Some(build_set_response(
+                eth.src, cfg.mac, header.xid, &results,
+            )))
         }
         _ => Ok(None),
     }
