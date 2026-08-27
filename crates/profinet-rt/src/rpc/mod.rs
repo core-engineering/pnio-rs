@@ -1,11 +1,13 @@
 //! DCE-RPC v4 connectionless (CL) codec used by PROFINET IO (UDP port 34964).
 
 pub mod header;
+pub mod ndr;
 pub mod uuid;
 
 pub use header::{
     Opnum, PacketType, RpcHeader, FLAG1_FRAG, FLAG1_IDEMPOTENT, FLAG1_LAST_FRAG, FLAG1_NO_FACK,
 };
+pub use ndr::{NdrRequest, NdrResponse};
 pub use uuid::{Uuid, PNIO_CONTROLLER_INTERFACE, PNIO_DEVICE_INTERFACE};
 
 use thiserror::Error;
