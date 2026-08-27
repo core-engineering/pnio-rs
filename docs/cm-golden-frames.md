@@ -42,8 +42,12 @@ the other.
   responses carry `drep = 00 00 00` (big-endian) with `flags1 = 0x28` (response,
   fragment, no-fragment-ack — the p-net response flag combination seen throughout).
 - In each response's NDR header, `max_count` **echoes the corresponding request's
-  `args_max`**: Connect 557, Write 344, Control (PrmEnd/ApplicationReady) 32. This is
-  not independently computed by p-net; it is mirrored from the request.
+  `args_max`**: Connect 557, Write 344, Control/PrmEnd 32, Control/ApplicationReady
+  1340. The last is p-net's own request (`appready_req.hex`, device -> CPU,
+  `args_max = 1340`), and the CPU's `appready_res.hex` echoes that same 1340 back —
+  it is not the PrmEnd value; the two Control operations use different `args_max`.
+  This mirroring is not independently computed by the responder; it is copied from
+  the request.
 - p-net answers `MaxAlarmDataLength = 200` (`0x00c8`) in the Connect response's
   AlarmCRBlockRes even though the CPU's AlarmCRBlockReq asked for 256 (`0x0100`).
 - In the Write response (`write_res.hex`), the outer NDR `record_data_length` field is
