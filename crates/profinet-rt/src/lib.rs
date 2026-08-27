@@ -40,6 +40,8 @@ pub mod capture;
 pub mod data;
 pub mod dcp;
 pub mod eth;
+#[cfg(test)]
+pub(crate) mod testutil;
 
 /// Crate version (foundations smoke test).
 pub fn version() -> &'static str {
