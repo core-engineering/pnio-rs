@@ -37,6 +37,7 @@
 //! ```
 
 pub mod capture;
+pub mod cm;
 pub mod data;
 pub mod dcp;
 pub mod eth;
