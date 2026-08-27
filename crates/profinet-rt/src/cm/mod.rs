@@ -226,17 +226,24 @@ impl Cm {
 
         let actions = match Opnum::from_u16(h.opnum) {
             Some(Opnum::Connect) => {
-                // Remember the controller's address now: PrmEnd (later, same AR) needs it
-                // to place the ApplicationReady call, and `tick`'s retries need it with no
-                // request in hand at all.
-                self.controller_addr = Some(SocketAddr::new(from.ip(), PNIO_UDP_PORT));
-                match ConnectReq::parse(blocks) {
+                let was_idle = self.ar.state() == ArState::Idle;
+                let actions = match ConnectReq::parse(blocks) {
                     Ok(req) => self.ar.on(Event::ConnectReq(req), now),
                     Err(e) => respond(error_status(
                         &e,
                         PnioStatus::connect_reject(ConnectBlock::ArBlock, 0xfe),
                     )),
+                };
+                // Remember the controller's address (PrmEnd, later on the same AR, needs
+                // it to place the ApplicationReady call, and `tick`'s retries need it with
+                // no request in hand at all) only when this Connect actually established
+                // the AR. A stray Connect from another host while an AR already exists
+                // (refused with `connect_ar_already_exists`) or a rejected/malformed one
+                // must not redirect the real AR's outgoing calls.
+                if was_idle && self.ar.state() == ArState::Connected {
+                    self.controller_addr = Some(SocketAddr::new(from.ip(), PNIO_UDP_PORT));
                 }
+                actions
             }
             Some(Opnum::Write) => match WriteReq::parse(blocks) {
                 Ok(req) => self.ar.on(Event::WriteReq(req), now),
@@ -473,6 +480,37 @@ mod tests {
         let again = cm.handle_datagram(&pdu("connect_req"), cpu(), now).unwrap();
         assert_eq!(again.send[0].bytes, first.send[0].bytes);
         assert!(again.notify.is_empty());
+    }
+
+    #[test]
+    fn stray_connect_does_not_redirect_app_ready() {
+        let mut cm = cm();
+        let now = Instant::now();
+        let o = cm.handle_datagram(&pdu("connect_req"), cpu(), now).unwrap();
+        assert_eq!(o.notify, vec![(ArState::Connected, None)]);
+
+        // Same Connect request bytes, but from a different host, with a different AR
+        // UUID and seq_num (so it's a distinct RPC call, not a cached-response
+        // retransmit): the AR is already `Connected`, so this must be refused without
+        // touching `controller_addr`.
+        let mut stray = pdu("connect_req");
+        stray[64] = 1; // seq_num (LE low byte): 0 -> 1
+        stray[108..124].copy_from_slice(&[0x11; 16]); // ARBlockReq.ARUUID
+        let stray_from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 16, 2, 77)), 40000);
+        let o = cm.handle_datagram(&stray, stray_from, now).unwrap();
+        let (n, _) =
+            crate::rpc::NdrResponse::parse(&o.send[0].bytes[80..], crate::rpc::Drep::BIG).unwrap();
+        assert_eq!(
+            PnioStatus(n.status),
+            PnioStatus::connect_ar_already_exists()
+        );
+        assert_eq!(cm.state(), ArState::Connected);
+
+        // The real AR's ApplicationReady call (via PrmEnd) must still go to the real
+        // controller, not to the stray host.
+        let o = cm.handle_datagram(&pdu("prmend_req"), cpu(), now).unwrap();
+        assert_eq!(o.send[1].bytes, pdu("appready_req"));
+        assert_eq!(o.send[1].to, cpu_cm());
     }
 
     #[test]
