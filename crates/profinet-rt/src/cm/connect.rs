@@ -130,6 +130,46 @@ impl IocrParams {
 /// Valid PROFINET RT frame ID range for IO cyclic data (IEC 61158-6-10 §4.10.3.1.2.1).
 const FRAME_ID_RANGE: std::ops::RangeInclusive<u16> = 0x8000..=0xBBFF;
 
+/// Validate one IOCR's structure and DataLength against the model: exactly one API
+/// (else reject `(IocrBlock, 15)`, NumberOfAPIs); every IODataObject must fit
+/// `frame_offset + model_len + 1` (payload plus its trailing IOPS byte), and every
+/// IOCS object must fit `frame_offset + 1` (else reject `(IocrBlock, 5)`, DataLength).
+/// `model_len` is the model submodule's `input_len` for the Input CR or `output_len`
+/// for the Output CR (`is_output_cr`). An IODataObject referring to a (slot, subslot)
+/// absent from the model is also rejected here (normally caught by the
+/// ExpectedSubmodule check, but guarded independently since this check looks the
+/// submodule up itself).
+fn check_iocr_data_length(
+    cr: &IocrBlockReq,
+    model: &DeviceModel,
+    is_output_cr: bool,
+) -> Result<(), PnioStatus> {
+    if cr.apis.len() != 1 {
+        return Err(PnioStatus::connect_reject(ConnectBlock::IocrBlock, 15));
+    }
+    let too_small = PnioStatus::connect_reject(ConnectBlock::IocrBlock, 5);
+    let api = &cr.apis[0];
+    for obj in &api.io_data {
+        let sm = model.find(obj.slot, obj.subslot).ok_or(too_small)?;
+        let model_len = if is_output_cr {
+            sm.output_len
+        } else {
+            sm.input_len
+        };
+        let end = obj.frame_offset as u32 + model_len as u32 + 1;
+        if end > cr.data_length as u32 {
+            return Err(too_small);
+        }
+    }
+    for obj in &api.iocs {
+        let end = obj.frame_offset as u32 + 1;
+        if end > cr.data_length as u32 {
+            return Err(too_small);
+        }
+    }
+    Ok(())
+}
+
 /// Validate a Connect request against `model`, extracting the AR parameters on
 /// success. Rejection reasons follow spec §6 (see `PnioStatus::connect_reject`).
 pub fn validate(req: &ConnectReq, model: &DeviceModel) -> Result<ArParams, PnioStatus> {
@@ -154,7 +194,9 @@ pub fn validate(req: &ConnectReq, model: &DeviceModel) -> Result<ArParams, PnioS
             return Err(PnioStatus::connect_reject(ConnectBlock::IocrBlock, 6));
         }
     }
-
+    // Run before `check_iocr_data_length`: a submodule missing from the model is a
+    // more specific diagnosis (ExpectedSubmodule) than the data-length guard's
+    // generic reject for the same missing lookup.
     for block in &req.expected {
         for api in &block.apis {
             for sm in &api.submodules {
@@ -172,6 +214,9 @@ pub fn validate(req: &ConnectReq, model: &DeviceModel) -> Result<ArParams, PnioS
             }
         }
     }
+
+    check_iocr_data_length(input, model, false)?;
+    check_iocr_data_length(output, model, true)?;
 
     if req.alarm_cr.alarm_cr_type != 1 {
         return Err(PnioStatus::connect_reject(ConnectBlock::AlarmCr, 1));
@@ -323,6 +368,37 @@ mod tests {
         assert_eq!(
             validate(&r, &DeviceModel::pnet_sample(DEVICE_MAC)).unwrap_err(),
             PnioStatus::connect_reject(ConnectBlock::ArBlock, 1)
+        );
+    }
+
+    #[test]
+    fn data_length_too_small_is_rejected() {
+        let mut r = req();
+        r.iocrs[0].data_length = 10;
+        assert_eq!(
+            validate(&r, &DeviceModel::pnet_sample(DEVICE_MAC)).unwrap_err(),
+            PnioStatus::connect_reject(ConnectBlock::IocrBlock, 5)
+        );
+    }
+
+    #[test]
+    fn iocr_without_api_is_rejected() {
+        let mut r = req();
+        r.iocrs[0].apis.clear();
+        assert_eq!(
+            validate(&r, &DeviceModel::pnet_sample(DEVICE_MAC)).unwrap_err(),
+            PnioStatus::connect_reject(ConnectBlock::IocrBlock, 15)
+        );
+    }
+
+    #[test]
+    fn iocr_with_two_apis_is_rejected() {
+        let mut r = req();
+        let api = r.iocrs[0].apis[0].clone();
+        r.iocrs[0].apis.push(api);
+        assert_eq!(
+            validate(&r, &DeviceModel::pnet_sample(DEVICE_MAC)).unwrap_err(),
+            PnioStatus::connect_reject(ConnectBlock::IocrBlock, 15)
         );
     }
 
