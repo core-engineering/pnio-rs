@@ -4,6 +4,7 @@
 
 pub mod block;
 pub mod connect;
+pub mod control;
 pub mod model;
 pub mod status;
 pub mod write;
@@ -13,6 +14,7 @@ pub use block::{
     ExpectedSubmodule, ExpectedSubmoduleBlockReq, IocrApi, IocrBlockReq, IocrObject,
 };
 pub use connect::{build_connect_res, validate, ArParams, ConnectReq, IocrParams};
+pub use control::{app_ready_req, cmd, prm_end_done, release_done, ControlBlock};
 pub use model::{DeviceModel, SlotModel, SubmoduleModel};
 pub use status::{ConnectBlock, PnioStatus};
 pub use write::{build_write_res, Record, WriteReq, INDEX_MULTIPLE_WRITE};
