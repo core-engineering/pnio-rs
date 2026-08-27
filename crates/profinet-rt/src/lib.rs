@@ -40,6 +40,7 @@ pub mod capture;
 pub mod data;
 pub mod dcp;
 pub mod eth;
+pub mod rpc;
 #[cfg(test)]
 pub(crate) mod testutil;
 
