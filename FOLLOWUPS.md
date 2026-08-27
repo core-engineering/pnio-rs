@@ -21,12 +21,12 @@ Non-blocking findings for Plan 1, to be integrated into the briefs of the releva
   AF_PACKET backend — cross-module consistency done.
 
 ## For Plan 6 (`config` / GSDML / typed API)
-- **Validate BOOL bit ordering (LSB-first)**: `data::get_bit`/`set_bit` pack bit `i` →
-  byte `i/8`, mask `1 << (i % 8)` (Siemens convention `byte.0` = LSB). Choice derived from
-  TIA addressing but **not verified on the wire**. Before the first real cyclic exchange,
-  cross-check against a **S7-1500 capture** and the **example GSDML** (16 REAL + 32 BOOL)
-  that the declaration→(byte, bit) mapping AND the bit ordering match. Add a test vector
-  derived from the capture.
+- ✅ **RESOLVED (bench 2026-08-27)** — **BOOL bit ordering (LSB-first) verified on the wire**
+  with a real S7-1500 (1515-2 PN FW V2.9.4) ↔ p-net device: `%Q0.0 := TRUE` alone → output
+  byte `0x01` in the RTC1 frame (`captures/q-bits-2026-08-27-165102.pcapng`); device input
+  byte `0x80` (Button1) → `%I0.7 = TRUE` in TIA (`captures/io-bits-2026-08-27-164448.pcapng`).
+  `data::get_bit`/`set_bit` (`1 << (i % 8)`) is correct. Still to do in Plan 6: add a test
+  vector from the capture, and check the declaration→(byte, bit) mapping for our own GSDML.
 - **`data::Value` pending use**: the `Value` enum is a forward declaration (no
   constructor/consumer yet). Plan 6 must either wire it up (typed dispatch
   `encode(Value)->bytes` / `decode(FieldType,&[u8])->Value`) or remove it (YAGNI).

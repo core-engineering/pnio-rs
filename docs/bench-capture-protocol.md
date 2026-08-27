@@ -36,15 +36,15 @@ Send clock: **1 ms**. Example mapping: **16 REAL + 32 BOOL per direction** (= 68
 
 ## Capture
 
-- **Capture filter** (npcap/libpcap):
-  ```
-  ether proto 0x8892 or vlan or udp port 34964
-  ```
+- **Capture filter**: **none** (capture everything, filter at analysis). ⚠️ Do **not** use
+  `ether proto 0x8892 or vlan or udp port 34964`: in libpcap the `vlan` keyword shifts the
+  offsets of every primitive after it, so `udp port 34964` then only matches *tagged* UDP and
+  the untagged DCE-RPC Connect is silently dropped (bitten on 2026-08-27).
 - **Wireshark display filter**: `pn_dcp or pn_rt or pn_io or udp.port == 34964`
 - Wireshark has a native PROFINET dissector → used as oracle to validate our decoding.
 - Edge equivalent (later, once the Rust stack is running):
   ```
-  sudo tcpdump -i eth0 -w capture.pcap 'ether proto 0x8892 or vlan or udp port 34964'
+  sudo tcpdump -i eno2 -s 0 -w capture.pcapng      # no filter, see above
   ```
 
 ## Scenario (1 .pcapng per phase)

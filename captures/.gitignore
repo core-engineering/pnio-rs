@@ -3,3 +3,5 @@
 *.pcapng
 *.pcap
 !.gitignore
+# GSDML of the p-net sample app (rt-labs, GPLv3 repo): test-bench input only, not ours to redistribute.
+GSDML-*.xml
