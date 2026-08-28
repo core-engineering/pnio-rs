@@ -351,8 +351,9 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
                     }
 
                     if engine.check_watchdog(now) == WatchdogVerdict::Expired {
-                        // The controller stopped providing: our IOCS bytes must go BAD
-                        // until it talks again.
+                        // The controller stopped providing: the application's view of
+                        // output validity goes BAD until it talks again (our IOCS bytes
+                        // are unaffected — they stay GOOD, see RtEngine::on_tick).
                         engine.mark_outputs_stale();
                         shared.push_event(RtEvent::WatchdogExpired);
                         let validity = Validity {

@@ -54,6 +54,7 @@ Out (tracked in FOLLOWUPS at close-out):
 | Missed ticks | One frame per wake-up, cycle counter advanced by `expirations × step` | No bursts; the CPU sees a jump, never duplicates |
 | Watchdog policy | Freeze data + `Validity::Stale` + `Ar` abort (`RtWatchdog`) | Spec §7; the CPU re-establishes the AR |
 | CPU in STOP (`0x25`) | Data still copied, `Validity::Stopped`, IOCS GOOD | AR stays alive (observed on the bench) |
+| IOCS | always GOOD for plugged submodules | bench 2026-08-28: mirroring the CPU's IOPS deadlocked (CPU sends 0x60 until acknowledged) |
 | Data status we emit | `0x35` (Primary, Valid, Run, OK) | What the CPU emits; p-net's `0x36` documented only |
 | Dependencies | none new (`libc` timerfd/eventfd/sched) | Keep the crate minimal |
 
@@ -125,9 +126,10 @@ DI data 3, IOPS 4; DO IOCS 5; DIO 6/7/8; Echo 9-16/17/18; mirrored on the output
 
 `RtEngine::new(layout, our_mac, cpu_mac)` preallocates the TX frame and the RX C-SDU buffers.
 - **PPM** `on_tick(&mut self, now, inputs: &[u8]) -> &[u8]`: writes the input data at `data_off`,
-  IOPS GOOD per object, IOCS per output submodule = GOOD if its last received IOPS was GOOD else
-  BAD, `cycle_counter += cycle_step × expirations`, data status `0x35` (or with ProblemIndicator
-  cleared when armed — reserved for Plan 5), transfer status 0; returns the ready frame slice.
+  IOPS GOOD per object, IOCS GOOD for every plugged output submodule (our own consumer status,
+  independent of the controller's IOPS), `cycle_counter += cycle_step × expirations`, data status
+  `0x35` (or with ProblemIndicator cleared when armed — reserved for Plan 5), transfer status 0;
+  returns the ready frame slice.
 - **CPM** `on_frame(&mut self, frame: &[u8], now) -> RxVerdict`: `Ignored` if the FrameID is not
   `output_cr.frame_id` or the source MAC is not the CPU's; `Dropped(reason)` on transfer status ≠ 0
   or short C-SDU; `DataValid == 0` → accepted for the watchdog, data not copied; else copy the

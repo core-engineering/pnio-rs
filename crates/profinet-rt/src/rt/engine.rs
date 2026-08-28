@@ -146,9 +146,6 @@ pub struct RtEngine {
     /// Last IOCS-good bit per `output_cr.iocs[j]` — the controller's echoed consumer
     /// status for each of our input submodules — refreshed on every accepted+valid frame.
     rx_iocs_good: Vec<bool>,
-    /// For each `input_cr.iocs[j]`, the index into `output_cr.objects` (and so into
-    /// `rx_iops_good`) of the matching `(slot, subslot)`, precomputed in `new`.
-    iocs_source: Vec<Option<usize>>,
 
     cycle_counter: u16,
     last_rx: Option<Instant>,
@@ -171,19 +168,6 @@ impl RtEngine {
         // output CR on the wire — is "per input object" in meaning.
         let rx_iocs_good = vec![false; layout.output_cr.iocs.len()];
 
-        let iocs_source = layout
-            .input_cr
-            .iocs
-            .iter()
-            .map(|cs| {
-                layout
-                    .output_cr
-                    .objects
-                    .iter()
-                    .position(|o| o.slot == cs.slot && o.subslot == cs.subslot)
-            })
-            .collect();
-
         RtEngine {
             layout,
             our_mac,
@@ -194,7 +178,6 @@ impl RtEngine {
             rx_csdu,
             rx_iops_good,
             rx_iocs_good,
-            iocs_source,
             cycle_counter: 0,
             last_rx: None,
             last_rx_cycle_counter: None,
@@ -206,8 +189,10 @@ impl RtEngine {
 
     /// Produce our provider frame for this tick. `inputs` is the full input-CR C-SDU
     /// image (`input_cr.data_length` bytes); the engine copies each object's slice into
-    /// the TX C-SDU, stamps IOPS GOOD everywhere, and stamps IOCS from the last IOPS
-    /// received for the matching output object. Advances the cycle counter by
+    /// the TX C-SDU and stamps IOPS GOOD everywhere. IOCS = our consumer status for the
+    /// controller's outputs: GOOD for every plugged submodule; independent of the
+    /// received IOPS (the S7-1500 sends IOPS BAD until the device acknowledges
+    /// consumption — mirroring would deadlock). Advances the cycle counter by
     /// `cycle_step * expirations` before writing it. Allocation-free: writes into the
     /// preallocated `self.tx` and returns a slice of it.
     pub fn on_tick(&mut self, expirations: u32, inputs: &[u8]) -> &[u8] {
@@ -218,11 +203,8 @@ impl RtEngine {
                 .copy_from_slice(&inputs[obj.data_off..obj.data_off + obj.data_len]);
             self.tx_csdu[obj.iops_off] = IOXS_GOOD;
         }
-        for (j, cs) in cr.iocs.iter().enumerate() {
-            let good = self.iocs_source[j]
-                .map(|i| self.rx_iops_good[i])
-                .unwrap_or(false);
-            self.tx_csdu[cs.iocs_off] = if good { IOXS_GOOD } else { IOXS_BAD };
+        for cs in &cr.iocs {
+            self.tx_csdu[cs.iocs_off] = IOXS_GOOD;
         }
 
         self.cycle_counter = self
@@ -342,9 +324,11 @@ impl RtEngine {
     /// Force every remembered output IOPS to BAD.
     ///
     /// Called by the runner when the consumer watchdog expires: the controller has
-    /// stopped providing, so the IOCS bytes we stamp on our own frames (built from
-    /// these bits in [`RtEngine::on_tick`]) must go BAD until it talks again — an
-    /// accepted frame refreshes them.
+    /// stopped providing, so the application's view of output validity
+    /// ([`RtEngine::rx_iops_good`]) must go BAD until it talks again — an accepted
+    /// frame refreshes them. Does **not** affect the IOCS bytes we send: those are our
+    /// own consumer status, always GOOD for a plugged submodule (see `on_tick`),
+    /// independent of this.
     pub fn mark_outputs_stale(&mut self) {
         for good in &mut self.rx_iops_good {
             *good = false;
@@ -431,8 +415,6 @@ mod tests {
         let mut inputs = vec![0u8; 40];
         inputs[3] = 0x2c;
         inputs[6] = 0x2d;
-        // p-net had received the CPU's IOPS GOOD for every output object -> feed one CPU frame first
-        e.on_frame(&golden_rt("rtc_cpu_8001"), Instant::now());
         let out = e.on_tick(1, &inputs).to_vec();
         let g = golden_rt("rtc_dev_8000");
         assert_eq!(&out[..60], &g[..60]); // header + C-SDU identical (IOPS/IOCS all GOOD)
@@ -443,24 +425,36 @@ mod tests {
     }
 
     #[test]
-    fn iocs_reflects_received_iops() {
+    fn iocs_is_always_good_for_plugged_outputs() {
         let mut e = engine();
         let inputs = vec![0u8; 40];
+
+        // no CPU frame yet -> IOCS GOOD for the three output objects at [5], [8], [18]
+        // (it's our own consumer status, not a mirror of the controller's IOPS)
         let out = e.on_tick(1, &inputs).to_vec();
-        // no CPU frame yet -> IOCS BAD for the three output objects at [5], [8], [18]
         assert_eq!(
             (
                 out[RT_CSDU_OFF + 5],
                 out[RT_CSDU_OFF + 8],
                 out[RT_CSDU_OFF + 18]
             ),
-            (IOXS_BAD, IOXS_BAD, IOXS_BAD)
+            (IOXS_GOOD, IOXS_GOOD, IOXS_GOOD)
         );
         // IOPS of our own objects always GOOD: [0],[1],[2],[4],[7],[17]
         for off in [0, 1, 2, 4, 7, 17] {
             assert_eq!(out[RT_CSDU_OFF + off], IOXS_GOOD, "iops at {off}");
         }
-        e.on_frame(&golden_rt("rtc_cpu_8001"), Instant::now());
+
+        // CPU frame with IOPS BAD (0x60, "detected by controller") on every output ->
+        // still IOCS GOOD in our produced frame, only the application-facing
+        // rx_iops_good() view goes bad.
+        let mut cpu_frame = golden_rt("rtc_cpu_8001");
+        for off in [5, 8, 18] {
+            cpu_frame[RT_CSDU_OFF + off] = 0x60;
+        }
+        e.on_frame(&cpu_frame, Instant::now());
+        assert!(e.rx_iops_good().iter().all(|g| !*g));
+
         let out = e.on_tick(1, &inputs).to_vec();
         assert_eq!(
             (
