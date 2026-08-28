@@ -562,9 +562,12 @@ fn new_timerfd(period: Duration) -> Result<OwnedFd, RtError> {
 }
 
 fn to_timespec(d: Duration) -> libc::timespec {
+    // Cast to the field's inferred type rather than naming `libc::time_t` (deprecated
+    // on musl, which will widen it to 64-bit in a future libc release — `as _` tracks
+    // that change on both glibc and musl instead of pinning the pre-change alias).
     libc::timespec {
-        tv_sec: d.as_secs() as libc::time_t,
-        tv_nsec: d.subsec_nanos() as libc::c_long,
+        tv_sec: d.as_secs() as _,
+        tv_nsec: d.subsec_nanos() as _,
     }
 }
 
@@ -622,9 +625,11 @@ fn drain_eventfd(fd: RawFd) {
 
 /// Move the calling thread to `SCHED_FIFO` at `priority` (needs `CAP_SYS_NICE`).
 fn set_fifo_priority(priority: u8) -> std::io::Result<()> {
-    let param = libc::sched_param {
-        sched_priority: priority as libc::c_int,
-    };
+    // Safety: `sched_param` is a POD struct for which an all-zero bit pattern is
+    // valid; only `sched_priority` is meaningful to `sched_setscheduler` (musl
+    // carries extra reserved/deprecated fields glibc doesn't, both fine left zeroed).
+    let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
+    param.sched_priority = priority as libc::c_int;
     // Safety: `param` is a fully-initialized `sched_param` live for the call; pid 0
     // means the calling thread.
     let ret = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) };
