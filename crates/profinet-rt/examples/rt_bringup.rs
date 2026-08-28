@@ -124,12 +124,21 @@ fn main() {
     let app_stop = stop.clone();
     let app = std::thread::spawn(move || {
         let mut last_log = std::time::Instant::now();
+        let mut last_err_log = std::time::Instant::now() - Duration::from_secs(1);
         let stats_every = Duration::from_secs(a.stats_every);
         while !app_stop.load(Ordering::Relaxed) {
-            match run_app_cycle(&image) {
-                Ok(()) => {}
-                Err(ImageError::UnknownSubmodule { .. }) => {} // no AR yet: retry
-                Err(e) => log::warn!("application cycle error: {e}"),
+            for r in run_app_cycle(&image) {
+                match r {
+                    Ok(()) | Err(ImageError::UnknownSubmodule { .. }) => {} // no AR yet: retry
+                    Err(e) => {
+                        // Rate-limited: the app cycle runs every 10ms, logging every miss
+                        // would flood the log for a submodule that stays unavailable.
+                        if last_err_log.elapsed() >= Duration::from_secs(1) {
+                            log::warn!("application cycle error: {e}");
+                            last_err_log = std::time::Instant::now();
+                        }
+                    }
+                }
             }
             if last_log.elapsed() >= stats_every {
                 log::info!(
@@ -159,14 +168,18 @@ fn main() {
 }
 
 /// One application cycle: mirror QB0 -> IB0, QB1 -> IB1, echo the Echo module's outputs
-/// back into its inputs. Returns the first error hit, if any (all three reads/writes are
-/// attempted regardless, since a submodule going away doesn't invalidate the others).
-fn run_app_cycle(image: &IoImage) -> Result<(), ImageError> {
-    let qb0 = image.read_outputs(2, 1, |b, _| b[0]);
-    let qb1 = image.read_outputs(3, 1, |b, _| b[0]);
-    let echo = image.read_outputs(4, 1, |b, _| b.to_vec());
-    image.write_inputs(1, 1, &[qb0?])?;
-    image.write_inputs(3, 1, &[qb1?])?;
-    image.write_inputs(4, 1, &echo?)?;
-    Ok(())
+/// back into its inputs. Each mirror is attempted independently and reports its own
+/// result, so one submodule going away (e.g. a slot pulled) never skips the others.
+fn run_app_cycle(image: &IoImage) -> [Result<(), ImageError>; 3] {
+    [
+        image
+            .read_outputs(2, 1, |b, _| b[0])
+            .and_then(|v| image.write_inputs(1, 1, &[v])),
+        image
+            .read_outputs(3, 1, |b, _| b[0])
+            .and_then(|v| image.write_inputs(3, 1, &[v])),
+        image
+            .read_outputs(4, 1, |b, _| b.to_vec())
+            .and_then(|v| image.write_inputs(4, 1, &v)),
+    ]
 }
