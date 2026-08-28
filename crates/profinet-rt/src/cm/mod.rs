@@ -235,15 +235,14 @@ impl Cm {
                 };
                 // Remember the controller's address (PrmEnd, later on the same AR, needs
                 // it to place the ApplicationReady call, and `tick`'s retries need it with
-                // no request in hand at all), and reset the outgoing call-sequence
-                // bookkeeping, whenever this Connect actually (re-)established the AR:
-                // the nominal Idle -> Connected path, or a controller-reconnect takeover
-                // (`Ar` aborts the stale AR and re-establishes a new one within the same
-                // `on()` call, so both `Notify`s appear in `actions`). A stray Connect
-                // from another host while an AR already exists (refused with
-                // `connect_ar_already_exists`) or a rejected/malformed one produces no
-                // `Notify { state: Connected, .. }` and must not redirect the real AR's
-                // outgoing calls.
+                // no request in hand at all), and drop any stale outstanding-call seq_num,
+                // whenever this Connect actually (re-)established the AR: the nominal
+                // Idle -> Connected path, or a controller-reconnect takeover (`Ar` aborts
+                // the stale AR and re-establishes a new one within the same `on()` call, so
+                // both `Notify`s appear in `actions`). A stray Connect from another host
+                // while an AR already exists (refused with `connect_ar_already_exists`) or
+                // a rejected/malformed one produces no `Notify { state: Connected, .. }`
+                // and must not redirect the real AR's outgoing calls.
                 if actions.iter().any(|a| {
                     matches!(
                         a,
@@ -254,7 +253,13 @@ impl Cm {
                     )
                 }) {
                     self.controller_addr = Some(SocketAddr::new(from.ip(), PNIO_UDP_PORT));
-                    self.call_seq = 0;
+                    // `call_seq` is NOT reset here: it's scoped to `activity_seed`, which
+                    // is fixed for the device's lifetime, not per-AR. DCE-RPC CL duplicate
+                    // detection is per `(activity, seq_num)` with a monotonically
+                    // increasing seq_num — the same rule our own response cache relies on
+                    // — so restarting it at 0 on a reconnect would re-send `(activity_seed,
+                    // 0)`, a pair the controller already completed for the previous AR, and
+                    // risk being discarded as a duplicate.
                     self.current_call_seq = None;
                 }
                 actions
@@ -641,14 +646,23 @@ mod tests {
         // to the controller address captured by the takeover. The reconnect's source
         // IP matches the original controller's, so the address itself is unchanged
         // here — but this exercises the takeover code path (not the stale
-        // `was_idle` guard it replaces) that sets `controller_addr` and resets the
-        // call-sequence bookkeeping, which is why the resulting call is still
-        // byte-identical to the golden ApplicationReady request.
+        // `was_idle` guard it replaces) that sets `controller_addr`.
         let mut prmend = pdu("prmend_req");
         prmend[64] = 4; // seq_num (LE low byte): 2 -> 4, a new RPC call
         let o = cm.handle_datagram(&prmend, cpu(), now).unwrap();
-        assert_eq!(o.send[1].bytes, pdu("appready_req"));
         assert_eq!(o.send[1].to, cpu_cm());
+        // `call_seq` is scoped to the device's fixed `activity_seed`, not to the AR,
+        // so it must keep counting up across the reconnect rather than restarting at
+        // 0 (which would resend the RPC-CL pair `(activity_seed, 0)` the controller
+        // already completed for the first AR). The call is therefore identical to
+        // the golden ApplicationReady request everywhere except `seq_num`
+        // (bytes [64..68], big-endian on our own outgoing calls), which is 1, not 0.
+        assert_eq!(o.send[1].bytes[..64], pdu("appready_req")[..64]);
+        assert_eq!(o.send[1].bytes[68..], pdu("appready_req")[68..]);
+        assert_eq!(
+            u32::from_be_bytes(o.send[1].bytes[64..68].try_into().unwrap()),
+            1
+        );
     }
 
     #[test]
