@@ -1,0 +1,12 @@
+[Unit]
+Description=profinet-rt edge tuning (isolated RT core, NIC IRQ affinity)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/maintenance/bench/edge-rt-tune.sh
+
+[Install]
+WantedBy=multi-user.target
