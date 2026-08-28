@@ -223,7 +223,11 @@ impl RtRunner {
         cfg: RtConfig,
         transport: T,
     ) -> Result<RtHandle, RtError> {
-        let timer = new_timerfd(cfg.layout.input_cr.period())?;
+        // Created here, unarmed, so a `timerfd_create` failure is an early
+        // `RtError` in the *calling* thread; arming happens in `run_loop`, after
+        // the RT thread's own setup, so the timer's first period starts only once
+        // the thread is actually ready to service it (see `arm_timerfd`).
+        let timer = new_timerfd()?;
         let shared = Arc::new(RtShared {
             stop: AtomicBool::new(false),
             running: AtomicBool::new(true),
@@ -255,6 +259,58 @@ enum Pending {
     Data(Validity),
     /// Validity only, from a watchdog verdict.
     Validity(Validity),
+}
+
+/// Ideal tick grid anchored on the first wake-up: lateness = now − (start + period × n).
+///
+/// Pure: it owns no clock of its own and does not call `Instant::now()` — the caller
+/// hands it `now` from each timer read.
+struct TickGrid {
+    period: Duration,
+    start: Option<Instant>,
+    ticks: u64,
+}
+
+impl TickGrid {
+    fn new(period: Duration) -> Self {
+        Self {
+            period,
+            start: None,
+            ticks: 0,
+        }
+    }
+
+    /// Account for one timer read of `expirations` ticks at `now`; returns the
+    /// lateness of this wake against the ideal grid, in nanoseconds. The first read
+    /// anchors the grid (lateness 0) and does not count its extra expirations —
+    /// they are the setup time between arming the timer and the first read, not
+    /// missed cycles on the wire.
+    fn on_read(&mut self, now: Instant, expirations: u64) -> u64 {
+        match self.start {
+            None => {
+                self.start = Some(now);
+                self.ticks = 1;
+                0
+            }
+            Some(start) => {
+                self.ticks = self.ticks.saturating_add(expirations);
+                let offset = Duration::from_nanos(
+                    (self.period.as_nanos() as u64).saturating_mul(self.ticks.saturating_sub(1)),
+                );
+                match start.checked_add(offset) {
+                    Some(expected) => now.saturating_duration_since(expected).as_nanos() as u64,
+                    // Only reachable after ~584 years of continuous uptime at 1 ms
+                    // resolution; not worth panicking the RT thread over.
+                    None => 0,
+                }
+            }
+        }
+    }
+
+    /// Total ticks since the grid was anchored, used for `Validity.cycle`.
+    fn ticks(&self) -> u64 {
+        self.ticks
+    }
 }
 
 /// The RT thread body. Sets up scheduling, then loops until `stop` is requested or
@@ -312,12 +368,22 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
     };
     let mut ready = [false; 3];
 
-    let mut ticks: u64 = 0;
-    let mut first_tick: Option<Instant> = None;
+    let mut grid = TickGrid::new(period);
     let mut pending: Option<Pending> = None;
     // Consecutive iterations with neither a tick nor a frame processed; see
     // [`MAX_NO_PROGRESS_ITERATIONS`].
     let mut no_progress: u32 = 0;
+
+    // Arm the cycle timer only now, after the setup above (affinity, SCHED_FIFO,
+    // mlockall, stack pre-fault) is done and immediately before the loop starts:
+    // arming any earlier risks the first `read_timer` reporting several
+    // expirations that are really just this setup's own duration, which
+    // `RtEngine::on_tick` would otherwise count as missed ticks that never
+    // happened on the wire (see `TickGrid` and `new_timerfd`/`arm_timerfd`).
+    if let Err(e) = arm_timerfd(timer.as_raw_fd(), period) {
+        shared.push_event(RtEvent::SocketError(format!("timerfd arm: {e}")));
+        return;
+    }
 
     while !shared.stop.load(Ordering::Acquire) {
         if let Err(e) = poll_readable_into(&fds[..nfds], &mut ready[..nfds], None) {
@@ -345,17 +411,14 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
                     ticked = true;
                     progressed = true;
                     let now = Instant::now();
-                    ticks = ticks.saturating_add(expirations);
-
-                    // Lateness against the ideal grid anchored on the first tick.
-                    let start = *first_tick.get_or_insert(now);
-                    let offset = Duration::from_nanos(
-                        (period.as_nanos() as u64).saturating_mul(ticks.saturating_sub(1)),
-                    );
-                    if let Some(expected) = start.checked_add(offset) {
-                        let lateness = now.saturating_duration_since(expected).as_nanos() as u64;
-                        stats.tick_lateness.record(lateness);
-                    }
+                    // The very first genuine tick anchors `TickGrid`, so the engine
+                    // must not see its raw `expirations` either: any extra count
+                    // there is the same setup time the grid itself discards, not
+                    // missed cycles on the wire.
+                    let is_first_read = grid.ticks() == 0;
+                    let lateness = grid.on_read(now, expirations);
+                    stats.tick_lateness.record(lateness);
+                    let ticks = grid.ticks();
 
                     if let Some(p) = pending.take() {
                         retry_pending(p, &engine, &image, &stats, &mut pending);
@@ -385,8 +448,14 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
                     if !image.rt_snapshot_inputs(&mut snapshot) {
                         stats.input_snapshot_reused.fetch_add(1, Ordering::Relaxed);
                     }
-                    let expirations = u32::try_from(expirations).unwrap_or(u32::MAX);
-                    let frame = engine.on_tick(expirations, &snapshot);
+                    // For the first read, pass 1 regardless of the raw expiration
+                    // count: see the comment on `is_first_read` above.
+                    let engine_expirations = if is_first_read {
+                        1
+                    } else {
+                        u32::try_from(expirations).unwrap_or(u32::MAX)
+                    };
+                    let frame = engine.on_tick(engine_expirations, &snapshot);
                     if let Err(e) = transport.send(frame) {
                         shared.push_event(RtEvent::SocketError(format!("send: {e}")));
                         break;
@@ -408,7 +477,7 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
                 &mut engine,
                 &image,
                 &stats,
-                ticks,
+                grid.ticks(),
                 &mut pending,
                 shared,
                 &mut drained_frame,
@@ -554,13 +623,11 @@ fn retry_pending(
     }
 }
 
-/// A `CLOCK_MONOTONIC` timerfd armed to fire every `period`.
-fn new_timerfd(period: Duration) -> Result<OwnedFd, RtError> {
-    if period.is_zero() {
-        // An all-zero `it_value` disarms the timer instead of firing: refuse it here
-        // rather than block forever in the loop.
-        return Err(RtError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
-    }
+/// A `CLOCK_MONOTONIC` timerfd, created but left unarmed: arming it is
+/// [`arm_timerfd`]'s job, called once the RT thread's own setup (affinity,
+/// `SCHED_FIFO`, `mlockall`, stack pre-fault) is done, so the timer's first period
+/// starts only once the thread is actually ready to service it.
+fn new_timerfd() -> Result<OwnedFd, RtError> {
     // Safety: `timerfd_create(2)` with valid constant arguments; the returned fd is
     // immediately wrapped in an `OwnedFd`, which closes it on drop.
     let raw = unsafe {
@@ -574,19 +641,27 @@ fn new_timerfd(period: Duration) -> Result<OwnedFd, RtError> {
     }
     // Safety: `raw` was just returned by a successful `timerfd_create(2)` and is not
     // owned anywhere else.
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
 
+/// Arms `fd` to fire every `period`, starting one `period` from now.
+fn arm_timerfd(fd: RawFd, period: Duration) -> Result<(), RtError> {
+    if period.is_zero() {
+        // An all-zero `it_value` disarms the timer instead of firing: refuse it here
+        // rather than block forever in the loop.
+        return Err(RtError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+    }
     let spec = libc::itimerspec {
         it_interval: to_timespec(period),
         it_value: to_timespec(period),
     };
     // Safety: `fd` is a valid timerfd and `spec` a fully-initialized `itimerspec`
     // live for the call; the old-value pointer is allowed to be null.
-    let ret = unsafe { libc::timerfd_settime(fd.as_raw_fd(), 0, &spec, ptr::null_mut()) };
+    let ret = unsafe { libc::timerfd_settime(fd, 0, &spec, ptr::null_mut()) };
     if ret < 0 {
         return Err(RtError::Io(std::io::Error::last_os_error()));
     }
-    Ok(fd)
+    Ok(())
 }
 
 fn to_timespec(d: Duration) -> libc::timespec {
@@ -692,6 +767,40 @@ mod tests {
     }
 
     #[test]
+    fn tick_grid_anchors_on_first_read_and_does_not_count_its_setup_expirations() {
+        let period = Duration::from_millis(1);
+        let mut grid = TickGrid::new(period);
+        let t0 = Instant::now();
+
+        // The first read anchors the grid: lateness is always 0, and only 1 tick
+        // is counted no matter how many expirations the timerfd reports (those
+        // extra ones are the RT thread's own setup time, not missed cycles).
+        assert_eq!(grid.on_read(t0, 3), 0);
+        assert_eq!(grid.ticks(), 1);
+
+        // Exactly one period later, on time: still 0.
+        assert_eq!(grid.on_read(t0 + period, 1), 0);
+        assert_eq!(grid.ticks(), 2);
+
+        // One period after that tick's own ideal instant, plus 250 us of jitter.
+        let late = t0 + 2 * period + Duration::from_micros(250);
+        assert_eq!(grid.on_read(late, 1), 250_000);
+        assert_eq!(grid.ticks(), 3);
+
+        // Two periods after *this* tick's ideal instant (t0 + 2*period), plus
+        // 10 us, and reporting 2 expirations (one missed tick in between).
+        let later = t0 + 4 * period + Duration::from_micros(10);
+        assert_eq!(grid.on_read(later, 2), 10_000);
+        assert_eq!(grid.ticks(), 5);
+
+        // A wake earlier than the ideal grid (clock jitter): clamped to 0, never
+        // a panic or an underflow.
+        let early = t0 + 5 * period - Duration::from_millis(1);
+        assert_eq!(grid.on_read(early, 1), 0);
+        assert_eq!(grid.ticks(), 6);
+    }
+
+    #[test]
     fn runner_ticks_sends_and_consumes_with_a_mock_transport() {
         let image = Arc::new(IoImage::new(&layout()));
         let stats = Arc::new(RtStats::default());
@@ -721,6 +830,10 @@ mod tests {
         assert!(stats.snapshot().tx >= 8);
         assert_eq!(stats.snapshot().rx_accepted, 1);
         assert_eq!(stats.snapshot().watchdog_expirations, 1);
+        // The first timer read must never be reported as missed ticks: the timer
+        // is armed only after thread setup, and the engine sees `1` expiration
+        // for that first read regardless of what the timerfd itself reports.
+        assert_eq!(stats.snapshot().missed_ticks, 0);
         assert_eq!(stats.cycle_work.count(), stats.snapshot().tx);
         assert_eq!(stats.tick_lateness.count(), stats.snapshot().tx);
         assert_eq!(stats.rx_interval.count(), 0); // one frame: no interval yet
