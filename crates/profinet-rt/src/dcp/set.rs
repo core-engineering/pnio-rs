@@ -6,6 +6,7 @@
 
 use crate::dcp::block::{blocks_encoded_len, parse_blocks, write_blocks, DcpBlock};
 use crate::dcp::frame::{DcpHeader, FrameId, ServiceId, ServiceType};
+use crate::dcp::identify::DeviceProperties;
 use crate::dcp::DcpError;
 use crate::eth::{EthHeader, MacAddr, ETHERTYPE_PROFINET};
 
@@ -76,14 +77,22 @@ pub fn parse_set_request(block_bytes: &[u8]) -> Result<SetRequest, DcpError> {
 }
 
 /// Decide the outcome of each block in a Set request against the device's current
-/// IP. The interface is **never** modified: an `IpSuite` block is only ever `Ok`
-/// when it already matches `current_ip`; any other requested IP is refused with
-/// `SetNotPossible`. Unsupported options are refused with `SuboptionNotSupported`.
-pub fn decide_set(req: &SetRequest, current_ip: [u8; 4]) -> Vec<(u8, u8, SetBlockError)> {
+/// IP suite. The interface is **never** modified: `Set Ok` means the whole requested
+/// suite (ip, subnet **and** gateway) already equals the configured one; any
+/// difference in any of the three is refused with `SetNotPossible`. Unsupported
+/// options are refused with `SuboptionNotSupported`.
+pub fn decide_set(req: &SetRequest, current: &DeviceProperties) -> Vec<(u8, u8, SetBlockError)> {
     req.blocks
         .iter()
         .map(|b| match b {
-            SetBlock::IpSuite { ip, .. } if *ip == current_ip => (1, 2, SetBlockError::Ok),
+            SetBlock::IpSuite {
+                ip,
+                subnet,
+                gateway,
+                ..
+            } if *ip == current.ip && *subnet == current.subnet && *gateway == current.gateway => {
+                (1, 2, SetBlockError::Ok)
+            }
             SetBlock::IpSuite { .. } => (1, 2, SetBlockError::SetNotPossible),
             SetBlock::Other { option, suboption } => {
                 (*option, *suboption, SetBlockError::SuboptionNotSupported)
@@ -140,6 +149,10 @@ mod tests {
     use crate::testutil::{golden, VLAN_PAYLOAD_OFF};
 
     fn cfg(ip: [u8; 4]) -> DeviceConfig {
+        cfg_full(ip, [255, 255, 255, 0], ip)
+    }
+
+    fn cfg_full(ip: [u8; 4], subnet: [u8; 4], gateway: [u8; 4]) -> DeviceConfig {
         DeviceConfig {
             mac: MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]),
             properties: DeviceProperties {
@@ -151,8 +164,8 @@ mod tests {
                 device_instance: 1,
                 device_options: vec![1, 2, 2, 2, 2, 3],
                 ip,
-                subnet: [255, 255, 255, 0],
-                gateway: ip,
+                subnet,
+                gateway,
                 ip_block_info: 1,
             },
         }
@@ -204,9 +217,31 @@ mod tests {
             }],
         };
         assert_eq!(
-            decide_set(&req, [1, 2, 3, 4]),
+            decide_set(&req, &cfg([1, 2, 3, 4]).properties),
             vec![(2, 2, SetBlockError::SuboptionNotSupported)]
         );
+    }
+
+    #[test]
+    fn matching_ip_but_other_subnet_is_refused() {
+        let resp = handle_dcp_frame(
+            &golden("dcp_set_req"),
+            &cfg_full([172, 16, 2, 10], [255, 255, 0, 0], [172, 16, 2, 10]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(resp[32], 0x05);
+    }
+
+    #[test]
+    fn matching_ip_but_other_gateway_is_refused() {
+        let resp = handle_dcp_frame(
+            &golden("dcp_set_req"),
+            &cfg_full([172, 16, 2, 10], [255, 255, 255, 0], [172, 16, 2, 1]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(resp[32], 0x05);
     }
 
     #[test]

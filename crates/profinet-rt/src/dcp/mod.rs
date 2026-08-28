@@ -90,7 +90,7 @@ pub fn handle_dcp_frame(frame: &[u8], cfg: &DeviceConfig) -> Result<Option<Vec<u
                 return Ok(None);
             }
             let req = parse_set_request(blocks)?;
-            let results = decide_set(&req, cfg.properties.ip);
+            let results = decide_set(&req, &cfg.properties);
             for (option, suboption, err) in &results {
                 log::info!("DCP Set block ({option}, {suboption}) -> {err:?}");
             }
