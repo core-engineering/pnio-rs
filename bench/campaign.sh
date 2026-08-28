@@ -38,7 +38,13 @@ grep -qw "$RT_CPU" /sys/devices/system/cpu/isolated || { echo "cpu $RT_CPU not i
 mkdir -p "$OUT"
 echo "campaign dir: $OUT"
 
-{ uname -r; cat /proc/cmdline; cat /sys/devices/system/cpu/isolated; systemctl status profinet-rt-tune --no-pager 2>&1 | tail -n +1; } > "$OUT/env.txt" 2>&1 || true
+{
+  uname -r
+  cat /proc/cmdline
+  cat /sys/devices/system/cpu/isolated
+  journalctl -u profinet-rt-tune -n 200 --no-pager 2>&1 \
+    || systemctl status profinet-rt-tune -l --no-pager 2>&1
+} > "$OUT/env.txt" 2>&1 || true
 
 step() { echo "== $(date +%T) $*"; }
 
@@ -52,6 +58,7 @@ step "2/4 cyclictest under load"
 "$BENCH/load.sh" "$((DURATION + 10))" > "$OUT/load-cyclictest.txt" 2>&1 &
 LOAD=$!
 sleep 5
+kill -0 "$LOAD" 2>/dev/null || { echo "load did not start (see $OUT/load-*.txt)" >&2; exit 3; }
 set +e
 cyclictest -m -p"$RT_PRIO" -a"$RT_CPU" -i1000 -h400 -D"$DURATION" -q > "$OUT/cyclictest-load.txt"
 CT_LOAD_RC=$?
@@ -74,6 +81,8 @@ LOAD=$!
 taskset -c "$HK_CPUS" tcpdump -i "$PLC_IF" -B 65536 -w "$OUT/rt-load.pcapng" > "$OUT/tcpdump.txt" 2>&1 &
 DUMP=$!
 sleep 5
+kill -0 "$LOAD" 2>/dev/null || { echo "load did not start (see $OUT/load-*.txt)" >&2; exit 3; }
+kill -0 "$DUMP" 2>/dev/null || { echo "tcpdump did not start (see $OUT/tcpdump.txt)" >&2; exit 3; }
 set +e
 "$BIN" "${RT_ARGS[@]}" --csv "$OUT/rt-load.csv" > "$OUT/rt-load.log" 2>&1
 LOAD_RC=$?
@@ -91,4 +100,4 @@ DUMP=""
   echo "--- rt_bringup load (rc=$LOAD_RC)"; sed -n '/rt_bringup summary/,$p' "$OUT/rt-load.log"
 } | tee "$OUT/summary.txt"
 
-[ "$IDLE_RC" -eq 0 ] && [ "$LOAD_RC" -eq 0 ]
+[ "$CT_IDLE_RC" -eq 0 ] && [ "$CT_LOAD_RC" -eq 0 ] && [ "$IDLE_RC" -eq 0 ] && [ "$LOAD_RC" -eq 0 ]

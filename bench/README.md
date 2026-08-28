@@ -64,6 +64,10 @@ sudo setcap cap_sys_nice,cap_ipc_lock+eip /usr/bin/cyclictest
 three commands above after every copy of a binary onto the edge** (a fresh `scp` of
 `rt_bringup`, a package upgrade of `tcpdump`/`cyclictest`, etc. all reset them).
 
+Without `cap_ipc_lock` available, `--lock-memory` still works if `RLIMIT_MEMLOCK` is
+raised instead: `ulimit -l unlimited` in the shell that runs `campaign.sh`, or
+`LimitMEMLOCK=infinity` in the unit file if it is launched as a service.
+
 ## Build the edge binary
 
 The edge is `musl`-only (no glibc toolchain maintained there):
@@ -109,8 +113,9 @@ Directory layout, one directory per run, timestamped:
 line for idle and load, and — for both the idle and the load `rt_bringup` run — the
 run's return code and everything from the `rt_bringup summary` banner onward (the
 three histogram lines, the counters, and the `VERDICT: PASS`/`FAIL` line). The
-campaign's own exit code is the logical AND of the two `rt_bringup` verdicts (0 only
-if idle and load both passed).
+campaign's own exit code is the logical AND of all four run's return codes —
+`cyclictest` idle, `cyclictest` load, `rt_bringup` idle, `rt_bringup` load (0 only if
+all four succeeded).
 
 The `lat_max_us`, `lat_p9999_us`, `work_max_us` and `rxint_max_us` columns in
 `rt-idle.csv`/`rt-load.csv` are **cumulative** running maxima/percentiles since the
@@ -148,7 +153,7 @@ for Windows (`tshark.exe`) since the edge has no analysis tooling installed:
 CPU → device (`0x8001`):
 
 ```
-"/mnt/c/Program Files/Wireshark/tshark.exe" -r rt-load.pcapng -Y "pn_rt.frame_id == 0x8001" -T fields -e frame.time_delta_displayed \
+"/mnt/c/Program Files/Wireshark/tshark.exe" -2 -r rt-load.pcapng -Y "pn_rt.frame_id == 0x8001" -T fields -e frame.time_delta_displayed \
   | sort -n \
   | awk '{a[NR]=$1} END{n=NR; p=int(n*0.9999); if(p<1)p=1; printf "n=%d p99.99=%.6fs max=%.6fs\n", n, a[p], a[n]}'
 ```
@@ -156,7 +161,7 @@ CPU → device (`0x8001`):
 Device → CPU (`0x8000`):
 
 ```
-"/mnt/c/Program Files/Wireshark/tshark.exe" -r rt-load.pcapng -Y "pn_rt.frame_id == 0x8000" -T fields -e frame.time_delta_displayed \
+"/mnt/c/Program Files/Wireshark/tshark.exe" -2 -r rt-load.pcapng -Y "pn_rt.frame_id == 0x8000" -T fields -e frame.time_delta_displayed \
   | sort -n \
   | awk '{a[NR]=$1} END{n=NR; p=int(n*0.9999); if(p<1)p=1; printf "n=%d p99.99=%.6fs max=%.6fs\n", n, a[p], a[n]}'
 ```
@@ -174,6 +179,8 @@ Before step 3 of `campaign.sh` (the first `rt_bringup` run):
 - Watchdog factor: **3** (3 ms consumer watchdog — the tick-lateness thresholds
   above are sized against it).
 - Download the changed hardware configuration to the CPU.
-- Do this **between** the 32 ms control run (a `campaign.sh --duration 120`-scale
-  non-regression check at the old update time, done by hand first) and the actual 1
-  ms campaign — never change the update time mid-campaign.
+- Do this **between** the 32 ms control run and the actual 1 ms campaign — never
+  change the update time mid-campaign. The control run is `campaign.sh 120` (the
+  whole campaign — cyclictest and `rt_bringup`, idle and load — at a shorter, 120 s
+  duration; not a bare `rt_bringup --duration 120` call), done by hand first as a
+  non-regression check at the old update time.
