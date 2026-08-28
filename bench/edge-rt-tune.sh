@@ -91,7 +91,7 @@ echo "kernel:    $(uname -r)  realtime=$(cat /sys/kernel/realtime)"
 echo "cmdline:   $(cat /proc/cmdline)"
 echo "isolated:  $isolated   nohz_full: $(cat /sys/devices/system/cpu/nohz_full)"
 echo "hk_cpus:   $HK_CPUS   rt_cpu: $RT_CPU"
-for c in /sys/devices/system/cpu/cpu$RT_CPU/cache/index*; do echo "cache:     L$(cat "$c/level") $(cat "$c/type") $(cat "$c/size") shared_cpu_list=$(cat "$c/shared_cpu_list")"; done
+for c in /sys/devices/system/cpu/cpu$RT_CPU/cache/index*; do [ -d "$c" ] || { warn "no cacheinfo for cpu $RT_CPU"; break; }; echo "cache:     L$(cat "$c/level") $(cat "$c/type") $(cat "$c/size") shared_cpu_list=$(cat "$c/shared_cpu_list")"; done
 echo "governor:  $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)"
 echo "cpuidle:   $(for s in /sys/devices/system/cpu/cpu$RT_CPU/cpuidle/state*; do printf '%s(disable=%s) ' "$(cat "$s/name")" "$(cat "$s/disable")"; done)"
 awk -v ifc="$PLC_IF" '$NF == ifc || $NF ~ "^"ifc"-" {gsub(":","",$1); print "irq " $1 " " $NF}' /proc/interrupts | while read -r _ irq name; do

@@ -16,7 +16,7 @@ facing the PLC — never re-address it, it is also a NAT gateway leg).
   Atom E3940's 1 MiB L2 (no L3): isolate both, keep CPU 2 idle as a cache guard, run
   the RT thread and the NIC IRQ on CPU 3, everything else on CPUs 0-1. This is what
   the Plan 7 campaign showed is needed to hold the p99.99 threshold under load
-  (`docs/bench-pnet-device.md` §6e).
+  (`docs/bench-pnet-device.md` §6e recommended it, §6f confirms it).
 
   ```
   GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=domain,managed_irq,2,3 nohz_full=2,3 rcu_nocbs=2,3 irqaffinity=0-1 intel_idle.max_cstate=1 processor.max_cstate=1 nosoftlockup"
