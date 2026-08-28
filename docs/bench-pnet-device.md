@@ -590,19 +590,142 @@ for Plan 7bis, not the raw percentage.
 - Keep the 32 ms control run before any 1 ms campaign: it caught the `FrameID 0xFFFF` regression
   (finding (b)) before burning a 10-minute 1 ms run against a broken AR.
 
+## 6f. HIL — 1 ms with the L2 pair isolated (2026-08-28, Plan 7bis)
+
+§6e closed with a recommendation: isolate the whole L2 pair (CPUs 2-3), housekeeping on CPUs
+0-1, to hold the p99.99 lateness budget under the spec's own load. This section reruns the
+campaign under that recommendation to confirm it.
+
+### What changed vs §6e
+
+Only the edge's GRUB cmdline / `HK_CPUS`, nothing in the crate or the TIA project. The edge
+moved from the single-core profile (`isolcpus=domain,managed_irq,3`, `HK_CPUS=0-2`) to the
+L2-pair profile (`isolcpus=domain,managed_irq,2,3`, `HK_CPUS=0-1`) — now `bench/`'s default
+(`bench/README.md` documents both profiles). Same binary (`2ce31e2`, md5 `3c92901b`, the fixed
+build used throughout §6e), same TIA project (1 ms update time, watchdog factor 3), same
+`campaign.sh`/`rt_bringup` scripts, just run with the new default `HK_CPUS`/`--app-cpus`.
+
+### Edge state (campaign `plan7-20260828-201858`)
+
+- Kernel `6.12.105+deb13-rt-amd64` (unchanged from §6e).
+- GRUB cmdline: `quiet isolcpus=domain,managed_irq,2,3 nohz_full=2,3 rcu_nocbs=2,3
+  irqaffinity=0-1 intel_idle.max_cstate=1 processor.max_cstate=1 nosoftlockup` — housekeeping
+  CPUs 0-1, RT CPU 3, isolated set `2-3` (both cores of the shared L2 pair).
+- Cache topology (unchanged Atom E3940): L1d 24 KiB / L1i 32 KiB private to CPU 3; L2 1024 KiB
+  unified, `shared_cpu_list=2-3`.
+- IRQ pinning: irq 128 (`eno2`, misc) → CPUs 0-1; irq 129 (`eno2-rx-0`) → CPU 3; irq 130
+  (`eno2-tx-0`) → CPU 3; IRQ threads (pids 898/899) `SCHED_FIFO` 90.
+- NIC tuning (`edge-rt-tune.sh`, unchanged from §6e): EEE off, coalescing `rx-usecs`/`tx-usecs`
+  0/0, `gro`/`lro` off, `combined 1`, governor `performance`.
+- `kernel.sched_rt_runtime_us = -1`.
+- `rt_bringup` flags identical to §6e except `--app-cpus 0-1` (was `0-2`).
+
+### Campaign
+
+Load = `stress-ng --cpu 3 --vm 1 --vm-bytes 512M`, same spec §1 load definition as §6e, now
+pinned to the profile's own housekeeping set (CPUs 0-1 instead of 0-2). Directory:
+`captures/plan7-20260828-201858/` (copied from the edge, git-ignored).
+
+| Metric | single-core profile (§6e) | L2-pair profile (§6f) |
+|---|---|---|
+| `cyclictest` idle max | 95 µs | 13 µs |
+| `cyclictest` load max | 173 µs | 16 µs |
+| `rt_bringup` idle — missed / watchdog | 0 / 0 | 0 / 0 |
+| `rt_bringup` idle — tick lateness p99 / p99.99 / max | 10 / 48 / 111.0 µs | 9 / 20 / 22.7 µs |
+| `rt_bringup` idle — cycle work p99.99 / max | 61 / 86.0 µs | 49 / 49.5 µs |
+| `rt_bringup` idle — rx interval p99.99 / max | 1072 / 1103.7 µs | 1046 / 1089.0 µs |
+| `rt_bringup` idle — reused+deferred | 0.10 % (128+469 / 598320) | 0.13 % (104+679 / 600078) |
+| `rt_bringup` idle — verdict | PASS | PASS |
+| `rt_bringup` load + `tcpdump` — missed / watchdog | 0 / 0 | 0 / 0 |
+| `rt_bringup` load + `tcpdump` — tick lateness p99 / p99.99 / max | 63 / 147 / 255.4 µs | 0 / 13 / 22.4 µs |
+| `rt_bringup` load + `tcpdump` — cycle work p99.99 / max | 178 / 262.6 µs | 44 / 46.7 µs |
+| `rt_bringup` load + `tcpdump` — rx interval p99.99 / max | 1126 / 1199.2 µs | 1049 / 1084.9 µs |
+| `rt_bringup` load + `tcpdump` — reused+deferred | 0.11 % (101+551 / 598181) | 0.15 % (147+731 / 597969) |
+| `rt_bringup` load + `tcpdump` — verdict | FAIL (lateness p99.99 147 µs ≥ 100 µs) | PASS |
+
+`tcpdump` itself (`taskset -c 0-1 tcpdump -i eno2 -B 65536`, kept off the isolated CPUs 2-3)
+counted 1194745 packets captured, 0 dropped by the kernel, over the load run.
+
+### pcap inter-arrival percentiles, §6e vs §6f (load + `tcpdump` run)
+
+Computed the same way as §6e (`tshark.exe -2`, two-pass mode, `frame.time_delta_displayed` on
+the filtered stream):
+
+| Profile | Direction | n | p50 | p99 | p99.99 | max |
+|---|---|---|---|---|---|---|
+| single-core (§6e) | CPU → device (`0x8001`) | 598035 | 1000 µs | 1017 µs | 1058 µs | 1116 µs |
+| single-core (§6e) | device → CPU (`0x8000`) | 597999 | 1000 µs | 1030 µs | 1156 µs | 1245 µs |
+| L2-pair (§6f) | CPU → device (`0x8001`) | 597317 | 1000 µs | 1012 µs | 1049 µs | 1073 µs |
+| L2-pair (§6f) | device → CPU (`0x8000`) | 597287 | 1000 µs | 1001 µs | 1021 µs | 1031 µs |
+
+Both directions stay well inside the 1.5 ms `rx_interval` threshold (criterion 3) — and tighter
+than §6e's single-core-profile figures in both directions.
+
+### Verdict per spec §1 criterion — L2-pair profile
+
+1. `missed_ticks == 0` and `watchdog_expirations == 0`: met — idle (600078 ticks) and load +
+   `tcpdump` (597969 ticks), zero missed ticks and zero watchdog expirations in both, same final
+   binary `2ce31e2` as §6e.
+2. Tick lateness — **2a, p99.99 < 100 µs**: met at idle (20 µs) and under the spec's own load,
+   now pinned to the profile's housekeeping CPUs (13 µs) — both comfortably inside budget, unlike
+   §6e's single-core-profile load runs (147-203 µs). **2b, max < 300 µs**: met in both (idle
+   22.7 µs; load 22.4 µs).
+3. CPU→device inter-arrival max < 1.5 ms: met — `rt_bringup`'s own `rx_interval` max is 1089.0 µs
+   (idle) / 1084.9 µs (load); the pcap-derived `0x8001` max is 1073 µs (load, table above).
+4. Watch table unchanged, diagnostic buffer clean: carried over from §6e — this campaign changed
+   only the GRUB cmdline / CPU pinning, not the binary or the TIA project, so the AR/watch-table/
+   diagnostics behaviour already confirmed on this exact binary and TIA project by §6e's
+   STOP→RUN test is unaffected; not independently re-exercised in this campaign.
+
+**All four spec §1 criteria are met, at idle and under the spec's own load, with the L2-pair
+profile.** This settles §6e's open point: the p99.99 lateness budget the single-core profile
+missed under load is a tuning choice for this SoC, not a correctness limit — isolating the whole
+L2 pair (CPUs 2-3) removes it.
+
+### Seqlock decision (spec §9) — updated with §6f
+
+`input_snapshot_reused + output_publish_deferred` as a fraction of ticks, L2-pair profile: idle
+0.13 % (104+679 / 600078), under the spec's own load (now pinned to CPUs 0-1) 0.15 %
+(147+731 / 597969) — both still over spec §9's 0.1 % line, by a slightly wider margin than §6e's
+single-core-profile figures (0.10 % idle, 0.11-0.12 % load). `rx_dropped=0` in both runs here
+(and `tcpdump` itself counted 0 dropped packets) — **the §9 deviation recorded in §6e stands**:
+`Mutex` + `try_lock` stays, the overshoot does not translate into a dropped frame or a missed
+tick either way, and the seqlock stays a FOLLOWUP triggered by a consumer needing every single
+cycle's output, not by the raw percentage.
+
+### Lessons
+
+- The L2 sibling was the whole story: `cyclictest`'s own max under load fell from 173 µs (§6e,
+  single-core profile, load on CPUs 0-2) to 16 µs once CPU 2 was pulled off housekeeping;
+  `rt_bringup`'s tick-lateness p99.99 under load followed the same pattern, from 203 µs (§6e's
+  load-no-capture run) to 13 µs here.
+- `tcpdump`'s own cycle-work cost also shrank once the capture ran on CPUs 0-1 instead of 0-2
+  (cycle_work p99.99 178 µs → 44 µs) — observed, not fully explained: a plausible reason is that
+  the capture process no longer contends with the RT thread for CPU 3's shared L2 the way it did
+  when pinned to CPU 2, but this specific mechanism was not isolated further.
+- Keep the L2-pair profile (`isolcpus=domain,managed_irq,2,3`, `HK_CPUS=0-1`) as the default edge
+  configuration; the single-core profile (`isolcpus=domain,managed_irq,3`, `HK_CPUS=0-2`) stays
+  documented in `bench/README.md` for setups that need a third housekeeping core and can tolerate
+  the wider p99.99 budget under load.
+
 ## 7. Next steps
-Plan 3 (`cm`/AR), Plan 4 (`rt`, cyclic exchange) and Plan 7 (1 ms determinism) are all done.
-`examples/rt_bringup` holds a 1 ms PROFINET update time against the real S7-1500, idle and
-under load, with zero missed ticks and zero watchdog expirations across a 2.9-million-cycle HIL
-campaign on `PREEMPT_RT` with the final binary `2ce31e2` (§6e); the one spec §1 criterion not
-met under the spec's own load
-(tick lateness p99.99, CPUs 0-2 sharing CPU 3's L2 cache) is met once the load is kept off the
-L2 sibling. Next is either **Plan 5 (alarms + I&M/diagnosis)** — ERR-RTA on device stop,
+Plan 3 (`cm`/AR), Plan 4 (`rt`, cyclic exchange), Plan 7 (1 ms determinism) and **Plan 7bis
+(L2-pair isolation) are all done**. `examples/rt_bringup` holds a 1 ms PROFINET update time
+against the real S7-1500, idle and under load, with zero missed ticks and zero watchdog
+expirations across HIL campaigns on `PREEMPT_RT` with the final binary `2ce31e2` (§6e, §6f); the
+one spec §1 criterion the single-core profile missed under the spec's own load (tick lateness
+p99.99, CPUs 0-2 sharing CPU 3's L2 cache) is met with the L2-pair profile (isolate CPUs 2-3,
+`HK_CPUS=0-1`), now the `bench/` default (§6f). `PACKET_MMAP`/busy-poll stays deferred, needed
+only if a future campaign under the original CPU-0-2 load layout still needs the p99.99 budget
+without changing the CPU layout.
+
+Next is either **Plan 5 (alarms + I&M/diagnosis)** — ERR-RTA on device stop,
 `ProblemIndicator`/diagnosis reporting, minimal `Read`/`ReadImplicit` beyond the PNIORW refusal
-— or **Plan 6 (typed I/O API, GSDML)** — see `FOLLOWUPS.md`. **Plan 7bis** (deferred by the
-seqlock decision and the L2-sibling finding, §6e): isolate the whole L2 pair (CPUs 2-3) with
-housekeeping on CPUs 0-1 as the new default edge configuration; `PACKET_MMAP`/busy-poll only if
-a future campaign under the original CPU-0-2 load layout still needs the p99.99 budget.
+— or **Plan 6 (typed I/O API, GSDML)**, which also opens a jitter-headroom question: §6f's
+p99.99 lateness under load (13 µs) sits far inside the 100 µs budget, which makes a shorter
+update time (500/250 µs, listed as a possible future extension in the design doc, §10) a
+candidate once Plan 6 supplies our own GSDML — the p-net one borrowed for the HIL bench caps
+`MinDeviceInterval` at 32 (1 ms). See `FOLLOWUPS.md`.
 
 ## Pitfalls
 - **Never use CPL/PowerLine** on the segment (HomePlug `0x88e1` → jitter → RT watchdog expires, AR drops).

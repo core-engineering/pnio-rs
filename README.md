@@ -35,10 +35,10 @@ S7‑1500 (1515‑2 PN).
 | DCE-RPC CL codec + UDP transport | `rpc` | ✅ |
 | AR establishment (DCE/RPC, state machine) | `cm` | ✅ AR reaches DATA on a real S7-1500 (HIL 2026-08-28) |
 | Acyclic device loop + bring-up example | `device` | ✅ |
-| RT cyclic exchange (PPM/CPM, IOPS/IOCS, watchdog, `SCHED_FIFO` thread) | `rt` | ✅ 1 ms held on PREEMPT_RT (edge Atom E3940, HIL 2026-08-28): idle p99.99 48 µs / max 111 µs; under full load (CPUs 0-2) p99.99 147-203 µs / max ≤ 284 µs; load off the L2 sibling (CPUs 0-1, 600 s) p99.99 86 µs / max 158 µs; 0 missed ticks / 0 watchdog expirations over 2.9 M cycles with the final binary (`2ce31e2`) |
+| RT cyclic exchange (PPM/CPM, IOPS/IOCS, watchdog, `SCHED_FIFO` thread) | `rt` | ✅ 1 ms held on PREEMPT_RT (edge Atom E3940). **L2-pair profile (default, Plan 7bis, HIL 2026-08-28)**: under load p99.99 13 µs / max 22.4 µs, idle p99.99 20 µs / max 22.7 µs, 0 missed ticks / 0 watchdog expirations over 1.2 M cycles (600078 + 597969). Single-core profile (Plan 7, HIL 2026-08-28), under load on CPUs 0-2: p99.99 147-203 µs / max ≤ 284 µs — see `docs/bench-pnet-device.md` §6e/§6f |
 | Alarms + I&M | `alarm`/`im` | ⏳ |
 | Config model + GSDML + public API | `config` | ⏳ |
-| HIL integration + determinism (real S7‑1500, jitter measurement) | — | 1 ms held against a real S7-1500, idle and under load, on PREEMPT_RT ✅ (HIL 2026-08-28, `docs/bench-pnet-device.md` §6e); see the `rt` row above for numbers |
+| HIL integration + determinism (real S7‑1500, jitter measurement) | — | 1 ms held against a real S7-1500, idle and under load, on PREEMPT_RT ✅ (HIL 2026-08-28, `docs/bench-pnet-device.md` §6e/§6f — L2-pair profile now the default); see the `rt` row above for numbers |
 
 ## Architecture
 
@@ -53,8 +53,10 @@ S7‑1500 (1515‑2 PN).
   §9 rule (< 0.1 % → `Mutex` stays, otherwise a seqlock) is exceeded under the spec's own load
   (0.11-0.12 %), so keeping the `Mutex` + `try_lock` image is a **deliberate deviation from
   that rule** — every run showed zero dropped frames, and the overshoot is only 0.01-0.02
-  points. A lock-free seqlock is deferred to Plan 7bis, triggered only if a consumer needs
-  every single cycle's outputs.
+  points. The Plan 7bis L2-pair campaign measured 0.13 % idle / 0.15 % under load — still over
+  the line, by a slightly wider margin, and the deviation stands unchanged (`docs/bench-pnet-device.md`
+  §6f). A lock-free seqlock stays a FOLLOWUP, triggered only if a consumer needs every single
+  cycle's outputs.
 
 ## Quick Start
 
@@ -89,9 +91,10 @@ included.
 
 ## Roadmap
 
-`cm` (AR) ✅ → `rt` (cyclic exchange) ✅ → determinism (1 ms, `PREEMPT_RT`) ✅ → **next:
-`alarm`/`im` (Plan 5) or `config`/GSDML/typed API (Plan 6)** → Plan 7bis (L2-pair isolation +
-`PACKET_MMAP`/busy-poll if still needed). Details in the plans above.
+`cm` (AR) ✅ → `rt` (cyclic exchange) ✅ → determinism (1 ms, `PREEMPT_RT`) ✅ → Plan 7bis
+(L2-pair isolation) ✅ → **next: `alarm`/`im` (Plan 5) or `config`/GSDML/typed API (Plan 6)**.
+`PACKET_MMAP`/busy-poll stays deferred, only needed if a future campaign under the original
+CPU-0-2 load layout still needs the p99.99 budget. Details in the plans above.
 
 ## License
 

@@ -148,13 +148,18 @@ Open points recorded from the cyclic-exchange HIL run (`docs/bench-pnet-device.m
 Open points recorded from the 1 ms HIL campaign (`docs/bench-pnet-device.md` §6e), to be
 picked up as noted:
 
-- **L2-pair isolation (Plan 7bis)**: `stress-ng` pinned to CPUs 0-2 (spec §1's own load) shares
-  CPU 3's L2 cache with CPU 2 (Atom E3940: L2 1 MiB unified, shared by CPUs 2-3, no L3) and
-  pushes tick lateness p99.99 to 147-203 µs, above the 100 µs budget (max still < 300 µs; zero
-  missed ticks either way). Keeping the load off CPUs 0-1 instead brings p99.99 back to 86 µs,
-  max 158.4 µs (600 s confirmation run) — both under budget. Recommended next edge
-  configuration: `isolcpus=domain,managed_irq,2,3` (both L2-sharing cores isolated),
-  `HK_CPUS=0-1`.
+- ✅ **RESOLVED (HIL 2026-08-28, `docs/bench-pnet-device.md` §6f)** — **L2-pair isolation (Plan
+  7bis)**: `stress-ng` pinned to CPUs 0-2 (spec §1's own load) shares CPU 3's L2 cache with CPU 2
+  (Atom E3940: L2 1 MiB unified, shared by CPUs 2-3, no L3) and pushed tick lateness p99.99 to
+  147-203 µs under the single-core profile, above the 100 µs budget (max still < 300 µs; zero
+  missed ticks either way). Isolating the whole L2 pair (`isolcpus=domain,managed_irq,2,3`,
+  `HK_CPUS=0-1`), now `bench/`'s default profile, confirmed the fix: p99.99 20 µs idle / 13 µs
+  under the spec's own load (now pinned to CPUs 0-1), max 22.7 µs / 22.4 µs, 0 missed ticks / 0
+  watchdog expirations over 1.2 M cycles (600078 + 597969) on the same binary (`2ce31e2`) and TIA
+  project as §6e. All four spec §1 criteria now met at idle and under load. Seqlock
+  reused+deferred under the L2-pair profile: 0.13 % idle, 0.15 % under load — still over the
+  spec §9 0.1 % line, by a slightly wider margin than the single-core profile's 0.10 %/0.11-0.12 %;
+  the §9 deviation (keep `Mutex` + `try_lock`) stands, `rx_dropped=0` again in every run.
 - **`PACKET_MMAP`** (TPACKET_V3 rings): out of scope for Plan 7 (kernel + isolation + minimal
   code held the budget once the load layout above is applied); revisit only if a future
   campaign under the original CPU-0-2 load pinning still needs the p99.99 budget.
