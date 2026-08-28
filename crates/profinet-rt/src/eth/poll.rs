@@ -18,7 +18,10 @@ pub(crate) fn wait_readable(fd: RawFd, timeout: Option<Duration>) -> std::io::Re
     let timeout_ms: libc::c_int = match timeout {
         None => -1,
         Some(d) => {
-            let ms = d.as_millis();
+            // Round up: any leftover sub-millisecond remainder still costs a whole
+            // millisecond of `poll(2)` timeout, so `0 < d < 1ms` must not become 0
+            // (which would mean "return immediately" instead of "wait a little").
+            let ms = d.as_millis() + u128::from(d.subsec_nanos() % 1_000_000 != 0);
             libc::c_int::try_from(ms).unwrap_or(libc::c_int::MAX)
         }
     };
@@ -34,5 +37,38 @@ pub(crate) fn wait_readable(fd: RawFd, timeout: Option<Duration>) -> std::io::Re
             Err(Errno::EINTR) => continue,
             Err(e) => return Err(std::io::Error::from(e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::UdpSocket;
+    use std::os::fd::AsRawFd;
+    use std::time::Instant;
+
+    #[test]
+    fn sub_millisecond_timeout_rounds_up_and_still_times_out() {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let fd = sock.as_raw_fd();
+
+        let start = Instant::now();
+        let ready = wait_readable(fd, Some(Duration::from_micros(500))).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(!ready);
+        assert!(
+            elapsed >= Duration::from_millis(1),
+            "expected at least 1ms, got {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn zero_timeout_returns_immediately() {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let fd = sock.as_raw_fd();
+
+        let ready = wait_readable(fd, Some(Duration::ZERO)).unwrap();
+        assert!(!ready);
     }
 }

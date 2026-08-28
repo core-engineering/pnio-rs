@@ -31,8 +31,15 @@ fn is_profinet_frame(buf: &[u8]) -> bool {
 
 /// Raw AF_PACKET socket bound to a named interface and the PROFINET EtherType
 /// (0x8892), with membership in the DCP multicast group, filtered on EtherType
-/// PROFINET at recv time (VLAN-tagged frames pass the kernel filter too, since
-/// the NIC may not have offloaded the tag).
+/// PROFINET at recv time. In practice, live frames delivered to a
+/// protocol-bound `AF_PACKET` socket always arrive with any 802.1Q tag already
+/// stripped by the kernel (`__netif_receive_skb_core` untags before
+/// protocol-keyed dispatch, and `packet_rcv` does not reinsert it) — the tag is
+/// only observable via `PACKET_AUXDATA` + `recvmsg`, which this transport does
+/// not use. `is_profinet_frame`'s VLAN-tagged branch therefore never matches
+/// live `AfPacketTransport` traffic; it exists for the mock/replay path, where
+/// captured frames can still carry the tag, and as a hook for a possible future
+/// `ETH_P_ALL`-bound fallback that would see tagged frames.
 pub struct AfPacketTransport {
     fd: OwnedFd,
 }
@@ -67,6 +74,8 @@ impl AfPacketTransport {
         let ifindex = nix::net::if_::if_nametoindex(ifname)?;
 
         // nix 0.27 LinkAddr has no public constructor, so we build sockaddr_ll directly.
+        // Safety: `sockaddr_ll` is a plain-old-data struct for which an all-zero bit
+        // pattern is a valid value; every field we rely on is explicitly set below.
         let mut sll: libc::sockaddr_ll = unsafe { mem::zeroed() };
         sll.sll_family = libc::AF_PACKET as u16;
         sll.sll_protocol = (ETHERTYPE_PROFINET).to_be();
@@ -87,6 +96,8 @@ impl AfPacketTransport {
 
         // Join the DCP multicast group so multicast DCP frames (Identify, Hello)
         // reach this socket even when the NIC does not pass all multicast by default.
+        // Safety: `packet_mreq` is a plain-old-data struct for which an all-zero bit
+        // pattern is a valid value; every field we rely on is explicitly set below.
         let mut mreq: libc::packet_mreq = unsafe { mem::zeroed() };
         mreq.mr_ifindex = ifindex as libc::c_int;
         mreq.mr_type = libc::PACKET_MR_MULTICAST as u16;
