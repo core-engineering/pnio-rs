@@ -209,6 +209,9 @@ impl RtRunner {
     /// from a thread that immediately dies.
     pub fn spawn(cfg: RtConfig) -> Result<RtHandle, RtError> {
         let transport = AfPacketTransport::open(&cfg.iface)?;
+        // The RT socket must never wake up for DCP or alarms: an unfiltered run is
+        // not comparable, so a filter failure is fatal here, not a warning.
+        transport.attach_filter(&crate::eth::bpf::rt_filter())?;
         Self::spawn_with_transport(cfg, transport)
     }
 

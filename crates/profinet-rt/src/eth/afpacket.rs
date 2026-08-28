@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use nix::sys::socket::{send, MsgFlags};
 
+use super::bpf::SockFilter;
 use super::poll::wait_readable;
 use super::transport::{EthTransport, TransportError, MAX_FRAME_LEN};
 use super::{ETHERTYPE_PROFINET, ETHERTYPE_VLAN};
@@ -121,6 +122,37 @@ impl AfPacketTransport {
 
         Ok(Self { fd })
     }
+
+    /// Attach a classic BPF program (see [`crate::eth::bpf`]) to the socket. Frames
+    /// already queued before the call are still delivered.
+    pub fn attach_filter(&self, prog: &[SockFilter]) -> Result<(), TransportError> {
+        let len = u16::try_from(prog.len()).map_err(|_| {
+            TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "BPF program too long",
+            ))
+        })?;
+        // `SockFilter` is `repr(C)` with the exact field layout of `struct sock_filter`.
+        let fprog = libc::sock_fprog {
+            len,
+            filter: prog.as_ptr() as *mut libc::sock_filter,
+        };
+        // Safety: `fprog` is fully initialized and points at `prog`, which outlives
+        // the call (the kernel copies the program); `fd` is a valid, open socket.
+        let ret = unsafe {
+            libc::setsockopt(
+                self.fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_ATTACH_FILTER,
+                &fprog as *const libc::sock_fprog as *const libc::c_void,
+                mem::size_of::<libc::sock_fprog>() as libc::socklen_t,
+            )
+        };
+        if ret < 0 {
+            return Err(TransportError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
 }
 
 impl EthTransport for AfPacketTransport {
@@ -202,6 +234,13 @@ mod tests {
         let t = AfPacketTransport::open("lo").expect("open lo");
         assert_eq!(t.recv(Some(Duration::from_millis(10))).unwrap(), None);
         assert!(t.raw_fd().is_some());
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW + a real interface; run: cargo test -- --ignored"]
+    fn attach_filter_on_loopback_succeeds() {
+        let t = AfPacketTransport::open("lo").expect("open lo");
+        t.attach_filter(&super::super::bpf::rt_filter()).unwrap();
     }
 
     #[test]
