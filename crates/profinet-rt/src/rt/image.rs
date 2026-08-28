@@ -152,16 +152,6 @@ impl IoImage {
         };
     }
 
-    fn find_cell(&self, slot: u16, subslot: u16) -> Result<Cell, ImageError> {
-        self.cells
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .find(|c| c.slot == slot && c.subslot == subslot)
-            .cloned()
-            .ok_or(ImageError::UnknownSubmodule { slot, subslot })
-    }
-
     /// A clone of the current cell index, in model order.
     pub fn cells(&self) -> Vec<Cell> {
         self.cells.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -169,39 +159,66 @@ impl IoImage {
 
     /// Write `bytes` into the input image at `(slot, subslot)`'s offset. `bytes.len()`
     /// must exactly match the submodule's input length.
+    ///
+    /// Holds the `cells` lock for the whole operation (same acquisition order as
+    /// [`IoImage::rebuild`]: `cells` before `inputs`) so a concurrent `rebuild` can
+    /// never swap the buffer out from under an offset looked up against the old cell
+    /// index — the TOCTOU a lookup-then-release-then-lock sequence would allow.
     pub fn write_inputs(&self, slot: u16, subslot: u16, bytes: &[u8]) -> Result<(), ImageError> {
-        let cell = self.find_cell(slot, subslot)?;
+        let cells = self.cells.lock().unwrap_or_else(|e| e.into_inner());
+        let cell = cells
+            .iter()
+            .find(|c| c.slot == slot && c.subslot == subslot)
+            .ok_or(ImageError::UnknownSubmodule { slot, subslot })?;
         let off = cell
             .input_off
             .ok_or(ImageError::NoInput { slot, subslot })?;
-        if bytes.len() != cell.input_len {
+        let len = cell.input_len;
+        if bytes.len() != len {
             return Err(ImageError::LengthMismatch {
-                expected: cell.input_len,
+                expected: len,
                 got: bytes.len(),
             });
         }
         let mut inputs = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
-        inputs[off..off + bytes.len()].copy_from_slice(bytes);
+        if off + len > inputs.len() {
+            return Err(ImageError::LengthMismatch {
+                expected: len,
+                got: inputs.len().saturating_sub(off),
+            });
+        }
+        inputs[off..off + len].copy_from_slice(bytes);
         Ok(())
     }
 
     /// Call `f` with the current output image slice for `(slot, subslot)` and the
     /// validity of the frame it was published from.
+    ///
+    /// Holds the `cells` lock for the whole operation, for the same TOCTOU-vs-`rebuild`
+    /// reason as [`IoImage::write_inputs`].
     pub fn read_outputs<T>(
         &self,
         slot: u16,
         subslot: u16,
         f: impl FnOnce(&[u8], &Validity) -> T,
     ) -> Result<T, ImageError> {
-        let cell = self.find_cell(slot, subslot)?;
+        let cells = self.cells.lock().unwrap_or_else(|e| e.into_inner());
+        let cell = cells
+            .iter()
+            .find(|c| c.slot == slot && c.subslot == subslot)
+            .ok_or(ImageError::UnknownSubmodule { slot, subslot })?;
         let off = cell
             .output_off
             .ok_or(ImageError::NoOutput { slot, subslot })?;
+        let len = cell.output_len;
         let outputs = self.outputs.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(f(
-            &outputs.csdu[off..off + cell.output_len],
-            &outputs.validity,
-        ))
+        if off + len > outputs.csdu.len() {
+            return Err(ImageError::LengthMismatch {
+                expected: len,
+                got: outputs.csdu.len().saturating_sub(off),
+            });
+        }
+        Ok(f(&outputs.csdu[off..off + len], &outputs.validity))
     }
 
     /// Copy the whole output C-SDU (`min(dst.len(), csdu.len())` bytes) into `dst` and
@@ -369,6 +386,45 @@ mod tests {
         assert!(!img.rt_publish(&[0u8; 40], fresh()));
         drop(guard);
         assert!(img.rt_publish(&[0u8; 40], fresh()));
+    }
+
+    #[test]
+    fn rebuild_during_app_access_cannot_index_out_of_bounds() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let full = layout();
+        let mut small = full.clone();
+        small.cells = Vec::new();
+        small.input_cr.data_length = 12;
+        small.output_cr.data_length = 12;
+        let full_for_thread = full.clone();
+
+        let img = Arc::new(IoImage::new(&full));
+        let img2 = Arc::clone(&img);
+        let handle = thread::spawn(move || {
+            for _ in 0..200 {
+                img2.rebuild(&small);
+                img2.rebuild(&full_for_thread);
+            }
+        });
+
+        for _ in 0..200 {
+            match img.write_inputs(4, 1, &[0; 8]) {
+                Ok(())
+                | Err(ImageError::UnknownSubmodule { .. })
+                | Err(ImageError::LengthMismatch { .. }) => {}
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+            match img.read_outputs(4, 1, |b, _| b.len()) {
+                Ok(_)
+                | Err(ImageError::UnknownSubmodule { .. })
+                | Err(ImageError::LengthMismatch { .. }) => {}
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+        }
+
+        handle.join().unwrap();
     }
 
     #[test]
