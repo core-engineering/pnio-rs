@@ -16,7 +16,7 @@ use crate::eth::{EthTransport, TransportError};
 use crate::rpc::{RpcError, RpcTransport, Uuid};
 use crate::rt::{IoImage, RtStats};
 #[cfg(target_os = "linux")]
-use crate::rt::{Layout, RtConfig, RtError, RtEvent, RtHandle, RtRunner};
+use crate::rt::{Layout, RtConfig, RtError, RtEvent, RtHandle, RtRunner, WatchdogState};
 
 /// Callback invoked once per AR state-change notification.
 type StateChangeCallback = Box<dyn FnMut(ArState, Option<AbortReason>) + Send>;
@@ -308,12 +308,22 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
 
     /// Stops and joins the RT thread, if any, bounded so a stuck thread cannot hang
     /// the acyclic loop forever.
+    ///
+    /// The application must never see `Fresh` while no runner feeds the image: once
+    /// joined, this publishes a validity derived from the current one with the
+    /// watchdog forced to `Expired` and `provider_run` cleared, so
+    /// `image().validity().freshness()` reads `Stale` until the next `Data` rebuilds
+    /// the cells.
     fn stop_runner(&mut self) {
         if let Some(runner) = self.runner.take() {
             runner.stop();
             if let Err(e) = runner.join(Duration::from_millis(500)) {
                 log::warn!("RT runner join timed out: {e}");
             }
+            let mut v = self.image.validity();
+            v.watchdog = WatchdogState::Expired;
+            v.provider_run = false;
+            self.image.set_validity(v);
         }
     }
 
@@ -362,7 +372,7 @@ mod tests {
     use crate::eth::{MacAddr, MockTransport};
     use crate::rpc::{MockRpcTransport, Uuid};
     #[cfg(target_os = "linux")]
-    use crate::rt::RtRunner;
+    use crate::rt::{Freshness, RtRunner};
     #[cfg(target_os = "linux")]
     use crate::testutil::golden_rt;
     use crate::testutil::{golden, RPC_OFF};
@@ -516,6 +526,8 @@ mod tests {
         dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
         assert_eq!(dev.state(), ArState::Idle);
         assert!(!dev.rt_running());
+        // A clean release must not leave the image `Fresh` over frozen outputs.
+        assert_eq!(dev.image().validity().freshness(), Freshness::Stale);
     }
 
     #[cfg(target_os = "linux")]

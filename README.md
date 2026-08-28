@@ -46,8 +46,10 @@ S7‑1500 (1515‑2 PN).
   identical to Siemens memory — no word-swap).
 - Protocol layer decomposition (`eth` → `dcp` → `cm`/AR → `rt`/alarms), each layer
   independently testable.
-- Runtime target: Debian **PREEMPT_RT**, 1 ms send clock, `SCHED_FIFO` RT thread, double-buffer/seqlock
-  I/O image (coming with the `rt` layer).
+- Runtime target: Debian **PREEMPT_RT**, 1 ms send clock, `SCHED_FIFO` RT thread. The I/O
+  image shared with the application is mutex-protected today, publishing a per-cycle-consistent
+  snapshot on each side (non-blocking on the RT side); a lock-free seqlock is deferred to
+  Plan 7 if `output_publish_deferred` proves significant at 1 ms.
 
 ## Quick Start
 

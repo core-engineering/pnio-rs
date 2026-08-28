@@ -4,8 +4,9 @@
 //! the application via [`IoImage::write_inputs`] and read by the RT thread via
 //! [`IoImage::rt_snapshot_inputs`]. `outputs` (CPU → app) holds the last accepted
 //! output C-SDU verbatim plus its [`Validity`], written by the RT thread via
-//! [`IoImage::rt_publish`] / [`IoImage::rt_set_validity`] and read by the application
-//! via [`IoImage::read_outputs`] / [`IoImage::snapshot_outputs`].
+//! [`IoImage::rt_publish`] / [`IoImage::rt_set_validity`] (and, on the stop path, by
+//! the application via the blocking [`IoImage::set_validity`]) and read by the
+//! application via [`IoImage::read_outputs`] / [`IoImage::snapshot_outputs`].
 //!
 //! The application side may block briefly (`Mutex::lock`, poison-tolerant: a
 //! panicking application thread must not brick the image). The RT side never blocks
@@ -245,6 +246,16 @@ impl IoImage {
             .validity
     }
 
+    /// Blocking: store `validity` directly, without touching the output data — the
+    /// application-side counterpart of [`IoImage::rt_set_validity`]. Used by `device`
+    /// to mark the image stale once its RT runner has stopped; poison-tolerant like
+    /// every other app-side accessor (a panicking application thread must not brick
+    /// the image).
+    pub fn set_validity(&self, validity: Validity) {
+        let mut outputs = self.outputs.lock().unwrap_or_else(|e| e.into_inner());
+        outputs.validity = validity;
+    }
+
     /// Non-blocking: copy the whole input C-SDU (`min(dst.len(), inputs.len())` bytes)
     /// into `dst`. Returns `false` (nothing copied) if the application currently holds
     /// the lock; the RT thread should reuse its previous snapshot for this cycle.
@@ -379,6 +390,33 @@ mod tests {
         v.watchdog = WatchdogState::Expired;
         assert!(img.rt_set_validity(v));
         assert_eq!(img.validity().freshness(), Freshness::Stale);
+    }
+
+    #[test]
+    fn set_validity_is_the_blocking_app_side_counterpart() {
+        let img = IoImage::new(&layout());
+        assert_eq!(img.validity().freshness(), Freshness::NoData);
+        // Blocks (rather than deferring like `rt_set_validity`) and is poison-tolerant.
+        img.set_validity(fresh());
+        assert_eq!(img.validity().freshness(), Freshness::Fresh);
+        let mut stale = fresh();
+        stale.watchdog = WatchdogState::Expired;
+        stale.provider_run = false;
+        img.set_validity(stale);
+        assert_eq!(img.validity(), stale);
+        assert_eq!(img.validity().freshness(), Freshness::Stale);
+
+        // Poisoning the lock (a panic while held) must not brick later access.
+        use std::sync::Arc;
+        let img = Arc::new(IoImage::new(&layout()));
+        let img2 = Arc::clone(&img);
+        let _ = std::thread::spawn(move || {
+            let _guard = img2.outputs.lock().unwrap();
+            panic!("simulated app-side panic while holding the outputs lock");
+        })
+        .join();
+        img.set_validity(fresh());
+        assert_eq!(img.validity().freshness(), Freshness::Fresh);
     }
 
     #[test]

@@ -800,10 +800,11 @@ mod tests {
         let stats = Arc::new(RtStats::default());
         let h = RtRunner::spawn_with_transport(cfg(image, stats.clone()), MockTransport::new())
             .unwrap();
-        std::thread::sleep(Duration::from_millis(20)); // let a few ticks happen
+        std::thread::sleep(Duration::from_millis(40)); // let a few ticks happen
         drop(h); // no explicit stop()/join(): Drop must stop the thread on its own
         std::thread::sleep(Duration::from_millis(30));
         let tx_after_drop = stats.snapshot().tx;
+        assert!(tx_after_drop > 0, "runner never ticked");
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(
             stats.snapshot().tx,

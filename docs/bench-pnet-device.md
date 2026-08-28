@@ -348,6 +348,13 @@ Capture `captures/hil-rt4-2026-08-28-…pcapng`, log `~/bench/logs/rt_bringup4.l
   `output_publish_deferred 19`, `max_tick_lateness 395 µs`, freshness `Fresh` at every sample
   (the 30 s sampling period missed the 16 s STOP window; the capture itself shows the data
   status `0x25` frames during it).
+- **Decoded capture** (`captures/hil-rt4-2026-08-28-135506.pcapng`, full 10 min): **18717**
+  of our `0x8000` frames, cycle-counter step always **1024**, max inter-frame interval
+  **32.4 ms**. CPU STOP window at **t = 277.6–293.5 s** (data status `0x25` throughout),
+  then back to `0x35` with no AR abort. Final stats at end of run: **tx 17783 / rx 17784**,
+  `watchdog 0`, `missed_ticks 0`, `max_tick_lateness 395 µs`, **zero RPC after setup**. One
+  ERR-RTA at **t = 602 s** — the CPU's own watchdog firing after our `SIGINT`, same expected
+  teardown pattern as Run 1. Confirms Plan 4 §1's acceptance criteria are all met.
 
 ### What a 1 ms run needs (Plan 7)
 Today's 32 ms cycle stays well inside budget (`max_tick_lateness` < 0.4 ms) on a plain
