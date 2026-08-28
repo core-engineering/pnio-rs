@@ -35,7 +35,7 @@ S7‑1500 (1515‑2 PN).
 | DCE-RPC CL codec + UDP transport | `rpc` | ✅ |
 | AR establishment (DCE/RPC, state machine) | `cm` | ✅ AR reaches DATA on a real S7-1500 (HIL 2026-08-28) |
 | Acyclic device loop + bring-up example | `device` | ✅ |
-| RT cyclic exchange (PPM/CPM, IOPS/IOCS, watchdog, `SCHED_FIFO` thread) | `rt` | ✅ 1 ms held on PREEMPT_RT (edge Atom E3940, HIL 2026-08-28): idle p99.99 48 µs / max 111 µs; under full load (CPUs 0-2) p99.99 147-203 µs / max ≤ 284 µs; load off the L2 sibling (CPUs 0-1) p99.99 92 µs / max 148 µs; 0 missed ticks / 0 watchdog expirations over 2.4 M cycles |
+| RT cyclic exchange (PPM/CPM, IOPS/IOCS, watchdog, `SCHED_FIFO` thread) | `rt` | ✅ 1 ms held on PREEMPT_RT (edge Atom E3940, HIL 2026-08-28): idle p99.99 48 µs / max 111 µs; under full load (CPUs 0-2) p99.99 147-203 µs / max ≤ 284 µs; load off the L2 sibling (CPUs 0-1, 600 s) p99.99 86 µs / max 158 µs; 0 missed ticks / 0 watchdog expirations over 2.9 M cycles with the final binary (`2ce31e2`) |
 | Alarms + I&M | `alarm`/`im` | ⏳ |
 | Config model + GSDML + public API | `config` | ⏳ |
 | HIL integration + determinism (real S7‑1500, jitter measurement) | — | 1 ms held against a real S7-1500, idle and under load, on PREEMPT_RT ✅ (HIL 2026-08-28, `docs/bench-pnet-device.md` §6e); see the `rt` row above for numbers |
@@ -48,11 +48,13 @@ S7‑1500 (1515‑2 PN).
   independently testable.
 - Runtime target: Debian **PREEMPT_RT**, 1 ms send clock, `SCHED_FIFO` RT thread. The I/O
   image shared with the application is mutex-protected, publishing a per-cycle-consistent
-  snapshot on each side (non-blocking on the RT side). Confirmed by the Plan 7 HIL campaign:
-  `input_snapshot_reused + output_publish_deferred` is 0.08-0.12 % of ticks at 1 ms, right at
-  the spec's 0.1 % line either side, but every run showed zero dropped frames — the `Mutex` +
-  `try_lock` image stays; a lock-free seqlock is deferred to Plan 7bis, triggered only if a
-  consumer needs every single cycle's outputs.
+  snapshot on each side (non-blocking on the RT side). The Plan 7 HIL campaign measured
+  `input_snapshot_reused + output_publish_deferred` at 0.07-0.12 % of ticks at 1 ms; the spec's
+  §9 rule (< 0.1 % → `Mutex` stays, otherwise a seqlock) is exceeded under the spec's own load
+  (0.11-0.12 %), so keeping the `Mutex` + `try_lock` image is a **deliberate deviation from
+  that rule** — every run showed zero dropped frames, and the overshoot is only 0.01-0.02
+  points. A lock-free seqlock is deferred to Plan 7bis, triggered only if a consumer needs
+  every single cycle's outputs.
 
 ## Quick Start
 

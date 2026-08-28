@@ -183,6 +183,8 @@ Recording points in `run_loop`:
 
 After the loaded 1 ms run: if `input_snapshot_reused + output_publish_deferred < 0.1 % × ticks`, the `Mutex` + `try_lock` image stays and the FOLLOWUP is closed with the numbers; otherwise a seqlock image is Plan 7bis. Recorded in `FOLLOWUPS.md` either way.
 
+**Outcome (HIL 2026-08-28)**: under the spec's own load (CPUs 0-2) the campaign measured 0.11-0.12 %, over the 0.1 % line (idle 0.10 %, load off the L2 sibling 0.07-0.08 %); the `Mutex` + `try_lock` image was kept anyway as a deliberate deviation from this rule — zero dropped frames in every run and the overshoot itself is only 0.01-0.02 points — with the seqlock demoted to a FOLLOWUP triggered by an application that must observe every single cycle's outputs, not by the raw percentage; see `docs/bench-pnet-device.md` §6e.
+
 ## 10. `examples/rt_bringup.rs`
 
 New flags (existing: `--iface --name --ip --rt-priority --cpu --stats-every`):
