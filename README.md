@@ -31,8 +31,10 @@ S7‑1500 (1515‑2 PN).
 | **pcap & pcapng** capture replay harness | `capture` | ✅ |
 | Process type codecs (INT/WORD/DINT/REAL big‑endian, packed BOOL) | `data` | ✅ |
 | **DCP** device side: Identify (request parsing + byte-exact response, dispatch) | `dcp` | ✅ |
-| DCP Get / Set‑name / Set‑IP / Flash | `dcp` | ⏳ |
-| AR establishment (DCE/RPC, state machine) | `cm` | ⏳ |
+| DCP Set-IP (guarded) ✅, Get / Set‑name / Flash ⏳ | `dcp` | ⏳ |
+| DCE-RPC CL codec + UDP transport | `rpc` | ✅ |
+| AR establishment (DCE/RPC, state machine) | `cm` | ✅ AR reaches DATA on a real S7-1500 (HIL 2026-08-28) |
+| Acyclic device loop + bring-up example | `device` | ✅ |
 | RT cyclic exchange (PPM/CPM, IOPS/IOCS, watchdog, `SCHED_FIFO` thread) | `rt` | ⏳ |
 | Alarms + I&M | `alarm`/`im` | ⏳ |
 | Config model + GSDML + public API | `config` | ⏳ |
@@ -79,8 +81,8 @@ included.
 
 ## Roadmap
 
-`cm` (AR) → `rt` (1 ms cyclic) → `alarm`/`im` → `config`/GSDML/API → HIL integration &
-determinism measurement. Details in the plans above.
+`cm` (AR) ✅ → **next: `rt`** (1 ms cyclic) → `alarm`/`im` → `config`/GSDML/API → HIL
+integration & determinism measurement. Details in the plans above.
 
 ## License
 

@@ -13,7 +13,10 @@ pub const VLAN_PAYLOAD_OFF: usize = 18;
 pub fn parse_hex(text: &str) -> Vec<u8> {
     text.lines()
         .map(|l| l.split('#').next().unwrap_or(""))
-        .flat_map(|l| l.split_whitespace().map(|b| u8::from_str_radix(b, 16).expect("hex byte")))
+        .flat_map(|l| {
+            l.split_whitespace()
+                .map(|b| u8::from_str_radix(b, 16).expect("hex byte"))
+        })
         .collect::<Vec<u8>>()
 }
 

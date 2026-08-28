@@ -174,12 +174,97 @@ with `tshark.exe` via WSL interop (`/mnt/c/Program Files/Wireshark/tshark.exe`).
 - **Alarm** (Button2): frame ID `0xfc01` Alarm High, Data-RTA (Alarm Notification, Process, slot 1)
   → CPU ACK-RTA → CPU Alarm Ack → device ACK-RTA.
 
+## 6c. HIL — profinet-rt itself as the IO-Device (2026-08-28)
+
+With Plan 3 (`rpc` + `cm`) implemented, `examples/ar_bringup` replaces `pn_dev` as the peer
+facing the CPU on `eno2` — same topology, same TIA project `PLC_BENCH`, same p-net GSDML
+(station `rt-labs-dev`, `172.16.2.10`, 32 ms update time, CPU indifferent to STOP/RUN).
+
+**Build**: a plain debug build copied to the edge fails to run — the edge's glibc (2.41) is
+older than the build host's, so the dynamically-linked binary refuses to start. Built musl
+instead:
+```bash
+. "$HOME/.cargo/env" && rustup target add x86_64-unknown-linux-musl
+cargo build --release --example ar_bringup --target x86_64-unknown-linux-musl
+scp target/x86_64-unknown-linux-musl/release/examples/ar_bringup maintenance@192.168.1.21:bench/
+```
+The AF_PACKET/UDP raw-socket capabilities do not survive a `scp` (they are file
+attributes, not part of the file content) — `setcap` must be **re-applied after every
+copy**:
+```bash
+sudo /usr/sbin/setcap cap_net_raw,cap_net_admin+eip /home/maintenance/bench/ar_bringup
+```
+Run, capture running first:
+```bash
+nohup ~/bench/capture.sh hil-ar-bringup > ~/bench/logs/capture-hil.out 2>&1 &
+RUST_LOG=info ~/bench/ar_bringup --iface eno2 --name rt-labs-dev --ip 172.16.2.10 2>&1 | tee ~/bench/logs/ar_bringup.log
+```
+Expected log sequence: `device up on eno2 as ...`, then on the CPU's first DCP Identify
+`AR state: Connected`, then `AR state: Data` (`AppReadySent` is an internal transition, not
+notified).
+
+### Run 1 — 2026-08-28 08:30, binary at `44e60e1` (musl)
+Capture `captures/hil-ar-bringup-2026-08-28-082958.pcapng`, log `~/bench/logs/ar_bringup.log`.
+
+- CPU DCP Ident Req (name filter) every 2.6 s from t=0; at t=2.601 s our Ident Ok (untagged,
+  IP block already reports `172.16.2.10`). **No DCP Set was sent by the CPU this time** — with
+  p-net the Ident Ok reports `0.0.0.0` and draws a Set; our device already carries the
+  configured IP, so the CPU has nothing to correct.
+- t=2.605 Connect req → our Connect res (OK) → Write `MultipleWrite` → our Write res → PrmEnd →
+  our Done → our ApplicationReady sent from UDP port 34964 → CPU's Done from port 56424 at
+  t=2.611. **AR reached Data in 6 ms.**
+- **Byte-identity vs p-net**: our four response/request PDUs (Connect res, Write res, PrmEnd
+  res, ApplicationReady req) are byte-identical to the `docs/cm-golden-frames.md` goldens
+  except the RPC activity UUID (5 trailing bytes, per-run) and the session-key byte (the CPU
+  picked session 4 here, 2 in the golden capture) — both are protocol state the initiator/
+  responder are expected to vary, not codec defects.
+- CPU sent cyclic RTC1 (frame ID `0x8001`, data status `0x35`) from t=2.63 for 6.7 s even
+  though we sent no cyclic frames ourselves (RT/`rt` is Plan 4). At t=9.302 the CPU issued an
+  RPC **Read, index `0xfbff`** ("Trigger index for RPC connection monitoring"). Our device had
+  no `Read` handling and answered `service_unsupported` — decoded by the CPU as
+  `0x81,0x81,0x05,0` ("Faulty PrmServerBlockReq") — which the CPU treated as a monitoring
+  failure: it raised an **ERR-RTA "AR RPC-Read error"** on the alarm channel and dropped the AR.
+- The CPU then retried every 1.5 s: Ident Req → our Ident Ok → **Connect with the same ARUUID**
+  (`e5e1aecc-…`, stable per configured AR) **and SessionKey incremented by one each time**
+  (4 → 5 → 6 → …), each carrying a fresh activity UUID. Our state machine (pre-fix) treated
+  this as a retransmission of the first Connect and kept resending the stale cached response,
+  so the AR stayed stuck at `Data` without ever completing the new handshake: 323
+  `AR Data --Tick--> Data` info-level lines logged over 25 s.
+
+### Fixes (`aca42d9`, `8ab2711`)
+- Controller reconnect — same ARUUID with a bumped session key, **or** a new ARUUID from the
+  same initiator — now aborts the stale AR (`AbortReason::ControllerReconnect`) and accepts the
+  new Connect instead of replaying the cached response.
+- `Read`/`ReadImplicit` are refused with a well-formed PNIORW error
+  (`0xDE,0x80,0xB0,0x00`, "invalid index") instead of `service_unsupported`.
+- No-op `Tick` transitions are logged at `debug`, not `info` (removes the log flood).
+- The outgoing RPC call sequence number stays monotonic across an AR takeover (it no longer
+  resets and risks colliding with the previous AR's in-flight sequence).
+
+### Run 2 — 2026-08-28 08:51, binary at `aca42d9`
+Capture `captures/hil2-reconnect-2026-08-28-085142.pcapng`, log `~/bench/logs/ar_bringup2.log`.
+
+- Same 6 ms bring-up to `Data`. **With the PNIORW error reply, the CPU keeps the AR alive**:
+  it re-issues the Read on index `0xfbff` every 6.7 s (t=10.1, 16.8, 23.5, 30.2), cyclic
+  `0x8001` runs for the whole 30 s window, no ERR-RTA, no reconnect. Zero `Tick` lines logged.
+- **Conclusion**: the CPU's RPC connection-monitoring Read only needs *any* well-formed RPC
+  reply on time — not a successful Read of `0xfbff`. Any `PnioStatus` error the CPU can parse
+  satisfies it; `service_unsupported` did not (it was not a recognized status combination).
+
+### What a Plan 4 run should expect
+Plan 3 exercises the acyclic path only (no RTC1 sent by us). Once `rt` sends cyclic frames
+(Plan 4), the CPU's RPC connection monitoring is expected to fall back to the cyclic watchdog
+path it uses with a real IO-Device: the periodic `Read 0xfbff` probe seen in both runs above
+is specific to an acyclic-only peer and should stop appearing once we produce RTC1 frames at
+the negotiated update time. Minimal `Read` support beyond the PNIORW refusal (index `0xfbff`,
+I&M reads) stays deferred to Plan 5 (see `FOLLOWUPS.md`).
+
 ## 7. Next steps
-With `ar-connect.pcapng` + `rt-cyclic.pcapng` we can **scope and execute Plan 3 (`cm`/AR)**:
-DCE-RPC over UDP 34964, ARBlockReq/IOCRBlockReq/ExpectedSubmodule/AlarmCR blocks, AR state machine
-up to DATA, then CControl ApplicationReady from the device side — on real ground truth.
-`rt-cyclic.pcapng` + the `I8` module settle the **BOOL bit-order** follow-up; the `Echo` module
-settles the REAL codec on the wire.
+Plan 3 (`cm`/AR) is done: `examples/ar_bringup` reaches AR state `Data` against the real
+S7-1500, byte-identical to the p-net goldens modulo per-run protocol state, and survives the
+CPU's reconnect-with-bumped-session sequence (§6c). Next is **Plan 4 (`rt`, cyclic
+exchange)**: send RTC1 at the negotiated update time so the CPU's connection monitoring no
+longer needs the acyclic `Read 0xfbff` probe, then measure jitter under `PREEMPT_RT`.
 
 ## Pitfalls
 - **Never use CPL/PowerLine** on the segment (HomePlug `0x88e1` → jitter → RT watchdog expires, AR drops).

@@ -118,3 +118,18 @@ mirroring the request's `args_max` per the "Key facts" note above.
   ApplicationReady / ApplicationReady Done): same ControlBlockConnect-family shape
   (`BlockType 0x0112` request / `0x8112` response) with the `ApplicationReady` control
   command.
+
+## HIL comparison (2026-08-28)
+
+`examples/ar_bringup` run against the real S7-1500 (see `docs/bench-pnet-device.md` §6c)
+produced PDUs byte-identical to these goldens, with only two expected differences: the RPC
+**activity UUID** (per-run, generated fresh by each side) and the **session key** chosen by
+the CPU (4 in the HIL run vs. 2 in this capture — a per-AR counter, not a codec value). No
+block layout, field, or byte-order difference was observed.
+
+Unlike p-net, which sends its ApplicationReady request from an ephemeral port (49153 in
+`appready_req.hex`), our `UdpRpcTransport` sends it from the bound server port **34964**
+(one socket for both roles). The CPU accepted it and replied — from its own ephemeral port
+**56424**, not from 34964 — so the CPU's RPC responder does not require symmetric ports on
+either side; the "switch `UdpRpcTransport` to a second ephemeral socket" contingency noted
+in the design spec (§7) did not apply, and the single-socket transport is kept as-is.
