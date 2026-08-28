@@ -339,6 +339,18 @@ impl RtEngine {
         }
     }
 
+    /// Force every remembered output IOPS to BAD.
+    ///
+    /// Called by the runner when the consumer watchdog expires: the controller has
+    /// stopped providing, so the IOCS bytes we stamp on our own frames (built from
+    /// these bits in [`RtEngine::on_tick`]) must go BAD until it talks again — an
+    /// accepted frame refreshes them.
+    pub fn mark_outputs_stale(&mut self) {
+        for good in &mut self.rx_iops_good {
+            *good = false;
+        }
+    }
+
     /// Convenience: `self.stats.snapshot()`.
     pub fn stats_snapshot(&self) -> StatsSnapshot {
         self.stats.snapshot()
@@ -591,6 +603,15 @@ mod tests {
             e.check_watchdog(t + Duration::from_millis(310)),
             WatchdogVerdict::Ok
         );
+    }
+
+    #[test]
+    fn mark_outputs_stale_forces_every_iops_bad() {
+        let mut e = engine();
+        e.on_frame(&golden_rt("echo_cpu_8001"), Instant::now());
+        assert!(e.rx_iops_good().iter().all(|g| *g));
+        e.mark_outputs_stale();
+        assert!(e.rx_iops_good().iter().all(|g| !*g));
     }
 
     #[test]

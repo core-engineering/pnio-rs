@@ -2,7 +2,7 @@ use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
-use nix::sys::socket::{recv, send, MsgFlags};
+use nix::sys::socket::{send, MsgFlags};
 
 use super::poll::wait_readable;
 use super::transport::{EthTransport, TransportError};
@@ -137,8 +137,31 @@ impl EthTransport for AfPacketTransport {
             return Ok(None);
         }
         let mut buf = vec![0u8; 1522];
-        let n = recv(self.fd.as_raw_fd(), &mut buf, MsgFlags::empty())?;
-        buf.truncate(n);
+        // Safety: `buf` is a valid, writable allocation of `buf.len()` bytes and
+        // `from`/`from_len` a valid, fully-initialized `sockaddr_ll` plus its length,
+        // all live for the duration of the call; `fd` is a valid, open socket.
+        let mut from: libc::sockaddr_ll = unsafe { mem::zeroed() };
+        let mut from_len = mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+        let n = unsafe {
+            libc::recvfrom(
+                self.fd.as_raw_fd(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                0,
+                &mut from as *mut libc::sockaddr_ll as *mut libc::sockaddr,
+                &mut from_len,
+            )
+        };
+        if n < 0 {
+            return Err(TransportError::Io(std::io::Error::last_os_error()));
+        }
+        // Our own transmissions are looped back to every `AF_PACKET` socket on the
+        // interface, including the one that sent them: drop them here so the cyclic
+        // engine never sees its own provider frames.
+        if from.sll_pkttype == libc::PACKET_OUTGOING {
+            return Ok(None);
+        }
+        buf.truncate(n as usize);
         if is_profinet_frame(&buf) {
             Ok(Some(buf))
         } else {

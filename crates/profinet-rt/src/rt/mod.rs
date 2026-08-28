@@ -4,6 +4,8 @@ pub mod engine;
 pub mod frame;
 pub mod image;
 pub mod layout;
+#[cfg(target_os = "linux")]
+pub mod runner;
 
 pub use engine::{
     DropReason, RtEngine, RtStats, RxVerdict, StatsSnapshot, WatchdogVerdict, IOXS_BAD, IOXS_GOOD,
@@ -13,6 +15,8 @@ pub use frame::{
 };
 pub use image::{Freshness, ImageError, IoImage, Validity, WatchdogState};
 pub use layout::{Cell, CrLayout, CsObject, IoObject, Layout, LayoutError};
+#[cfg(target_os = "linux")]
+pub use runner::{RtConfig, RtEvent, RtHandle, RtRunner};
 
 use thiserror::Error;
 

@@ -1,0 +1,661 @@
+//! The RT thread: the only place in the stack that owns a clock, a socket and a
+//! priority.
+//!
+//! [`RtRunner::spawn`] starts a thread that drives the pure pieces built by the rest
+//! of `rt`: a `timerfd` paces the send cycle, [`RtEngine`] produces and consumes the
+//! frames, and [`IoImage`] is the non-blocking hand-off with the application. The
+//! thread never allocates and never logs once it is running — it reports out-of-band
+//! conditions as [`RtEvent`]s on a queue backed by an `eventfd`, so the acyclic side
+//! can wait on `event_fd()` in its own `poll` and do the logging.
+//!
+//! The one allocation left in the cycle is the `Vec` [`EthTransport::recv`] returns
+//! for each received frame — it is part of that trait's signature. Everything else
+//! (TX frame, input snapshot, poll set, event queue capacity) is preallocated before
+//! the loop starts.
+
+use std::collections::VecDeque;
+use std::mem;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use super::engine::{RtEngine, RtStats, RxVerdict, WatchdogVerdict};
+use super::image::{IoImage, Validity, WatchdogState};
+use super::layout::Layout;
+use super::RtError;
+use crate::eth::poll::poll_readable_into;
+use crate::eth::AfPacketTransport;
+use crate::eth::{EthTransport, MacAddr, TransportError};
+
+/// Upper bound on frames consumed in one receive pass, so a flooded socket cannot
+/// starve the send cycle: whatever is left waits for the next pass.
+const MAX_RX_PER_PASS: usize = 64;
+
+/// Everything the RT thread needs to run one AR.
+pub struct RtConfig {
+    /// Interface to open in [`RtRunner::spawn`] (ignored by
+    /// [`RtRunner::spawn_with_transport`]).
+    pub iface: String,
+    /// Source MAC we stamp on the frames we produce.
+    pub our_mac: MacAddr,
+    /// The controller's MAC: the only source we accept frames from.
+    pub cpu_mac: MacAddr,
+    /// C-SDU plan for both CRs; `input_cr.period()` also paces the timer.
+    pub layout: Layout,
+    /// Shared I/O image: inputs from the application, outputs to it.
+    pub image: Arc<IoImage>,
+    /// Counters, shared with the engine and readable from any thread.
+    pub stats: Arc<RtStats>,
+    /// Pin the RT thread to this CPU, if set.
+    pub cpu_pin: Option<usize>,
+    /// Run the RT thread at this `SCHED_FIFO` priority, if set.
+    pub rt_priority: Option<u8>,
+}
+
+/// Out-of-band conditions reported by the RT thread, drained by the acyclic side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RtEvent {
+    /// The consumer watchdog expired (reported once per gap, like the engine).
+    WatchdogExpired,
+    /// The socket failed; the thread stops right after this event.
+    SocketError(String),
+    /// Real-time scheduling or CPU pinning could not be applied; the thread runs on
+    /// anyway, at whatever priority it already had.
+    SchedWarning(String),
+    /// Last event of the thread's life, pushed even if the loop panicked.
+    Exited,
+}
+
+/// State shared between the RT thread and its [`RtHandle`].
+struct RtShared {
+    stop: AtomicBool,
+    running: AtomicBool,
+    events: Mutex<VecDeque<RtEvent>>,
+    /// Readable while at least one event is queued.
+    event_fd: OwnedFd,
+    /// Written by [`RtHandle::stop`] only, to break the thread's `poll`.
+    wake_fd: OwnedFd,
+    stats: Arc<RtStats>,
+}
+
+impl RtShared {
+    fn push_event(&self, event: RtEvent) {
+        let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        events.push_back(event);
+        signal_eventfd(self.event_fd.as_raw_fd());
+    }
+
+    fn request_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+        signal_eventfd(self.wake_fd.as_raw_fd());
+    }
+}
+
+/// Pushes `Exited` and clears `running` when the thread body ends, panic included.
+struct ExitGuard<'a>(&'a RtShared);
+
+impl Drop for ExitGuard<'_> {
+    fn drop(&mut self) {
+        self.0.push_event(RtEvent::Exited);
+        self.0.running.store(false, Ordering::Release);
+    }
+}
+
+/// Handle on a running RT thread: stop it, wait for it, read its events and counters.
+pub struct RtHandle {
+    shared: Arc<RtShared>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl RtHandle {
+    /// Ask the thread to stop and wake it out of its `poll`. Returns immediately;
+    /// use [`RtHandle::join`] to wait for the thread to actually exit.
+    pub fn stop(&self) {
+        self.shared.request_stop();
+    }
+
+    /// Wait up to `timeout` for the thread to exit, polling `is_finished()` every
+    /// millisecond.
+    ///
+    /// Returns `Err(RtError::Stopped)` if it is still running when `timeout`
+    /// elapses; the thread is then left detached (it holds only its own `Arc`s and
+    /// will release them when it does exit). Takes `&self` — not `self` — so events
+    /// and counters stay readable after the thread is gone.
+    pub fn join(&self, timeout: Duration) -> Result<(), RtError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let mut slot = self.thread.lock().unwrap_or_else(|e| e.into_inner());
+            match slot.as_ref() {
+                None => return Ok(()),
+                Some(handle) if handle.is_finished() => {
+                    let handle = slot.take().expect("checked Some just above");
+                    drop(slot);
+                    let _ = handle.join(); // a panic in the RT thread is not ours to resume
+                    return Ok(());
+                }
+                Some(_) => drop(slot),
+            }
+            if Instant::now() >= deadline {
+                return Err(RtError::Stopped);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// An fd that is readable while at least one event is queued, so a caller can
+    /// wait on the RT thread inside its own `poll(2)` loop.
+    pub fn event_fd(&self) -> RawFd {
+        self.shared.event_fd.as_raw_fd()
+    }
+
+    /// Pop the oldest pending event, clearing [`RtHandle::event_fd`] once the queue
+    /// runs empty.
+    pub fn take_event(&self) -> Option<RtEvent> {
+        let mut events = self.shared.events.lock().unwrap_or_else(|e| e.into_inner());
+        let event = events.pop_front();
+        if events.is_empty() {
+            drain_eventfd(self.shared.event_fd.as_raw_fd());
+        }
+        event
+    }
+
+    /// The counters the RT thread updates.
+    pub fn stats(&self) -> Arc<RtStats> {
+        self.shared.stats.clone()
+    }
+
+    /// False once the thread body has ended.
+    pub fn is_running(&self) -> bool {
+        self.shared.running.load(Ordering::Acquire)
+    }
+}
+
+/// Spawns the RT thread.
+pub struct RtRunner;
+
+impl RtRunner {
+    /// Open `cfg.iface` and start the RT thread on it.
+    ///
+    /// The socket is opened in the *calling* thread so a bad interface name or a
+    /// missing `CAP_NET_RAW` comes back as an error here rather than as an event
+    /// from a thread that immediately dies.
+    pub fn spawn(cfg: RtConfig) -> Result<RtHandle, RtError> {
+        let transport = AfPacketTransport::open(&cfg.iface).map_err(|e| match e {
+            TransportError::Io(e) => RtError::Io(e),
+        })?;
+        Self::spawn_with_transport(cfg, transport)
+    }
+
+    /// Start the RT thread on an already-open transport.
+    ///
+    /// A transport without a [`EthTransport::raw_fd`] (the in-memory mock) cannot be
+    /// polled, so it is drained with a zero-timeout `recv` after every tick instead.
+    pub fn spawn_with_transport<T: EthTransport + 'static>(
+        cfg: RtConfig,
+        transport: T,
+    ) -> Result<RtHandle, RtError> {
+        let timer = new_timerfd(cfg.layout.input_cr.period())?;
+        let shared = Arc::new(RtShared {
+            stop: AtomicBool::new(false),
+            running: AtomicBool::new(true),
+            events: Mutex::new(VecDeque::with_capacity(16)),
+            event_fd: new_eventfd()?,
+            wake_fd: new_eventfd()?,
+            stats: cfg.stats.clone(),
+        });
+
+        let thread_shared = Arc::clone(&shared);
+        let thread = std::thread::Builder::new()
+            .name("profinet-rt".to_string())
+            .spawn(move || {
+                let _exit = ExitGuard(&thread_shared);
+                run_loop(cfg, transport, timer, &thread_shared);
+            })?;
+
+        Ok(RtHandle {
+            shared,
+            thread: Mutex::new(Some(thread)),
+        })
+    }
+}
+
+/// A publish the image could not take yet, retried on the next tick.
+#[derive(Clone, Copy)]
+enum Pending {
+    /// Data plus validity, from an accepted frame.
+    Data(Validity),
+    /// Validity only, from a watchdog verdict.
+    Validity(Validity),
+}
+
+/// The RT thread body. Sets up scheduling, then loops until `stop` is requested or
+/// the socket fails. Allocates only before the loop and on the way out (the event
+/// strings); never logs.
+fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared: &RtShared) {
+    let RtConfig {
+        our_mac,
+        cpu_mac,
+        layout,
+        image,
+        stats,
+        cpu_pin,
+        rt_priority,
+        ..
+    } = cfg;
+
+    // --- setup: allocation, formatting and warnings all happen before the loop ---
+    if let Some(priority) = rt_priority {
+        if let Err(e) = set_fifo_priority(priority) {
+            shared.push_event(RtEvent::SchedWarning(format!(
+                "SCHED_FIFO priority {priority}: {e}"
+            )));
+        }
+    }
+    if let Some(cpu) = cpu_pin {
+        if let Err(e) = pin_to_cpu(cpu) {
+            shared.push_event(RtEvent::SchedWarning(format!("CPU pin {cpu}: {e}")));
+        }
+    }
+
+    let period = layout.input_cr.period();
+    let mut snapshot = vec![0u8; layout.input_cr.data_length];
+    let mut engine = RtEngine::new(layout, our_mac, cpu_mac, Arc::clone(&stats));
+
+    let socket_fd = transport.raw_fd();
+    let mut fds = [timer.as_raw_fd(), shared.wake_fd.as_raw_fd(), 0];
+    let nfds = match socket_fd {
+        Some(fd) => {
+            fds[2] = fd;
+            3
+        }
+        None => 2,
+    };
+    let mut ready = [false; 3];
+
+    let mut ticks: u64 = 0;
+    let mut first_tick: Option<Instant> = None;
+    let mut pending: Option<Pending> = None;
+
+    while !shared.stop.load(Ordering::Acquire) {
+        match poll_readable_into(&fds[..nfds], &mut ready[..nfds], None) {
+            Ok(0) => continue,
+            Ok(_) => {}
+            Err(e) => {
+                shared.push_event(RtEvent::SocketError(format!("poll: {e}")));
+                break;
+            }
+        }
+
+        if ready[1] {
+            drain_eventfd(shared.wake_fd.as_raw_fd()); // stop requested: the loop condition acts
+        }
+
+        let mut ticked = false;
+        if ready[0] {
+            let expirations = read_timer(timer.as_raw_fd());
+            if expirations > 0 {
+                ticked = true;
+                let now = Instant::now();
+                ticks = ticks.saturating_add(expirations);
+
+                // Lateness against the ideal grid anchored on the first tick.
+                let start = *first_tick.get_or_insert(now);
+                let offset = Duration::from_nanos(
+                    (period.as_nanos() as u64).saturating_mul(ticks.saturating_sub(1)),
+                );
+                if let Some(expected) = start.checked_add(offset) {
+                    let lateness = now.saturating_duration_since(expected).as_nanos() as u64;
+                    stats
+                        .max_tick_lateness_ns
+                        .fetch_max(lateness, Ordering::Relaxed);
+                }
+
+                if let Some(p) = pending.take() {
+                    retry_pending(p, &engine, &image, &stats, &mut pending);
+                }
+
+                if engine.check_watchdog(now) == WatchdogVerdict::Expired {
+                    // The controller stopped providing: our IOCS bytes must go BAD
+                    // until it talks again.
+                    engine.mark_outputs_stale();
+                    shared.push_event(RtEvent::WatchdogExpired);
+                    let validity = Validity {
+                        provider_run: engine.provider_run(),
+                        primary: engine.primary(),
+                        watchdog: WatchdogState::Expired,
+                        last_rx_age: engine.last_rx().map(|t| now.saturating_duration_since(t)),
+                        cycle: ticks,
+                    };
+                    if !image.rt_set_validity(validity) {
+                        stats
+                            .output_publish_deferred
+                            .fetch_add(1, Ordering::Relaxed);
+                        pending = Some(Pending::Validity(validity));
+                    }
+                }
+
+                if !image.rt_snapshot_inputs(&mut snapshot) {
+                    stats.input_snapshot_reused.fetch_add(1, Ordering::Relaxed);
+                }
+                let expirations = u32::try_from(expirations).unwrap_or(u32::MAX);
+                let frame = engine.on_tick(expirations, &snapshot);
+                if let Err(e) = transport.send(frame) {
+                    shared.push_event(RtEvent::SocketError(format!("send: {e}")));
+                    break;
+                }
+            }
+        }
+
+        // A polled socket is drained when it says so; a transport with no fd is
+        // drained once per tick instead.
+        let drain = if nfds == 3 { ready[2] } else { ticked };
+        if drain
+            && !drain_rx(
+                &transport,
+                &mut engine,
+                &image,
+                &stats,
+                ticks,
+                &mut pending,
+                shared,
+            )
+        {
+            break;
+        }
+    }
+}
+
+/// Consume up to [`MAX_RX_PER_PASS`] frames. Returns false if the socket failed (the
+/// event is already pushed and the caller must leave the loop).
+#[allow(clippy::too_many_arguments)]
+fn drain_rx<T: EthTransport>(
+    transport: &T,
+    engine: &mut RtEngine,
+    image: &IoImage,
+    stats: &RtStats,
+    ticks: u64,
+    pending: &mut Option<Pending>,
+    shared: &RtShared,
+) -> bool {
+    for _ in 0..MAX_RX_PER_PASS {
+        match transport.recv(Some(Duration::ZERO)) {
+            Ok(None) => return true,
+            Ok(Some(frame)) => {
+                let now = Instant::now();
+                if let RxVerdict::Accepted { .. } = engine.on_frame(&frame, now) {
+                    let validity = Validity {
+                        provider_run: engine.provider_run(),
+                        primary: engine.primary(),
+                        watchdog: WatchdogState::Ok,
+                        last_rx_age: Some(Duration::ZERO),
+                        cycle: ticks,
+                    };
+                    if image.rt_publish(engine.rx_csdu(), validity) {
+                        *pending = None;
+                    } else {
+                        stats
+                            .output_publish_deferred
+                            .fetch_add(1, Ordering::Relaxed);
+                        *pending = Some(Pending::Data(validity));
+                    }
+                }
+            }
+            Err(e) => {
+                shared.push_event(RtEvent::SocketError(format!("recv: {e}")));
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Retry one deferred publish; if the image is still busy it stays pending.
+fn retry_pending(
+    p: Pending,
+    engine: &RtEngine,
+    image: &IoImage,
+    stats: &RtStats,
+    pending: &mut Option<Pending>,
+) {
+    let taken = match p {
+        Pending::Data(v) => image.rt_publish(engine.rx_csdu(), v),
+        Pending::Validity(v) => image.rt_set_validity(v),
+    };
+    if !taken {
+        stats
+            .output_publish_deferred
+            .fetch_add(1, Ordering::Relaxed);
+        *pending = Some(p);
+    }
+}
+
+/// A `CLOCK_MONOTONIC` timerfd armed to fire every `period`.
+fn new_timerfd(period: Duration) -> Result<OwnedFd, RtError> {
+    if period.is_zero() {
+        // An all-zero `it_value` disarms the timer instead of firing: refuse it here
+        // rather than block forever in the loop.
+        return Err(RtError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+    }
+    // Safety: `timerfd_create(2)` with valid constant arguments; the returned fd is
+    // immediately wrapped in an `OwnedFd`, which closes it on drop.
+    let raw = unsafe {
+        libc::timerfd_create(
+            libc::CLOCK_MONOTONIC,
+            libc::TFD_NONBLOCK | libc::TFD_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(RtError::Io(std::io::Error::last_os_error()));
+    }
+    // Safety: `raw` was just returned by a successful `timerfd_create(2)` and is not
+    // owned anywhere else.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+
+    let spec = libc::itimerspec {
+        it_interval: to_timespec(period),
+        it_value: to_timespec(period),
+    };
+    // Safety: `fd` is a valid timerfd and `spec` a fully-initialized `itimerspec`
+    // live for the call; the old-value pointer is allowed to be null.
+    let ret = unsafe { libc::timerfd_settime(fd.as_raw_fd(), 0, &spec, ptr::null_mut()) };
+    if ret < 0 {
+        return Err(RtError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(fd)
+}
+
+fn to_timespec(d: Duration) -> libc::timespec {
+    libc::timespec {
+        tv_sec: d.as_secs() as libc::time_t,
+        tv_nsec: d.subsec_nanos() as libc::c_long,
+    }
+}
+
+/// Number of expirations since the last read, or 0 if the timer was not ready.
+fn read_timer(fd: RawFd) -> u64 {
+    let mut buf = [0u8; 8];
+    // Safety: `fd` is a valid non-blocking timerfd; `buf` is 8 writable bytes.
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    if n == 8 {
+        u64::from_ne_bytes(buf)
+    } else {
+        0
+    }
+}
+
+/// A non-blocking, close-on-exec `eventfd` used as a one-bit doorbell.
+fn new_eventfd() -> Result<OwnedFd, RtError> {
+    // Safety: `eventfd(2)` with valid constant arguments; the returned fd is
+    // immediately wrapped in an `OwnedFd`, which closes it on drop.
+    let raw = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+    if raw < 0 {
+        return Err(RtError::Io(std::io::Error::last_os_error()));
+    }
+    // Safety: `raw` was just returned by a successful `eventfd(2)` and is not owned
+    // anywhere else.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+/// Add 1 to an eventfd's counter, making it readable. Errors are not actionable:
+/// the only failure mode on a non-blocking eventfd is a saturated counter, which
+/// means the reader is already awake.
+fn signal_eventfd(fd: RawFd) {
+    let one: u64 = 1;
+    // Safety: `fd` is a valid eventfd; `one` is 8 readable bytes live for the call.
+    let _ = unsafe { libc::write(fd, &one as *const u64 as *const libc::c_void, 8) };
+}
+
+/// Reset an eventfd's counter to 0. `EAGAIN` (already 0) is the expected no-op.
+fn drain_eventfd(fd: RawFd) {
+    let mut buf = [0u8; 8];
+    // Safety: `fd` is a valid non-blocking eventfd; `buf` is 8 writable bytes.
+    let _ = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+}
+
+/// Move the calling thread to `SCHED_FIFO` at `priority` (needs `CAP_SYS_NICE`).
+fn set_fifo_priority(priority: u8) -> std::io::Result<()> {
+    let param = libc::sched_param {
+        sched_priority: priority as libc::c_int,
+    };
+    // Safety: `param` is a fully-initialized `sched_param` live for the call; pid 0
+    // means the calling thread.
+    let ret = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Pin the calling thread to `cpu`.
+fn pin_to_cpu(cpu: usize) -> std::io::Result<()> {
+    // Safety: `cpu_set_t` is a plain-old-data bitmap for which an all-zero bit
+    // pattern is a valid (empty) set; `CPU_SET` only writes inside it, and
+    // `sched_setaffinity` reads exactly the size we pass. pid 0 means the calling
+    // thread.
+    let ret = unsafe {
+        let mut set: libc::cpu_set_t = mem::zeroed();
+        libc::CPU_SET(cpu, &mut set);
+        libc::sched_setaffinity(0, mem::size_of::<libc::cpu_set_t>(), &set)
+    };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cm::{validate, ConnectReq, DeviceModel};
+    use crate::eth::{MacAddr, MockTransport};
+    use crate::rt::image::{Freshness, IoImage};
+    use crate::rt::layout::Layout;
+    use crate::testutil::{golden, golden_rt};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    const CPU: MacAddr = MacAddr([0xec, 0x1c, 0x5d, 0x61, 0xe7, 0x3f]);
+    const DEV: MacAddr = MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]);
+
+    fn layout() -> Layout {
+        let model = DeviceModel::pnet_sample(DEV);
+        let req = ConnectReq::parse(&golden("connect_req")[142..]).unwrap();
+        Layout::from_ar(&validate(&req, &model).unwrap(), &model).unwrap()
+    }
+
+    /// Shrink the period for the test: 5 ms instead of 32 ms (cycle_step stays 1024
+    /// for the counter in production; here it also drives the timer).
+    fn cfg(image: Arc<IoImage>, stats: Arc<RtStats>) -> RtConfig {
+        let mut layout = layout();
+        layout.input_cr.cycle_step = 160; // 160 x 31.25 us = 5 ms
+        layout.output_cr.cycle_step = 160;
+        layout.output_cr.watchdog = Duration::from_millis(15);
+        RtConfig {
+            iface: String::new(),
+            our_mac: DEV,
+            cpu_mac: CPU,
+            layout,
+            image,
+            stats,
+            cpu_pin: None,
+            rt_priority: None,
+        }
+    }
+
+    #[test]
+    fn runner_ticks_sends_and_consumes_with_a_mock_transport() {
+        let image = Arc::new(IoImage::new(&layout()));
+        let stats = Arc::new(RtStats::default());
+        let mock = MockTransport::new();
+        mock.push_rx(golden_rt("echo_cpu_8001"));
+        let mock = Arc::new(mock);
+        image.write_inputs(1, 1, &[0x5a]).unwrap();
+        let h = RtRunner::spawn_with_transport(
+            cfg(image.clone(), stats.clone()),
+            SharedMock(mock.clone()),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(60));
+        h.stop();
+        h.join(Duration::from_secs(1)).unwrap();
+        let sent = mock.sent();
+        assert!(sent.len() >= 8 && sent.len() <= 14, "sent {}", sent.len());
+        assert_eq!(&sent[0][12..18], &[0x81, 0x00, 0xc0, 0x00, 0x88, 0x92]);
+        assert_eq!(sent[0][20 + 3], 0x5a); // our DI byte from the image
+                                           // the CPU frame was consumed and published
+        let qb0 = image.read_outputs(2, 1, |b, _| b[0]).unwrap();
+        assert_eq!(qb0, 0x01);
+        assert_eq!(image.validity().freshness(), Freshness::Stale); // watchdog 15 ms expired
+        assert!(stats.snapshot().tx >= 8);
+        assert_eq!(stats.snapshot().rx_accepted, 1);
+        assert_eq!(stats.snapshot().watchdog_expirations, 1);
+        assert_eq!(h.take_event(), Some(RtEvent::WatchdogExpired));
+        assert_eq!(h.take_event(), Some(RtEvent::Exited));
+    }
+
+    #[test]
+    fn stop_is_prompt_and_join_times_out_cleanly() {
+        let image = Arc::new(IoImage::new(&layout()));
+        let h = RtRunner::spawn_with_transport(
+            cfg(image, Arc::new(RtStats::default())),
+            MockTransport::new(),
+        )
+        .unwrap();
+        let t = Instant::now();
+        h.stop();
+        h.join(Duration::from_secs(1)).unwrap();
+        assert!(t.elapsed() < Duration::from_millis(200));
+        assert!(!h.is_running());
+    }
+
+    #[test]
+    fn sched_warning_is_reported_not_fatal() {
+        // Safety: `geteuid(2)` takes no argument and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // as root SCHED_FIFO succeeds and there is no warning to observe
+        }
+        let image = Arc::new(IoImage::new(&layout()));
+        let mut c = cfg(image, Arc::new(RtStats::default()));
+        c.rt_priority = Some(80); // no CAP_SYS_NICE in the test environment
+        let h = RtRunner::spawn_with_transport(c, MockTransport::new()).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        h.stop();
+        h.join(Duration::from_secs(1)).unwrap();
+        let first = h.take_event();
+        assert!(matches!(first, Some(RtEvent::SchedWarning(_))), "{first:?}");
+    }
+
+    /// `MockTransport` is not `Clone`; share it through an `Arc` for the test.
+    struct SharedMock(Arc<MockTransport>);
+    impl crate::eth::EthTransport for SharedMock {
+        fn send(&self, f: &[u8]) -> Result<(), crate::eth::TransportError> {
+            self.0.send(f)
+        }
+        fn recv(&self, t: Option<Duration>) -> Result<Option<Vec<u8>>, crate::eth::TransportError> {
+            self.0.recv(t)
+        }
+    }
+}
