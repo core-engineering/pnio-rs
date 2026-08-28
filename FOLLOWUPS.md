@@ -102,3 +102,42 @@ Open points recorded from the AR-establishment HIL run (`docs/bench-pnet-device.
   if a future controller rejects a zeroed length.
 - ✅ **RESOLVED (final review)** — `Write`/`PrmEnd`/`Release` are now matched against the
   established AR (final review); records capped at 64 / 64 KiB.
+
+## From Plan 4 (`rt`)
+
+Open points recorded from the cyclic-exchange HIL run (`docs/bench-pnet-device.md` §6d,
+`hil-rt-facts.md`), to be picked up by the plans noted:
+
+- **1 ms / determinism**: today's 32 ms run holds `max_tick_lateness` < 0.4 ms on a plain
+  Debian 13 kernel with no RT tuning; a 1 ms update time needs a `PREEMPT_RT` kernel on the
+  edge, `isolcpus`, IRQ affinity, and `mlockall`, plus a real jitter measurement campaign.
+  Plan 7.
+- **Per-socket BPF filters**: both `AF_PACKET` sockets currently see every `0x8892` frame
+  (not just the ones addressed to each). `AfPacketTransport::recv` also allocates 1522 B per
+  frame (needs a `recv_into` on the trait), and there is a double `poll` per drained frame.
+- **Lock-free seqlock for the I/O image**: only worth it if `input_snapshot_reused` /
+  `output_publish_deferred` become significant at 1 ms — at 32 ms, `output_publish_deferred`
+  reached 19 in 6 minutes, which is harmless application-level double-buffer contention, not a
+  bottleneck.
+- **`PACKET_AUXDATA`** (RX VLAN priority) — not needed to operate; revisit only if a consumer
+  needs the received VLAN priority.
+- **ERR-RTA on device stop / `ProblemIndicator` / diagnosis reporting** — not implemented; an
+  aborted AR or a stop condition is not currently signalled to the controller via the alarm
+  channel. Plan 5. `AbortReason::RtSocket` should be added instead of reusing `RtWatchdog` for
+  socket-level errors.
+- **`RtStats` cumulative across ARs**; `RtHandle::join` detaches the thread on a timeout
+  (leaves a stale-runner window); `Validity.cycle` counts runner ticks, not the PROFINET cycle
+  counter — revisit if a consumer needs the wire cycle counter specifically.
+- **Test flake surfaces**: the runner test's lower bound (≥ 8 sends / 60 ms) and the device
+  watchdog test's sleep margin are both timing-sensitive; tighten if they start flaking in CI.
+- ✅ **RESOLVED (`de8479b`)** — **IOCS deadlock**: IOCS is the consumer's own status, always
+  GOOD for every plugged submodule, independent of the received IOPS (matches p-net's
+  behaviour and IEC semantics); mirroring the CPU's IOPS into our IOCS left the CPU's
+  diagnostics buffer showing "User data failure of hardware component" for the whole run.
+  `rx_iops_good` is kept but only feeds the application's `Validity`.
+- ✅ **RESOLVED (`7320ed7`)** — **musl `sched_setscheduler`/`sched_setaffinity` stubbed with
+  `ENOSYS`**: `--rt-priority` silently fell back on the edge even though the kernel supports
+  `SCHED_FIFO`; fixed by calling the raw syscalls (`SYS_sched_setscheduler`,
+  `SYS_sched_setaffinity`) directly instead of the libc wrappers.
+- ✅ **RESOLVED (Plan 4)** — `PACKET_OUTGOING` frames dropped in `AfPacketTransport::recv`
+  (our own transmitted frames were being looped back and misread as received traffic).

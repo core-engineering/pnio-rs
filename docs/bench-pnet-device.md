@@ -259,16 +259,116 @@ is specific to an acyclic-only peer and should stop appearing once we produce RT
 the negotiated update time. Minimal `Read` support beyond the PNIORW refusal (index `0xfbff`,
 I&M reads) stays deferred to Plan 5 (see `FOLLOWUPS.md`).
 
+## 6d. HIL — cyclic exchange with profinet-rt (2026-08-28)
+
+With Plan 4 (`rt`) implemented, `examples/rt_bringup` replaces `ar_bringup` as the peer facing
+the CPU: same topology, same TIA project `PLC_BENCH`, same p-net GSDML (station
+`rt-labs-dev`, `172.16.2.10`, 32 ms update time), now sending RTC1 (`0x8000`) cyclic frames
+instead of relying on the acyclic `Read 0xfbff` keep-alive.
+
+**Build, copy, `setcap`** — same musl cross-build as §6c (edge glibc 2.41 < build host):
+```bash
+. "$HOME/.cargo/env" && cargo build --release --example rt_bringup --target x86_64-unknown-linux-musl
+scp target/x86_64-unknown-linux-musl/release/examples/rt_bringup maintenance@192.168.1.21:bench/
+sudo /usr/sbin/setcap cap_net_raw,cap_net_admin,cap_sys_nice+eip /home/maintenance/bench/rt_bringup
+```
+`cap_sys_nice` is new vs `ar_bringup`: it lets `--rt-priority` set `SCHED_FIFO` without root.
+`setcap` must be **re-applied after every copy** (same reason as §6c: it's a file attribute,
+not part of the file content, and `scp` does not preserve it).
+
+**Run**, capture running first:
+```bash
+nohup ~/bench/capture.sh hil-rt > ~/bench/logs/capture-hil-rt.out 2>&1 &
+RUST_LOG=info ~/bench/rt_bringup --iface eno2 --name rt-labs-dev --ip 172.16.2.10 \
+  --rt-priority 50 --stats-every 30 2>&1 | tee ~/bench/logs/rt_bringup.log
+```
+Expected log: AR reaches `Data` within ~1 s of the first DCP Identify and **stays there** for
+the whole run (no further state change); periodic stats lines with `tx ≈ rx_accepted` growing
+at 31/s (32 ms period), `watchdog 0`, `missed_ticks 0`, freshness `Fresh` while the CPU is in
+RUN.
+
+### Run 1 — 13:41 CEST, binary `2e1077d`, `--rt-priority 50`, 90 s
+Capture `captures/hil-rt-2026-08-28-134148.pcapng`, log `~/bench/logs/rt_bringup.log`.
+
+- AR to `Data` in < 1 s. Log: `WARN RT scheduling warning: SCHED_FIFO priority 50: Function
+  not implemented (os error 38)` — **musl's libc stubs `sched_setscheduler` with `ENOSYS`**;
+  the runner fell back to normal scheduling priority and kept running (not fatal).
+- Stats at 85 s: `tx 2651 = rx_accepted 2651`, `rx_ignored 0`, `dropped 0`, `invalid 0`,
+  `reordered 0`, `watchdog 0`, `missed_ticks 0`, `input_snapshot_reused 0`,
+  `output_publish_deferred 3`, `max_tick_lateness 36 µs`, freshness `Fresh`.
+- Capture: our `0x8000` every 31.8–32.2 ms, cycle counter step always 1024, data status
+  `0x35`, VLAN prio 6; CPU `0x8001` data status `0x35`; **zero RPC after AR setup** (no
+  `Read 0xfbff` probe — the CPU's cyclic watchdog took over from the acyclic keep-alive seen
+  in Plan 3, as predicted in §6c). One ERR-RTA from the CPU at t = 93 s, its own watchdog
+  firing after our `SIGINT` (expected teardown).
+- **Bench finding — IOCS deadlock**: the CPU's IOxS bytes for its outputs were `0x60` (BAD,
+  "detected by controller") for the entire run. Our engine mirrored the received IOPS into
+  our own IOCS — i.e. we echoed back "BAD" because the CPU's IOPS said "BAD" — so we never
+  told the CPU its outputs were consumed. In TIA: the device stayed **green** (AR alive,
+  cyclic data flowing) but the **diagnostics buffer** kept "User data failure of hardware
+  component" (HW IDs 257/258/259/262/263) open for the whole run, because the CPU never saw
+  IOCS = GOOD from us. The CPU did consume our inputs (our IOPS was correctly GOOD, so its
+  IOCS was `0x80`), but the reverse direction was stuck: a real deadlock caused by treating
+  "IOCS = last received IOPS" as the rule. **Fix (`de8479b`)**: IOCS is the *consumer's own*
+  status, not a mirror of the producer's IOPS — always GOOD for every plugged submodule we
+  consume, independent of what the CPU's IOPS says (this is p-net's own behaviour, and matches
+  IEC semantics: IOPS/IOCS are two independent per-direction judgments, not a request/ack
+  pair). `rx_iops_good` is kept, but only feeds the application's `Validity`, not our IOCS.
+  Spec §7 and the Decisions table were updated accordingly.
+
+### Run 2 — 13:44, no `--rt-priority`, 60 s
+Capture `captures/hil-rt2-2026-08-28-134426.pcapng`, log `~/bench/logs/rt_bringup2.log`.
+
+Confirms the non-RT fallback: same bring-up, 60 s stable, `tx 1504 = rx 1504`, `watchdog 0`,
+`missed_ticks 0`, `max_tick_lateness 137 µs`, freshness `Fresh`, zero RPC probes.
+
+### Fixes between Run 2 and Run 4
+- `de8479b` — IOCS deadlock fix, see Run 1 above.
+- `7320ed7` — **musl `ENOSYS` on `sched_setscheduler`**: musl's libc stubs
+  `sched_setscheduler`/`sched_setaffinity` (they always return `ENOSYS`), so `--rt-priority`
+  silently fell back on the edge even though the kernel supports `SCHED_FIFO`. **Fix**: call
+  the raw syscalls directly (`SYS_sched_setscheduler`, `SYS_sched_setaffinity`) instead of the
+  libc wrappers, bypassing the musl stub.
+
+### Run 4 — 13:55, binary `de8479b`, `--rt-priority 50`, 10 min
+Capture `captures/hil-rt4-2026-08-28-…pcapng`, log `~/bench/logs/rt_bringup4.log`.
+
+- **No SCHED_FIFO warning** (syscall fix confirmed working). AR to `Data` in ~1 s, then no
+  state change for the whole 10 min run.
+- Live sniff at t + 70 s: CPU C-SDU IOxS bytes all `0x80` (output IOPS GOOD at offsets
+  5/8/18) — **deadlock resolved**, the CPU's outputs are validated continuously.
+- **TIA proof**: watch table after modifying the `%Q` values —
+  `%IB0 = %QB0 = 16#12`, `%ID2 = %QD2 = 16#1234_5678`, `%ID6 = %QD6 = 16#8765_4321`
+  (mirror + true echo, round-tripped through `IoImage`). Device stayed **green** in the
+  topology view; the **diagnostics buffer** showed only the expected "IO device failure -"
+  entry at run start (AR establishing) and **no** "User data failure" entry for the rest of
+  the run. CPU cycled **STOP (PLC clock 12:19:56) → RUN (12:20:12)**: no device event, no AR
+  abort — matches the §6b finding that ProviderState=Stop does not release the AR.
+- Stats at 6 min: `tx 11219 / rx 11220`, `watchdog 0`, `missed_ticks 0`,
+  `output_publish_deferred 19`, `max_tick_lateness 395 µs`, freshness `Fresh` at every sample
+  (the 30 s sampling period missed the 16 s STOP window; the capture itself shows the data
+  status `0x25` frames during it).
+
+### What a 1 ms run needs (Plan 7)
+Today's 32 ms cycle stays well inside budget (`max_tick_lateness` < 0.4 ms) on a plain
+Debian 13 kernel, no RT tuning. A 1 ms update time needs, per the design's Plan 7 scope:
+`PREEMPT_RT` kernel on the edge, `isolcpus` + IRQ affinity to keep the RT thread's core free
+of other interrupts, `mlockall` to avoid page-fault jitter, and a real jitter measurement
+campaign — none of this was exercised in Plan 4's HIL runs. `output_publish_deferred` (19 in
+6 min at 32 ms) is application-level double-buffer contention and is harmless at this period;
+it should be watched at 1 ms and only needs a lock-free seqlock if it becomes significant
+(see `FOLLOWUPS.md`).
+
 ## 7. Next steps
-Plan 3 (`cm`/AR) is done: `examples/ar_bringup` reaches AR state `Data` against the real
-S7-1500, byte-identical to the p-net goldens modulo per-run protocol state. The
-reconnect-with-bumped-session takeover itself (§6c, `aca42d9`) is validated by unit tests
-(`cm::ar::tests::reconnect_with_new_session_key_takes_over` and friends); on the bench, Run 2
-(§6c) no longer reproduced the CPU's abort at all — with the `Read 0xfbff` fix in place the
-AR stayed up for the whole window, so the reconnect sequence itself was not re-exercised on
-real hardware after the fix. Next is **Plan 4 (`rt`, cyclic exchange)**: send RTC1 at the
-negotiated update time so the CPU's connection monitoring no longer needs the acyclic
-`Read 0xfbff` probe, then measure jitter under `PREEMPT_RT`.
+Plan 3 (`cm`/AR) and Plan 4 (`rt`, cyclic exchange) are both done. `examples/rt_bringup`
+reaches AR state `Data` against the real S7-1500 and holds a full RTC1 exchange (PPM/CPM,
+IOPS/IOCS, watchdog) with zero missed ticks and zero watchdog expirations over a 10-minute
+HIL run, TIA showing a green device with clean diagnostics and a STOP→RUN cycle producing no
+AR event (§6d). Next is **Plan 5 (alarms + I&M/diagnosis)**: ERR-RTA on device stop,
+`ProblemIndicator`/diagnosis reporting, and minimal `Read`/`ReadImplicit` support beyond the
+PNIORW refusal (index `0xfbff`, I&M reads) — see `FOLLOWUPS.md`. Then **Plan 7 (1 ms
+determinism)**: `PREEMPT_RT` kernel, `isolcpus`, IRQ affinity, `mlockall`, and a jitter
+measurement campaign at the 1 ms update time.
 
 ## Pitfalls
 - **Never use CPL/PowerLine** on the segment (HomePlug `0x88e1` → jitter → RT watchdog expires, AR drops).

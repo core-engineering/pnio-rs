@@ -35,10 +35,10 @@ S7‑1500 (1515‑2 PN).
 | DCE-RPC CL codec + UDP transport | `rpc` | ✅ |
 | AR establishment (DCE/RPC, state machine) | `cm` | ✅ AR reaches DATA on a real S7-1500 (HIL 2026-08-28) |
 | Acyclic device loop + bring-up example | `device` | ✅ |
-| RT cyclic exchange (PPM/CPM, IOPS/IOCS, watchdog, `SCHED_FIFO` thread) | `rt` | ⏳ |
+| RT cyclic exchange (PPM/CPM, IOPS/IOCS, watchdog, `SCHED_FIFO` thread) | `rt` | ✅ validated at 32 ms on a real S7-1500 (HIL 2026-08-28); 1 ms + determinism = Plan 7 |
 | Alarms + I&M | `alarm`/`im` | ⏳ |
 | Config model + GSDML + public API | `config` | ⏳ |
-| HIL integration + determinism (real S7‑1500, jitter measurement) | — | ⏳ |
+| HIL integration + determinism (real S7‑1500, jitter measurement) | — | AR + cyclic data round trip on a real S7-1500 ✅ (32 ms) |
 
 ## Architecture
 
@@ -81,8 +81,8 @@ included.
 
 ## Roadmap
 
-`cm` (AR) ✅ → **next: `rt`** (1 ms cyclic) → `alarm`/`im` → `config`/GSDML/API → HIL
-integration & determinism measurement. Details in the plans above.
+`cm` (AR) ✅ → `rt` (cyclic exchange) ✅ → **next: `alarm`/`im`** → `config`/GSDML/API →
+determinism measurement (1 ms, `PREEMPT_RT`). Details in the plans above.
 
 ## License
 
