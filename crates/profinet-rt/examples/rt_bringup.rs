@@ -99,6 +99,12 @@ fn main() {
         if let Err(e) = profinet_rt::rt::sched::set_affinity(&cpus) {
             log::warn!("app affinity {cpus:?}: {e}");
         }
+        if a.cpu.is_none() {
+            log::warn!(
+                "--app-cpus given without --cpu: the RT thread will inherit the \
+                 application affinity {cpus:?} instead of running unrestricted"
+            );
+        }
     }
     // Process-wide: doing it once here is equivalent to the RT thread doing it again
     // (the second `mlockall` is idempotent), but only here can we observe the result.
