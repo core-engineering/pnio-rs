@@ -2,12 +2,16 @@
 
 pub mod header;
 pub mod ndr;
+pub mod transport;
+pub mod udp;
 pub mod uuid;
 
 pub use header::{
     Opnum, PacketType, RpcHeader, FLAG1_FRAG, FLAG1_IDEMPOTENT, FLAG1_LAST_FRAG, FLAG1_NO_FACK,
 };
 pub use ndr::{NdrRequest, NdrResponse};
+pub use transport::{MockRpcTransport, RpcTransport};
+pub use udp::UdpRpcTransport;
 pub use uuid::{Uuid, PNIO_CONTROLLER_INTERFACE, PNIO_DEVICE_INTERFACE};
 
 use thiserror::Error;

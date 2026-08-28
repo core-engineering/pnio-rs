@@ -1,3 +1,4 @@
+use std::os::fd::RawFd;
 use std::sync::Mutex;
 use std::time::Duration;
 use thiserror::Error;
@@ -16,14 +17,22 @@ pub trait EthTransport: Send + Sync {
     ///
     /// Returns `Ok(None)` in three legitimate, non-error cases:
     /// - the queue is empty (e.g. `MockTransport` with nothing pushed);
-    /// - no frame arrived before `timeout` elapsed (note: `AfPacketTransport` does
-    ///   not yet honor `timeout` and blocks until a frame arrives — deferred to Plan 4);
+    /// - no frame arrived before `timeout` elapsed (`AfPacketTransport` honors
+    ///   `timeout` via `poll(2)`; `None` blocks indefinitely);
     /// - the backend filters non-PROFINET traffic and the next frame on the wire
     ///   was not PROFINET (e.g. `AfPacketTransport`).
     ///
     /// A receive loop should treat `Ok(None)` as "nothing for me right now" and
     /// continue, distinct from `Err(_)` which is a real I/O failure.
     fn recv(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, TransportError>;
+
+    /// The raw file descriptor backing this transport, when there is one, so a
+    /// caller can multiplex several transports in a single `poll(2)` loop.
+    ///
+    /// Defaults to `None` for in-memory backends (e.g. `MockTransport`).
+    fn raw_fd(&self) -> Option<RawFd> {
+        None
+    }
 }
 
 /// In-memory transport for testing.

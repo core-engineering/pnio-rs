@@ -1,6 +1,7 @@
 #[cfg(target_os = "linux")]
 mod afpacket;
 mod header;
+pub(crate) mod poll;
 mod transport;
 
 #[cfg(target_os = "linux")]

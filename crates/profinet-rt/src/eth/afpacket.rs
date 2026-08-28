@@ -1,13 +1,13 @@
 use std::mem;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
-use nix::sys::socket::{
-    recv, send, socket, AddressFamily, MsgFlags, SockFlag, SockProtocol, SockType,
-};
+use nix::sys::socket::{recv, send, MsgFlags};
 
+use super::poll::wait_readable;
 use super::transport::{EthTransport, TransportError};
 use super::{ETHERTYPE_PROFINET, ETHERTYPE_VLAN};
+use crate::dcp::frame::DCP_MULTICAST_MAC;
 
 impl From<nix::errno::Errno> for TransportError {
     fn from(e: nix::errno::Errno) -> Self {
@@ -29,24 +29,39 @@ fn is_profinet_frame(buf: &[u8]) -> bool {
         && u16::from_be_bytes([buf[16], buf[17]]) == ETHERTYPE_PROFINET
 }
 
-/// Raw AF_PACKET socket bound to a named interface, filtered on EtherType PROFINET at recv time.
+/// Raw AF_PACKET socket bound to a named interface and the PROFINET EtherType
+/// (0x8892), with membership in the DCP multicast group, filtered on EtherType
+/// PROFINET at recv time (VLAN-tagged frames pass the kernel filter too, since
+/// the NIC may not have offloaded the tag).
 pub struct AfPacketTransport {
     fd: OwnedFd,
 }
 
 impl AfPacketTransport {
-    /// Open a raw AF_PACKET socket on `ifname`.
+    /// Open a raw AF_PACKET socket on `ifname`, bound to EtherType 0x8892 and
+    /// joined to the DCP multicast group (01:0e:cf:00:00:00).
     ///
     /// Returns `Err(TransportError::Io)` if the interface does not exist or the
     /// process lacks `CAP_NET_RAW`.
     pub fn open(ifname: &str) -> Result<Self, TransportError> {
-        // EthAll (ETH_P_ALL, already big-endian encoded by nix) captures every frame.
-        let fd = socket(
-            AddressFamily::Packet,
-            SockType::Raw,
-            SockFlag::empty(),
-            SockProtocol::EthAll,
-        )?;
+        let profinet_protocol = (ETHERTYPE_PROFINET).to_be() as i32;
+
+        // Safety: `socket(2)` with valid, constant arguments; the returned fd is
+        // immediately wrapped in an `OwnedFd`, which takes ownership and closes it
+        // on drop.
+        let raw_fd = unsafe {
+            libc::socket(
+                libc::AF_PACKET,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+                profinet_protocol,
+            )
+        };
+        if raw_fd < 0 {
+            return Err(TransportError::Io(std::io::Error::last_os_error()));
+        }
+        // Safety: `raw_fd` was just returned by a successful `socket(2)` call above
+        // and is not owned anywhere else.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
 
         // Resolve interface name -> index.  Returns ENODEV if unknown.
         let ifindex = nix::net::if_::if_nametoindex(ifname)?;
@@ -54,15 +69,39 @@ impl AfPacketTransport {
         // nix 0.27 LinkAddr has no public constructor, so we build sockaddr_ll directly.
         let mut sll: libc::sockaddr_ll = unsafe { mem::zeroed() };
         sll.sll_family = libc::AF_PACKET as u16;
-        // ETH_P_ALL in network byte order (same value nix stores in SockProtocol::EthAll).
-        sll.sll_protocol = (libc::ETH_P_ALL as u16).to_be();
+        sll.sll_protocol = (ETHERTYPE_PROFINET).to_be();
         sll.sll_ifindex = ifindex as libc::c_int;
 
+        // Safety: `sll` is a valid, fully-initialized `sockaddr_ll` on the stack for
+        // the duration of the call; `fd` is a valid, open socket.
         let ret = unsafe {
             libc::bind(
                 fd.as_raw_fd(),
                 &sll as *const libc::sockaddr_ll as *const libc::sockaddr,
                 mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+            )
+        };
+        if ret < 0 {
+            return Err(TransportError::Io(std::io::Error::last_os_error()));
+        }
+
+        // Join the DCP multicast group so multicast DCP frames (Identify, Hello)
+        // reach this socket even when the NIC does not pass all multicast by default.
+        let mut mreq: libc::packet_mreq = unsafe { mem::zeroed() };
+        mreq.mr_ifindex = ifindex as libc::c_int;
+        mreq.mr_type = libc::PACKET_MR_MULTICAST as u16;
+        mreq.mr_alen = 6;
+        mreq.mr_address[..6].copy_from_slice(&DCP_MULTICAST_MAC.0);
+
+        // Safety: `mreq` is a valid, fully-initialized `packet_mreq` on the stack for
+        // the duration of the call; `fd` is a valid, open socket.
+        let ret = unsafe {
+            libc::setsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_PACKET,
+                libc::PACKET_ADD_MEMBERSHIP,
+                &mreq as *const libc::packet_mreq as *const libc::c_void,
+                mem::size_of::<libc::packet_mreq>() as libc::socklen_t,
             )
         };
         if ret < 0 {
@@ -80,12 +119,12 @@ impl EthTransport for AfPacketTransport {
     }
 
     /// Returns `Ok(Some(frame))` only for PROFINET frames (untagged or VLAN-tagged).
-    /// Returns `Ok(None)` for any other frame. The full frame including any VLAN tag
-    /// is returned unchanged; upper layers handle tag parsing.
-    ///
-    /// Timeout support (via `SO_RCVTIMEO` / `poll`) is deferred to Plan 4 when the RT
-    /// loop requires it; `_timeout` is accepted but ignored for now.
-    fn recv(&self, _timeout: Option<Duration>) -> Result<Option<Vec<u8>>, TransportError> {
+    /// Returns `Ok(None)` for any other frame, or if `timeout` elapses before a
+    /// frame arrives.
+    fn recv(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, TransportError> {
+        if !wait_readable(self.fd.as_raw_fd(), timeout)? {
+            return Ok(None);
+        }
         let mut buf = vec![0u8; 1522];
         let n = recv(self.fd.as_raw_fd(), &mut buf, MsgFlags::empty())?;
         buf.truncate(n);
@@ -94,6 +133,10 @@ impl EthTransport for AfPacketTransport {
         } else {
             Ok(None)
         }
+    }
+
+    fn raw_fd(&self) -> Option<RawFd> {
+        Some(self.fd.as_raw_fd())
     }
 }
 
@@ -112,7 +155,8 @@ mod tests {
     fn open_loopback_succeeds() {
         // Adapt the interface name to the test machine (e.g., "lo", "eth0").
         let t = AfPacketTransport::open("lo").expect("open lo");
-        let _ = t.recv(Some(Duration::from_millis(10)));
+        assert_eq!(t.recv(Some(Duration::from_millis(10))).unwrap(), None);
+        assert!(t.raw_fd().is_some());
     }
 
     #[test]
