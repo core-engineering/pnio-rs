@@ -2,6 +2,7 @@
 
 pub mod engine;
 pub mod frame;
+pub mod image;
 pub mod layout;
 
 pub use engine::{
@@ -10,6 +11,7 @@ pub use engine::{
 pub use frame::{
     frame_len, DataStatus, FrameError, RtFrame, APDU_LEN, CSDU_MIN, CYCLE_UNIT, TCI_RT,
 };
+pub use image::{Freshness, ImageError, IoImage, Validity, WatchdogState};
 pub use layout::{Cell, CrLayout, CsObject, IoObject, Layout, LayoutError};
 
 use thiserror::Error;
