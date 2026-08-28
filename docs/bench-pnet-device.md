@@ -261,10 +261,14 @@ I&M reads) stays deferred to Plan 5 (see `FOLLOWUPS.md`).
 
 ## 7. Next steps
 Plan 3 (`cm`/AR) is done: `examples/ar_bringup` reaches AR state `Data` against the real
-S7-1500, byte-identical to the p-net goldens modulo per-run protocol state, and survives the
-CPU's reconnect-with-bumped-session sequence (§6c). Next is **Plan 4 (`rt`, cyclic
-exchange)**: send RTC1 at the negotiated update time so the CPU's connection monitoring no
-longer needs the acyclic `Read 0xfbff` probe, then measure jitter under `PREEMPT_RT`.
+S7-1500, byte-identical to the p-net goldens modulo per-run protocol state. The
+reconnect-with-bumped-session takeover itself (§6c, `aca42d9`) is validated by unit tests
+(`cm::ar::tests::reconnect_with_new_session_key_takes_over` and friends); on the bench, Run 2
+(§6c) no longer reproduced the CPU's abort at all — with the `Read 0xfbff` fix in place the
+AR stayed up for the whole window, so the reconnect sequence itself was not re-exercised on
+real hardware after the fix. Next is **Plan 4 (`rt`, cyclic exchange)**: send RTC1 at the
+negotiated update time so the CPU's connection monitoring no longer needs the acyclic
+`Read 0xfbff` probe, then measure jitter under `PREEMPT_RT`.
 
 ## Pitfalls
 - **Never use CPL/PowerLine** on the segment (HomePlug `0x88e1` → jitter → RT watchdog expires, AR drops).

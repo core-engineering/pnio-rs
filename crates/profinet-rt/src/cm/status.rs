@@ -69,6 +69,20 @@ impl PnioStatus {
         PnioStatus::new(0xDF, 0x80, 0xB0, 0x00)
     }
 
+    /// CMDEV: Write problem, state conflict — the record's `ar_uuid` does not match
+    /// the established AR's. Convention as used by open PROFINET stacks; re-verify
+    /// against the standard (FOLLOWUPS).
+    pub fn write_wrong_ar() -> PnioStatus {
+        PnioStatus::new(0xDF, 0x81, 0x3d, 0x03)
+    }
+
+    /// PNIORW: write problem, resource unavailable — the AR's accumulated
+    /// parameter-write records would exceed the per-AR cap. Convention as used by
+    /// open PROFINET stacks; re-verify against the standard (FOLLOWUPS).
+    pub fn write_resource_unavailable() -> PnioStatus {
+        PnioStatus::new(0xDF, 0x80, 0xC3, 0x00)
+    }
+
     /// CMDEV: Control problem, wrong state. Convention as used by open PROFINET
     /// stacks; re-verify against the standard (FOLLOWUPS).
     pub fn control_wrong_state() -> PnioStatus {

@@ -55,13 +55,6 @@ pub enum CmError {
     Block(#[from] BlockError),
     #[error("connect rejected: {0:?}")]
     Reject(PnioStatus),
-    #[error("wrong state for {event}: {state}")]
-    WrongState {
-        event: &'static str,
-        state: &'static str,
-    },
-    #[error("unknown AR {0}")]
-    UnknownAr(Uuid),
 }
 
 // ---------------------------------------------------------------------------------
@@ -103,17 +96,13 @@ struct RespondCtx {
 }
 
 /// Maps a block-parsing failure to the PNIO status to answer with: `Reject(status)`
-/// carries its own status through unchanged; a `Block` error (and any other, defensive)
-/// variant logs and falls back to `default` (the caller's per-opnum convention).
+/// carries its own status through unchanged; a `Block` error logs and falls back to
+/// `default` (the caller's per-opnum convention).
 fn error_status(e: &CmError, default: PnioStatus) -> PnioStatus {
     match e {
         CmError::Reject(status) => *status,
         CmError::Block(be) => {
             log::warn!("PNIO block parse error: {be}");
-            default
-        }
-        other => {
-            log::warn!("unexpected CM error dispatching request: {other}");
             default
         }
     }
@@ -649,16 +638,26 @@ mod tests {
         // `was_idle` guard it replaces) that sets `controller_addr`.
         let mut prmend = pdu("prmend_req");
         prmend[64] = 4; // seq_num (LE low byte): 2 -> 4, a new RPC call
+                        // A real controller's PrmEnd carries the SessionKey it just negotiated (5),
+                        // not the golden capture's original one (2); SessionKey is at the same
+                        // [124..126] offset as in ARBlockReq (see the reconnect above).
+        prmend[124..126].copy_from_slice(&5u16.to_be_bytes());
         let o = cm.handle_datagram(&prmend, cpu(), now).unwrap();
         assert_eq!(o.send[1].to, cpu_cm());
         // `call_seq` is scoped to the device's fixed `activity_seed`, not to the AR,
         // so it must keep counting up across the reconnect rather than restarting at
         // 0 (which would resend the RPC-CL pair `(activity_seed, 0)` the controller
         // already completed for the first AR). The call is therefore identical to
-        // the golden ApplicationReady request everywhere except `seq_num`
-        // (bytes [64..68], big-endian on our own outgoing calls), which is 1, not 0.
-        assert_eq!(o.send[1].bytes[..64], pdu("appready_req")[..64]);
-        assert_eq!(o.send[1].bytes[68..], pdu("appready_req")[68..]);
+        // the golden ApplicationReady request everywhere except `seq_num` (bytes
+        // [64..68], big-endian on our own outgoing calls, which is 1, not 0) and
+        // SessionKey (bytes [124..126]): the ApplicationReady call is built from the
+        // AR's own context — the reconnected session (5) — not from the PrmEnd
+        // request that triggered it.
+        let mut expected = pdu("appready_req");
+        expected[124..126].copy_from_slice(&5u16.to_be_bytes());
+        assert_eq!(o.send[1].bytes[..64], expected[..64]);
+        assert_eq!(o.send[1].bytes[68..124], expected[68..124]);
+        assert_eq!(o.send[1].bytes[126..], expected[126..]);
         assert_eq!(
             u32::from_be_bytes(o.send[1].bytes[64..68].try_into().unwrap()),
             1

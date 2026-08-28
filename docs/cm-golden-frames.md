@@ -39,8 +39,9 @@ the other.
 ## Key facts
 
 - CPU-originated requests carry DCE-RPC `drep = 10 00 00` (little-endian); p-net's
-  responses carry `drep = 00 00 00` (big-endian) with `flags1 = 0x28` (response,
-  fragment, no-fragment-ack — the p-net response flag combination seen throughout).
+  responses carry `drep = 00 00 00` (big-endian) with `flags1 = 0x28` = `IDEMPOTENT
+  (0x20) | NO_FACK (0x08)` — the p-net response flag combination seen throughout, no
+  fragment bit.
 - In each response's NDR header, `max_count` **echoes the corresponding request's
   `args_max`**: Connect 557, Write 344, Control/PrmEnd 32, Control/ApplicationReady
   1340. The last is p-net's own request (`appready_req.hex`, device -> CPU,
@@ -99,25 +100,26 @@ mirroring the request's `args_max` per the "Key facts" note above.
 ## Per-frame block summaries
 
 - **`connect_req.hex`** (Connect.req, RPC header + NDR counters, then blocks in
-  order): ARBlockReq, IOCRBlockReq (Input), IOCRBlockReq (Output), AlarmCRBlockReq,
-  ExpectedSubmoduleBlockReq (module 1), ExpectedSubmoduleBlockReq (module 2).
-- **`connect_res.hex`** (Connect.res): ARBlockRes, IOCRBlockRes (Input), IOCRBlockRes
-  (Output), AlarmCRBlockRes, ModuleDiffBlock (`81 06`, one entry, station name
-  `rt-labs-dev`).
+  order): ARBlockReq, IOCRBlockReq ×2 (Input, Output), ExpectedSubmoduleBlockReq ×5
+  (DAP + slots 1-4), AlarmCRBlockReq **last**.
+- **`connect_res.hex`** (Connect.res): ARBlockRes, IOCRBlockRes ×2 (Input, Output),
+  AlarmCRBlockRes, ARServerBlockRes (`81 06`, station name `rt-labs-dev`). No
+  ModuleDiffBlock is ever produced (see `FOLLOWUPS.md`).
 - **`write_req.hex`** (Write.req, MultipleWrite / PDU stacking, records addressed by
-  slot/subslot/index): five stacked IODWriteReqHeader + record-data blocks (indices
-  `0x0000`/`0x0001`/`0x8071`/`0x8071`-family covering the multiple-write records the
-  CPU pushes at connect time, including the I&M0 records at the end).
+  slot/subslot/index): five records — `0xe040` (the outer MultipleWrite container),
+  `0x8071` (PDInterfaceAdjust), `0x7b`, `0x7c`, `0x7d` (module parameters, including
+  the I&M0 records).
 - **`write_res.hex`** (Write.res): five stacked IODWriteResHeader blocks mirroring the
   request's five records, each echoing status/index/slot/subslot, no record payload.
 - **`prmend_req.hex`** / **`prmend_res.hex`** (Control.req / Control.res,
-  PrmEnd / PrmEnd Done): single ControlBlockConnect-family PDU (`BlockType 0x0110`
-  request / `0x8110` response), IOXBlockReq/Res with `PrmEnd` control command,
-  followed by the RPC ready block (block type `0x0002`).
+  PrmEnd / PrmEnd Done): one IODControlReq/Res block per PDU (`BlockType 0x0110`
+  request / `0x8110` response) whose **command** field carries `PrmEnd` (`0x0001`) /
+  `Done` (`0x0008`) — `0x0002` is the `ApplicationReady` command value, not a block
+  type.
 - **`appready_req.hex`** / **`appready_res.hex`** (Control.req / Control.res,
-  ApplicationReady / ApplicationReady Done): same ControlBlockConnect-family shape
-  (`BlockType 0x0112` request / `0x8112` response) with the `ApplicationReady` control
-  command.
+  ApplicationReady / ApplicationReady Done): same IODControlReq/Res shape
+  (`BlockType 0x0112` request / `0x8112` response) whose command is
+  `ApplicationReady` (`0x0002`) / `Done` (`0x0008`).
 
 ## HIL comparison (2026-08-28)
 

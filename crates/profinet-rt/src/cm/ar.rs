@@ -28,6 +28,10 @@ pub const APP_READY_MAX_ATTEMPTS: u8 = 3;
 /// ARBlockReq), IEC 61158-6-10 §4.6.1.1: the activity deadline is
 /// `now + activity_timeout_factor * ACTIVITY_TIMEOUT_UNIT`.
 pub const ACTIVITY_TIMEOUT_UNIT: Duration = Duration::from_millis(100);
+/// Maximum number of parameter-write records accumulated per AR.
+const MAX_RECORDS: usize = 64;
+/// Maximum summed `data` bytes across all parameter-write records accumulated per AR.
+const MAX_RECORD_BYTES: usize = 64 * 1024;
 
 /// The AR's lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,26 +282,25 @@ impl Ar {
             // still in Connected; once PrmEnd has started the ApplicationReady
             // phase (AppReadySent) or the AR is in Data, a Write stores records
             // and touches no timer.
-            ArState::Connected => {
+            ArState::Connected | ArState::AppReadySent | ArState::Data => {
+                let ctx = self.ctx.as_ref().expect("ctx present outside Idle");
+                // A record addressed to a foreign AR must not be stored, whichever
+                // state we're in: the request's `ar_uuid` is per-record, not
+                // per-request, so every one of them must match.
+                if req.records.iter().any(|r| r.ar_uuid != ctx.params.ar_uuid) {
+                    return vec![reject(PnioStatus::write_wrong_ar())];
+                }
+                if exceeds_record_cap(ctx, &req.records) {
+                    return vec![reject(PnioStatus::write_resource_unavailable())];
+                }
                 let blocks = build_write_res(&req);
-                let factor = self
-                    .ctx
-                    .as_ref()
-                    .expect("ctx present outside Idle")
-                    .params
-                    .activity_timeout_factor;
+                let rearm_activity = self.state == ArState::Connected;
+                let factor = ctx.params.activity_timeout_factor;
                 let ctx = self.ctx.as_mut().expect("ctx present outside Idle");
                 ctx.records.extend(req.records);
-                self.activity_deadline = Some(now + ACTIVITY_TIMEOUT_UNIT * factor as u32);
-                vec![Action::Respond {
-                    status: PnioStatus::OK,
-                    blocks,
-                }]
-            }
-            ArState::AppReadySent | ArState::Data => {
-                let blocks = build_write_res(&req);
-                let ctx = self.ctx.as_mut().expect("ctx present outside Idle");
-                ctx.records.extend(req.records);
+                if rearm_activity {
+                    self.activity_deadline = Some(now + ACTIVITY_TIMEOUT_UNIT * factor as u32);
+                }
                 vec![Action::Respond {
                     status: PnioStatus::OK,
                     blocks,
@@ -310,10 +313,17 @@ impl Ar {
         match self.state {
             ArState::Idle => vec![wrong_state()],
             ArState::Connected => {
+                let ctx = self.ctx.as_ref().expect("ctx present outside Idle");
+                if req.ar_uuid != ctx.params.ar_uuid {
+                    return vec![wrong_state()];
+                }
                 let mut respond = Vec::new();
                 prm_end_done(&req).write(&mut respond);
                 let mut call = Vec::new();
-                app_ready_req(req.ar_uuid, req.session_key).write(&mut call);
+                // Built from the AR's own context, not the request: a PrmEnd that
+                // (once matched above) belongs to this AR still shouldn't let a
+                // mismatched field in its body redirect the outgoing call.
+                app_ready_req(ctx.params.ar_uuid, ctx.params.session_key).write(&mut call);
                 self.state = ArState::AppReadySent;
                 self.app_ready_attempts = 1;
                 self.app_ready_deadline = Some(now + APP_READY_TIMEOUT);
@@ -327,6 +337,10 @@ impl Ar {
                 ]
             }
             ArState::AppReadySent | ArState::Data => {
+                let ctx = self.ctx.as_ref().expect("ctx present outside Idle");
+                if req.ar_uuid != ctx.params.ar_uuid {
+                    return vec![wrong_state()];
+                }
                 let mut respond = Vec::new();
                 prm_end_done(&req).write(&mut respond);
                 vec![Action::Respond {
@@ -338,6 +352,12 @@ impl Ar {
     }
 
     fn handle_release(&mut self, req: ControlBlock) -> Vec<Action> {
+        if self.state != ArState::Idle {
+            let ctx = self.ctx.as_ref().expect("ctx present outside Idle");
+            if req.ar_uuid != ctx.params.ar_uuid {
+                return vec![wrong_state()];
+            }
+        }
         let mut respond = Vec::new();
         release_done(&req).write(&mut respond);
         let mut actions = vec![Action::Respond {
@@ -411,10 +431,27 @@ impl Ar {
 }
 
 fn wrong_state() -> Action {
+    reject(PnioStatus::control_wrong_state())
+}
+
+fn reject(status: PnioStatus) -> Action {
     Action::Respond {
-        status: PnioStatus::control_wrong_state(),
+        status,
         blocks: Vec::new(),
     }
+}
+
+/// Whether accumulating `incoming` records onto `ctx.records` would exceed the
+/// per-AR limits ([`MAX_RECORDS`] records or [`MAX_RECORD_BYTES`] summed `data`).
+fn exceeds_record_cap(ctx: &ArContext, incoming: &[Record]) -> bool {
+    let count = ctx.records.len() + incoming.len();
+    let bytes: usize = ctx
+        .records
+        .iter()
+        .chain(incoming)
+        .map(|r| r.data.len())
+        .sum();
+    count > MAX_RECORDS || bytes > MAX_RECORD_BYTES
 }
 
 #[cfg(test)]
@@ -974,5 +1011,101 @@ mod tests {
         let a = ar.on(Event::Tick, now + Duration::from_secs(100));
         assert!(a.is_empty());
         assert_eq!(ar.state(), ArState::Data);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix round 3 (final review): Write/PrmEnd/Release must belong to the
+    // established AR, records are capped, and the ApplicationReady call is built
+    // from the context rather than the request.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_with_foreign_ar_uuid_is_refused() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        let mut w = match write() {
+            Event::WriteReq(w) => w,
+            _ => unreachable!(),
+        };
+        for r in &mut w.records {
+            r.ar_uuid = crate::rpc::Uuid([9; 16]);
+        }
+        let a = ar.on(Event::WriteReq(w), now);
+        assert_eq!(a.len(), 1);
+        assert!(
+            matches!(&a[0], Action::Respond { status, blocks } if *status == PnioStatus::write_wrong_ar() && blocks.is_empty())
+        );
+        assert!(ar.context().unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn prm_end_with_foreign_ar_uuid_is_refused() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        let mut p = match prm_end() {
+            Event::PrmEndReq(p) => p,
+            _ => unreachable!(),
+        };
+        p.ar_uuid = crate::rpc::Uuid([9; 16]);
+        let a = ar.on(Event::PrmEndReq(p), now);
+        assert_eq!(a.len(), 1);
+        assert!(
+            matches!(&a[0], Action::Respond { status, blocks } if *status == PnioStatus::control_wrong_state() && blocks.is_empty())
+        );
+        assert_eq!(ar.state(), ArState::Connected);
+    }
+
+    #[test]
+    fn release_with_foreign_ar_uuid_is_refused() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        let mut rel = release_block();
+        rel.ar_uuid = crate::rpc::Uuid([9; 16]);
+        let a = ar.on(Event::ReleaseReq(rel), now);
+        assert_eq!(a.len(), 1);
+        assert!(
+            matches!(&a[0], Action::Respond { status, blocks } if *status == PnioStatus::control_wrong_state() && blocks.is_empty())
+        );
+        assert_eq!(ar.state(), ArState::Connected);
+    }
+
+    #[test]
+    fn records_are_capped() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        // 12 golden Writes x 5 records = 60 stored, under the 64 cap.
+        for _ in 0..12 {
+            let a = ar.on(write(), now);
+            assert!(matches!(&a[0], Action::Respond { status, .. } if status.is_ok()));
+        }
+        assert_eq!(ar.context().unwrap().records.len(), 60);
+        // The 13th Write would bring the total to 65, over the cap: refused, and
+        // nothing from it is stored.
+        let a = ar.on(write(), now);
+        assert_eq!(a.len(), 1);
+        assert!(
+            matches!(&a[0], Action::Respond { status, blocks } if *status == PnioStatus::write_resource_unavailable() && blocks.is_empty())
+        );
+        assert_eq!(ar.context().unwrap().records.len(), 60);
+    }
+
+    #[test]
+    fn app_ready_call_uses_context_not_request() {
+        let mut ar = ar();
+        let now = t0();
+        ar.on(connect(), now);
+        let mut p = match prm_end() {
+            Event::PrmEndReq(p) => p,
+            _ => unreachable!(),
+        };
+        p.session_key = 9; // right ar_uuid, wrong session_key
+        let a = ar.on(Event::PrmEndReq(p), now);
+        assert!(
+            matches!(&a[1], Action::CallController { blocks } if blocks == &golden("appready_req")[BLOCKS..])
+        );
     }
 }

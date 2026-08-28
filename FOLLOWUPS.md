@@ -9,7 +9,7 @@ Non-blocking findings for Plan 1, to be integrated into the briefs of the releva
   unrelated broadcast traffic. Used by the Plan 3 acyclic loop (`device`, merge 896dfd5) since.
 - ✅ **RESOLVED (merge 459963d, fix 174cb4d)** — **`recv` timeout**: implemented via `poll`
   (timeouts rounded up to the millisecond); exercised continuously by the Plan 3 device loop's
-  `step`/`run` (`crates/profinet-rt/src/device.rs`).
+  `step`/`run` (`crates/profinet-rt/src/device/mod.rs`).
 - **MSG_TRUNC**: `recv` does not handle MSG_TRUNC (non-issue for standard RT frames ≤1522).
 
 ## For Plan 2 (`dcp`) — before frame-exact comparisons
@@ -58,7 +58,7 @@ Non-blocking findings for Plan 1, to be integrated into the briefs of the releva
 
 ### ✅ RESOLVED (merge 896dfd5) — RX error policy (review recommendation)
 - `handle_dcp_frame`'s `Err` on a malformed/short frame is now logged and dropped by the
-  caller, not propagated: the Plan 3 acyclic device loop (`crates/profinet-rt/src/device.rs`)
+  caller, not propagated: the Plan 3 acyclic device loop (`crates/profinet-rt/src/device/mod.rs`)
   catches per-frame errors from the DCP/RPC dispatch, logs them, and continues the loop rather
   than aborting the process on a single bad frame.
 
@@ -100,3 +100,5 @@ Open points recorded from the AR-establishment HIL run (`docs/bench-pnet-device.
   behavior of zeroing this outer NDR field (see `docs/cm-golden-frames.md` "Key facts") rather
   than recomputing it from the summed per-block payload lengths. Kept for byte-exactness; flag
   if a future controller rejects a zeroed length.
+- ✅ **RESOLVED (final review)** — `Write`/`PrmEnd`/`Release` are now matched against the
+  established AR (final review); records capped at 64 / 64 KiB.

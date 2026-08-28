@@ -194,22 +194,44 @@ pub fn validate(req: &ConnectReq, model: &DeviceModel) -> Result<ArParams, PnioS
             return Err(PnioStatus::connect_reject(ConnectBlock::IocrBlock, 6));
         }
     }
-    // Run before `check_iocr_data_length`: a submodule missing from the model is a
-    // more specific diagnosis (ExpectedSubmodule) than the data-length guard's
-    // generic reject for the same missing lookup.
+    // Run before `check_iocr_data_length`: an identity or size mismatch against the
+    // model is a more specific diagnosis (ExpectedSubmodule) than the data-length
+    // guard's generic reject for the same missing lookup. Identity (module/submodule
+    // ident) is checked before size, per field: `4` (module), `6` (submodule), `7`
+    // (missing submodule, or found but wrong length).
     for block in &req.expected {
         for api in &block.apis {
+            if let Some(slot_model) = model.slots.iter().find(|s| s.slot == api.slot) {
+                if slot_model.module_ident != api.module_ident {
+                    return Err(PnioStatus::connect_reject(
+                        ConnectBlock::ExpectedSubmodule,
+                        4,
+                    ));
+                }
+            }
             for sm in &api.submodules {
-                let input_len = sm.input.map(|d| d.data_length).unwrap_or(0);
-                let output_len = sm.output.map(|d| d.data_length).unwrap_or(0);
-                match model.find(api.slot, sm.subslot) {
-                    Some(m) if m.input_len == input_len && m.output_len == output_len => {}
-                    _ => {
+                let m = match model.find(api.slot, sm.subslot) {
+                    Some(m) => m,
+                    None => {
                         return Err(PnioStatus::connect_reject(
                             ConnectBlock::ExpectedSubmodule,
                             7,
                         ))
                     }
+                };
+                if m.submodule_ident != sm.submodule_ident {
+                    return Err(PnioStatus::connect_reject(
+                        ConnectBlock::ExpectedSubmodule,
+                        6,
+                    ));
+                }
+                let input_len = sm.input.map(|d| d.data_length).unwrap_or(0);
+                let output_len = sm.output.map(|d| d.data_length).unwrap_or(0);
+                if m.input_len != input_len || m.output_len != output_len {
+                    return Err(PnioStatus::connect_reject(
+                        ConnectBlock::ExpectedSubmodule,
+                        7,
+                    ));
                 }
             }
         }
@@ -240,7 +262,9 @@ pub fn validate(req: &ConnectReq, model: &DeviceModel) -> Result<ArParams, PnioS
 // ---------------------------------------------------------------------------------
 
 /// Build the Connect response's PNIO blocks: ARBlockRes, IOCRBlockRes x2 (input then
-/// output, matching request order), AlarmCRBlockRes, ARServerBlockRes.
+/// output — that order is assumed, not read back from the request: every PROFINET
+/// engineering tool sends it that way, but nothing here re-derives it from
+/// `ArParams`), AlarmCRBlockRes, ARServerBlockRes.
 pub fn build_connect_res(params: &ArParams, model: &DeviceModel) -> Vec<u8> {
     let mut out = Vec::new();
     write_ar_block_res(&mut out, params, model);
@@ -352,6 +376,26 @@ mod tests {
         assert_eq!(
             validate(&req(), &model).unwrap_err(),
             PnioStatus::connect_reject(ConnectBlock::ExpectedSubmodule, 7)
+        );
+    }
+
+    #[test]
+    fn mismatching_module_ident_is_rejected() {
+        let mut model = DeviceModel::pnet_sample(DEVICE_MAC);
+        model.slots[1].module_ident = 0x99; // was 0x30
+        assert_eq!(
+            validate(&req(), &model).unwrap_err(),
+            PnioStatus::connect_reject(ConnectBlock::ExpectedSubmodule, 4)
+        );
+    }
+
+    #[test]
+    fn mismatching_submodule_ident_is_rejected() {
+        let mut model = DeviceModel::pnet_sample(DEVICE_MAC);
+        model.slots[4].submodules[0].submodule_ident = 0x999; // was 0x140
+        assert_eq!(
+            validate(&req(), &model).unwrap_err(),
+            PnioStatus::connect_reject(ConnectBlock::ExpectedSubmodule, 6)
         );
     }
 
