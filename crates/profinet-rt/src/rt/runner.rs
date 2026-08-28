@@ -729,6 +729,57 @@ mod tests {
     }
 
     #[test]
+    fn repeated_golden_frame_yields_one_rx_interval_sample() {
+        // Two accepted frames with the *same* cycle counter: `RtEngine::on_frame`
+        // only bumps the `reordered` stat on a repeat (d == 0), it does not drop
+        // the frame — so both frames are still `Accepted`, and the second one is
+        // what gives `rx_interval` its first sample.
+        let image = Arc::new(IoImage::new(&layout()));
+        let stats = Arc::new(RtStats::default());
+        let mock = MockTransport::new();
+        mock.push_rx(golden_rt("echo_cpu_8001"));
+        mock.push_rx(golden_rt("echo_cpu_8001"));
+        let mock = Arc::new(mock);
+        let h =
+            RtRunner::spawn_with_transport(cfg(image, stats.clone()), SharedMock(mock)).unwrap();
+        std::thread::sleep(Duration::from_millis(60));
+        h.stop();
+        h.join(Duration::from_secs(1)).unwrap();
+        assert_eq!(stats.snapshot().rx_accepted, 2);
+        assert_eq!(stats.rx_interval.count(), 1);
+        assert!(stats.rx_interval.max_ns() > 0);
+    }
+
+    #[test]
+    fn oversized_frame_counts_rx_invalid_and_the_thread_keeps_ticking() {
+        // A single over-length frame: `MockTransport::recv_into` hands back
+        // `TransportError::FrameTooLong` for it once (the frame is popped either
+        // way), then the queue is empty and every later call returns `Ok(None)` —
+        // exactly the "once, then Ok(None)" shape this test needs, no bespoke
+        // transport required.
+        let image = Arc::new(IoImage::new(&layout()));
+        let stats = Arc::new(RtStats::default());
+        let mock = MockTransport::new();
+        mock.push_rx(vec![0u8; MAX_FRAME_LEN + 1]);
+        let mock = Arc::new(mock);
+        let h =
+            RtRunner::spawn_with_transport(cfg(image, stats.clone()), SharedMock(mock)).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        let tx_before = stats.snapshot().tx;
+        std::thread::sleep(Duration::from_millis(30));
+        let tx_after = stats.snapshot().tx;
+        h.stop();
+        h.join(Duration::from_secs(1)).unwrap();
+        assert_eq!(stats.snapshot().rx_invalid, 1);
+        assert!(tx_before > 0, "runner never ticked");
+        assert!(
+            tx_after > tx_before,
+            "runner stopped ticking after the bad frame"
+        );
+        assert!(!h.is_running());
+    }
+
+    #[test]
     fn stop_is_prompt_and_join_times_out_cleanly() {
         let image = Arc::new(IoImage::new(&layout()));
         let h = RtRunner::spawn_with_transport(
