@@ -1,5 +1,5 @@
-//! Fixed-bin latency histogram, written by the RT thread (one relaxed `fetch_add`
-//! and one `fetch_max` per sample) and read from any other thread.
+//! Fixed-bin latency histogram, written by the RT thread (two relaxed `fetch_add`s —
+//! bin and count — and one `fetch_max` per sample) and read from any other thread.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -11,10 +11,15 @@ pub const HIST_BINS: usize = 2048;
 pub struct HistSnapshot {
     /// Sample count per 1 µs bin; `bins[HIST_BINS - 1]` is the overflow bin.
     pub bins: Vec<u64>,
+    /// Total number of samples recorded.
     pub count: u64,
+    /// The largest sample recorded, in nanoseconds.
     pub max_ns: u64,
 }
 
+/// Fixed-bin latency histogram: atomic counters only, so [`Histogram::record`] is
+/// RT-safe (no lock, no allocation) while [`Histogram::snapshot`] and
+/// [`Histogram::percentile`] can be read from any other thread.
 pub struct Histogram {
     bins: [AtomicU64; HIST_BINS],
     count: AtomicU64,
@@ -42,10 +47,12 @@ impl Histogram {
         self.max_ns.fetch_max(ns, Ordering::Relaxed);
     }
 
+    /// Total number of samples recorded so far.
     pub fn count(&self) -> u64 {
         self.count.load(Ordering::Relaxed)
     }
 
+    /// The largest sample recorded so far, in nanoseconds.
     pub fn max_ns(&self) -> u64 {
         self.max_ns.load(Ordering::Relaxed)
     }
@@ -83,6 +90,7 @@ impl Histogram {
         }
     }
 
+    /// Clear every bin, the count and the maximum back to zero.
     pub fn reset(&self) {
         for b in &self.bins {
             b.store(0, Ordering::Relaxed);

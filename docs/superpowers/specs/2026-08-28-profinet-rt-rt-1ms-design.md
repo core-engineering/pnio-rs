@@ -50,7 +50,7 @@ Out (FOLLOWUPS at close-out):
 | NIC queues | `ethtool -L eno2 combined 1`, one IRQ vector on CPU 3 | No RSS spreading across cores |
 | Memory | `mlockall(MCL_CURRENT \| MCL_FUTURE)` + RT stack pre-fault, opt-in `RtOptions.lock_memory` | No page fault on the RT path |
 | RX path | `recv_into` into a fixed buffer; cBPF filter per socket | Zero allocation per cycle; RT socket wakes only for RTC1, acyclic socket only for ≥ `0xFC00` |
-| Metrics | Three 1 µs-bin histograms (`tick_lateness`, `cycle_work`, `rx_interval`) in `RtStats` | Percentiles, not just maxima; 3 relaxed `fetch_add` per cycle |
+| Metrics | Three 1 µs-bin histograms (`tick_lateness`, `cycle_work`, `rx_interval`) in `RtStats` | Percentiles, not just maxima; per cycle: 3 histograms × (2 fetch_add + 1 fetch_max) |
 | Verdict | Computed by `rt_bringup` against thresholds, exit code 0/1 | The campaign script is mechanical; no reading tea leaves |
 | Baseline | `cyclictest` on CPU 3, idle and loaded, before any `rt_bringup` run | Separates kernel floor from crate cost |
 | Services | Docker/containerd, wpa_supplicant, bluetooth, periodic timers disabled on the edge | Done 2026-08-28; NAT script creates `DOCKER-USER` itself |

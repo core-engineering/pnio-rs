@@ -8,15 +8,23 @@
 //!
 //! Only the handful of opcodes we need are defined here, from the classic BPF
 //! encoding (`BPF_CLASS | BPF_SIZE | BPF_MODE` for loads, `BPF_JMP | op | BPF_K` for
-//! jumps): no `libc` constants exist for them.
+//! jumps): libc exposes only the `BPF_*` components, not the composed opcodes.
 
 /// One classic BPF instruction; same layout as the kernel's `struct sock_filter`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SockFilter {
+    /// Opcode: `BPF_CLASS | BPF_SIZE | BPF_MODE` for a load, `BPF_JMP | op | BPF_K`
+    /// for a jump, `BPF_RET | BPF_K` for a return.
     pub code: u16,
+    /// Jump instructions only: how many instructions to skip when the comparison is
+    /// true.
     pub jt: u8,
+    /// Jump instructions only: how many instructions to skip when the comparison is
+    /// false.
     pub jf: u8,
+    /// Immediate operand: a byte offset for a load, the comparison value for a jump,
+    /// or the accepted length for a `RET` (0 drops the packet).
     pub k: u32,
 }
 
