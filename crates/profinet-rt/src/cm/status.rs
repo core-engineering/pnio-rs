@@ -80,6 +80,17 @@ impl PnioStatus {
     pub fn service_unsupported() -> PnioStatus {
         PnioStatus::new(0x81, 0x81, 0x05, 0x00)
     }
+
+    /// PNIORW: read/write problem, access error, invalid index. Used for `Read`/
+    /// `ReadImplicit` requests, which are deliberately out of scope: notably the
+    /// CPU's periodic probe of index `0xfbff` ("RPC connection monitoring") when it
+    /// isn't receiving cyclic data. Kept distinct from `service_unsupported` (whose
+    /// `(Code, Decode) = (0x81, 0x81)` Wireshark decodes as "Connect: Faulty
+    /// PrmServerBlockReq", which misleads for a Read). Convention as used by open
+    /// PROFINET stacks; re-verify against the standard (FOLLOWUPS).
+    pub fn read_index_unsupported() -> PnioStatus {
+        PnioStatus::new(0xDE, 0x80, 0xB0, 0x00)
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +111,16 @@ mod tests {
             PnioStatus::connect_reject(ConnectBlock::ExpectedSubmodule, 7),
             s
         );
+    }
+
+    #[test]
+    fn read_index_unsupported_round_trips() {
+        let s = PnioStatus::read_index_unsupported();
+        assert_eq!(s.to_u32(), 0xde80_b000);
+        assert_eq!(
+            (s.code(), s.decode(), s.code1(), s.code2()),
+            (0xde, 0x80, 0xb0, 0x00)
+        );
+        assert_ne!(s, PnioStatus::service_unsupported());
     }
 }

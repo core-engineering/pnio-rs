@@ -49,6 +49,12 @@ pub enum AbortReason {
     AppReadyRejected(PnioStatus),
     /// No Write/PrmEnd activity within `activity_timeout_factor * ACTIVITY_TIMEOUT_UNIT`.
     ActivityTimeout,
+    /// The controller re-sent Connect for this AR (same `ar_uuid`, new `session_key`)
+    /// or for a different `ar_uuid` from the same initiator: it has abandoned the
+    /// existing AR (typically after its own ERR-RTA abort, invisible to us on the
+    /// alarm channel) and is establishing a new one. We drop the stale AR and process
+    /// the Connect as if from `Idle`.
+    ControllerReconnect,
     /// Any other externally-triggered abort (e.g. link down), free-form reason.
     External(&'static str),
 }
@@ -183,8 +189,19 @@ impl Ar {
                 }
             )
         });
+        // A no-op transition (nothing due on a Tick, an AppReadyRsp/Abort ignored
+        // outside their state, or a request answered by resending an already-cached
+        // response with the AR otherwise unchanged) is logged at `debug!` instead of
+        // `info!` to avoid spamming the log with the CPU's periodic Tick-driven
+        // polling and idempotent retransmissions.
+        let plain_resend = prev != ArState::Idle
+            && prev == self.state
+            && matches!(event_name, "ConnectReq" | "PrmEndReq")
+            && matches!(actions.as_slice(), [Action::Respond { status, .. }] if status.is_ok());
         if aborted {
             log::warn!("AR {prev:?} --{event_name}--> {:?} (abort)", self.state);
+        } else if actions.is_empty() || plain_resend {
+            log::debug!("AR {prev:?} --{event_name}--> {:?}", self.state);
         } else {
             log::info!("AR {prev:?} --{event_name}--> {:?}", self.state);
         }
@@ -224,11 +241,26 @@ impl Ar {
             },
             ArState::Connected | ArState::AppReadySent | ArState::Data => {
                 let ctx = self.ctx.as_ref().expect("ctx present outside Idle");
-                if req.ar.ar_uuid == ctx.params.ar_uuid {
+                let same_ar = req.ar.ar_uuid == ctx.params.ar_uuid;
+                let same_session = req.ar.session_key == ctx.params.session_key;
+                let same_initiator =
+                    req.ar.initiator_object_uuid == ctx.params.initiator_object_uuid;
+                if same_ar && same_session {
+                    // Exact retransmission: answer with the byte-identical cached
+                    // response.
                     vec![Action::Respond {
                         status: PnioStatus::OK,
                         blocks: ctx.connect_res.clone(),
                     }]
+                } else if same_ar || same_initiator {
+                    // Same AR with a new session key, or a new AR from the same
+                    // initiator: the controller has abandoned the old AR (we likely
+                    // missed its ERR-RTA abort on the alarm channel) and is
+                    // establishing a new one. Drop the stale context and process this
+                    // Connect exactly as if it arrived in `Idle`.
+                    let mut actions = vec![self.abort(AbortReason::ControllerReconnect)];
+                    actions.extend(self.handle_connect(req, now));
+                    actions
                 } else {
                     vec![Action::Respond {
                         status: PnioStatus::connect_ar_already_exists(),
@@ -518,6 +550,7 @@ mod tests {
             _ => unreachable!(),
         };
         other.ar.ar_uuid = crate::rpc::Uuid([7; 16]);
+        other.ar.initiator_object_uuid = crate::rpc::Uuid([8; 16]);
         let a = ar.on(Event::ConnectReq(other), now);
         assert!(
             matches!(&a[0], Action::Respond { status, .. } if *status == PnioStatus::connect_ar_already_exists())
@@ -789,11 +822,96 @@ mod tests {
             _ => unreachable!(),
         };
         other.ar.ar_uuid = crate::rpc::Uuid([7; 16]);
+        other.ar.initiator_object_uuid = crate::rpc::Uuid([8; 16]);
         let a = ar.on(Event::ConnectReq(other), now);
         assert!(
             matches!(&a[0], Action::Respond { status, .. } if *status == PnioStatus::connect_ar_already_exists())
         );
         assert_eq!(ar.state(), ArState::Data);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix round 2 (HIL bring-up): a controller reconnect (same `ar_uuid` with a
+    // new `session_key`, or a new `ar_uuid` from the same initiator) takes over
+    // the AR instead of being treated as either an idempotent resend or a
+    // conflicting other AR.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reconnect_with_new_session_key_takes_over() {
+        let (mut ar, now) = to_data();
+        let first_res = ar.context().unwrap().connect_res.clone();
+
+        let mut reconnect = match connect() {
+            Event::ConnectReq(c) => c,
+            _ => unreachable!(),
+        };
+        reconnect.ar.session_key = 5;
+        let a = ar.on(Event::ConnectReq(reconnect), now);
+
+        assert_eq!(a.len(), 3);
+        assert!(matches!(
+            a[0],
+            Action::Notify {
+                state: ArState::Idle,
+                reason: Some(AbortReason::ControllerReconnect)
+            }
+        ));
+        let new_res = match &a[1] {
+            Action::Respond { status, blocks } if status.is_ok() => blocks.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert!(matches!(
+            a[2],
+            Action::Notify {
+                state: ArState::Connected,
+                reason: None
+            }
+        ));
+
+        assert_eq!(ar.context().unwrap().params.session_key, 5);
+        assert_eq!(ar.state(), ArState::Connected);
+
+        // The response is byte-identical to the first one except for the
+        // ARBlockRes session-key field (BlockHeader (6) + ar_type (2) + ar_uuid
+        // (16) = offset 24, 2 bytes).
+        assert_eq!(new_res[..24], first_res[..24]);
+        assert_eq!(new_res[26..], first_res[26..]);
+        assert_eq!(new_res[24..26], 5u16.to_be_bytes());
+        assert_ne!(new_res[24..26], first_res[24..26]);
+    }
+
+    #[test]
+    fn reconnect_with_new_ar_uuid_same_initiator_takes_over() {
+        let (mut ar, now) = to_data();
+        let new_ar_uuid = crate::rpc::Uuid([7; 16]);
+
+        let mut reconnect = match connect() {
+            Event::ConnectReq(c) => c,
+            _ => unreachable!(),
+        };
+        reconnect.ar.ar_uuid = new_ar_uuid;
+        let a = ar.on(Event::ConnectReq(reconnect), now);
+
+        assert_eq!(a.len(), 3);
+        assert!(matches!(
+            a[0],
+            Action::Notify {
+                state: ArState::Idle,
+                reason: Some(AbortReason::ControllerReconnect)
+            }
+        ));
+        assert!(matches!(&a[1], Action::Respond { status, .. } if status.is_ok()));
+        assert!(matches!(
+            a[2],
+            Action::Notify {
+                state: ArState::Connected,
+                reason: None
+            }
+        ));
+
+        assert_eq!(ar.context().unwrap().params.ar_uuid, new_ar_uuid);
+        assert_eq!(ar.state(), ArState::Connected);
     }
 
     #[test]

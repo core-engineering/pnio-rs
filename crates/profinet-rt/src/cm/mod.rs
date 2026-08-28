@@ -226,7 +226,6 @@ impl Cm {
 
         let actions = match Opnum::from_u16(h.opnum) {
             Some(Opnum::Connect) => {
-                let was_idle = self.ar.state() == ArState::Idle;
                 let actions = match ConnectReq::parse(blocks) {
                     Ok(req) => self.ar.on(Event::ConnectReq(req), now),
                     Err(e) => respond(error_status(
@@ -236,12 +235,27 @@ impl Cm {
                 };
                 // Remember the controller's address (PrmEnd, later on the same AR, needs
                 // it to place the ApplicationReady call, and `tick`'s retries need it with
-                // no request in hand at all) only when this Connect actually established
-                // the AR. A stray Connect from another host while an AR already exists
-                // (refused with `connect_ar_already_exists`) or a rejected/malformed one
-                // must not redirect the real AR's outgoing calls.
-                if was_idle && self.ar.state() == ArState::Connected {
+                // no request in hand at all), and reset the outgoing call-sequence
+                // bookkeeping, whenever this Connect actually (re-)established the AR:
+                // the nominal Idle -> Connected path, or a controller-reconnect takeover
+                // (`Ar` aborts the stale AR and re-establishes a new one within the same
+                // `on()` call, so both `Notify`s appear in `actions`). A stray Connect
+                // from another host while an AR already exists (refused with
+                // `connect_ar_already_exists`) or a rejected/malformed one produces no
+                // `Notify { state: Connected, .. }` and must not redirect the real AR's
+                // outgoing calls.
+                if actions.iter().any(|a| {
+                    matches!(
+                        a,
+                        Action::Notify {
+                            state: ArState::Connected,
+                            ..
+                        }
+                    )
+                }) {
                     self.controller_addr = Some(SocketAddr::new(from.ip(), PNIO_UDP_PORT));
+                    self.call_seq = 0;
+                    self.current_call_seq = None;
                 }
                 actions
             }
@@ -258,9 +272,14 @@ impl Cm {
                 Ok(cb) => self.ar.on(Event::ReleaseReq(cb), now),
                 Err(e) => respond(error_status(&e, PnioStatus::control_wrong_state())),
             },
-            Some(Opnum::Read) | Some(Opnum::ReadImplicit) | None => {
-                respond(PnioStatus::service_unsupported())
+            // Read/ReadImplicit are deliberately out of scope, but answered with the
+            // PNIORW "invalid index" status rather than `service_unsupported` so the
+            // CPU's `0xfbff` connection-monitoring probe decodes sensibly in a trace
+            // instead of looking like a Connect-block error.
+            Some(Opnum::Read) | Some(Opnum::ReadImplicit) => {
+                respond(PnioStatus::read_index_unsupported())
             }
+            None => respond(PnioStatus::service_unsupported()),
         };
 
         let ctx = RespondCtx {
@@ -490,12 +509,14 @@ mod tests {
         assert_eq!(o.notify, vec![(ArState::Connected, None)]);
 
         // Same Connect request bytes, but from a different host, with a different AR
-        // UUID and seq_num (so it's a distinct RPC call, not a cached-response
-        // retransmit): the AR is already `Connected`, so this must be refused without
-        // touching `controller_addr`.
+        // UUID, initiator object UUID, and seq_num (so it's a distinct RPC call, not
+        // a cached-response retransmit, and not a same-initiator reconnect either):
+        // the AR is already `Connected`, so this must be refused without touching
+        // `controller_addr`.
         let mut stray = pdu("connect_req");
         stray[64] = 1; // seq_num (LE low byte): 0 -> 1
         stray[108..124].copy_from_slice(&[0x11; 16]); // ARBlockReq.ARUUID
+        stray[132..148].copy_from_slice(&[0x22; 16]); // ARBlockReq.InitiatorObjectUUID
         let stray_from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 16, 2, 77)), 40000);
         let o = cm.handle_datagram(&stray, stray_from, now).unwrap();
         let (n, _) =
@@ -522,6 +543,18 @@ mod tests {
         let h = crate::rpc::RpcHeader::parse(&o.send[0].bytes).unwrap();
         assert_eq!(h.ptype, crate::rpc::PacketType::Response);
         assert_eq!(h.opnum, 2);
+        let (n, blocks) =
+            crate::rpc::NdrResponse::parse(&o.send[0].bytes[80..], crate::rpc::Drep::BIG).unwrap();
+        assert_eq!(PnioStatus(n.status), PnioStatus::read_index_unsupported());
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn unknown_opnum_gets_service_unsupported_status() {
+        let mut cm = cm();
+        let mut bad = pdu("prmend_req");
+        bad[68] = 99; // opnum unmapped by Opnum::from_u16 (LE low byte)
+        let o = cm.handle_datagram(&bad, cpu(), Instant::now()).unwrap();
         let (n, blocks) =
             crate::rpc::NdrResponse::parse(&o.send[0].bytes[80..], crate::rpc::Drep::BIG).unwrap();
         assert_eq!(PnioStatus(n.status), PnioStatus::service_unsupported());
@@ -564,6 +597,58 @@ mod tests {
             cm.handle_datagram(&[1, 2, 3], cpu(), Instant::now()),
             Err(RpcError::TooShort { .. })
         ));
+    }
+
+    #[test]
+    fn reconnect_updates_controller_addr() {
+        let mut cm = cm();
+        let now = Instant::now();
+        let o = cm.handle_datagram(&pdu("connect_req"), cpu(), now).unwrap();
+        assert_eq!(o.notify, vec![(ArState::Connected, None)]);
+        cm.handle_datagram(&pdu("write_req"), cpu(), now).unwrap();
+        cm.handle_datagram(&pdu("prmend_req"), cpu(), now).unwrap();
+        let o = cm
+            .handle_datagram(&pdu("appready_res"), cpu_cm(), now)
+            .unwrap();
+        assert_eq!(o.notify, vec![(ArState::Data, None)]);
+        assert_eq!(cm.state(), ArState::Data);
+
+        // Same AR (ARUUID unchanged), new SessionKey, from a new source port and a
+        // fresh RPC call (new seq_num — the bench also gets a new activity UUID;
+        // seq_num alone is enough here to not collide with the cached responses of
+        // the exchange above, which used 0/1/2 on this same activity) — as the CPU
+        // does on the bench after it aborts and re-Identifies. ARBlockReq starts at
+        // PDU offset 108 (ARUUID, 16 bytes), so SessionKey is at [124..126].
+        let mut reconnect = pdu("connect_req");
+        reconnect[64] = 3; // seq_num (LE low byte): 0 -> 3, a new RPC call
+        reconnect[124..126].copy_from_slice(&5u16.to_be_bytes());
+        let reconnect_from = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 16, 2, 100)), 54800);
+        let o = cm.handle_datagram(&reconnect, reconnect_from, now).unwrap();
+        assert_eq!(
+            o.notify,
+            vec![
+                (ArState::Idle, Some(AbortReason::ControllerReconnect)),
+                (ArState::Connected, None),
+            ]
+        );
+        assert_eq!(o.send.len(), 1);
+        let (n, _) =
+            crate::rpc::NdrResponse::parse(&o.send[0].bytes[80..], crate::rpc::Drep::BIG).unwrap();
+        assert!(PnioStatus(n.status).is_ok());
+
+        // A PrmEnd on the reconnected AR (again a fresh RPC call, not a retransmit of
+        // the first one already cached above) must place the ApplicationReady call
+        // to the controller address captured by the takeover. The reconnect's source
+        // IP matches the original controller's, so the address itself is unchanged
+        // here — but this exercises the takeover code path (not the stale
+        // `was_idle` guard it replaces) that sets `controller_addr` and resets the
+        // call-sequence bookkeeping, which is why the resulting call is still
+        // byte-identical to the golden ApplicationReady request.
+        let mut prmend = pdu("prmend_req");
+        prmend[64] = 4; // seq_num (LE low byte): 2 -> 4, a new RPC call
+        let o = cm.handle_datagram(&prmend, cpu(), now).unwrap();
+        assert_eq!(o.send[1].bytes, pdu("appready_req"));
+        assert_eq!(o.send[1].to, cpu_cm());
     }
 
     #[test]
