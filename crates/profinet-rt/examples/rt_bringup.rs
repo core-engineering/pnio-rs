@@ -114,6 +114,17 @@ fn main() {
         false
     };
 
+    // Fail fast on a bad --csv path (missing parent dir, permissions, full disk):
+    // create the file and write its header here, before the device starts, so a
+    // bad path never leaves the RT stack running and the process can still take
+    // the same `--app-cpus`-style exit(2) path instead of panicking mid-run.
+    let csv_file = a.csv.as_ref().map(|p| {
+        open_csv(p).unwrap_or_else(|e| {
+            eprintln!("--csv: {e}");
+            std::process::exit(2);
+        })
+    });
+
     let mac = mac_of(&a.iface);
     let ip = a.ip.octets();
     let setup = DeviceSetup {
@@ -173,24 +184,13 @@ fn main() {
     let stats_main = dev.rt_stats();
     let stats = dev.rt_stats();
     let app_stop = stop.clone();
-    let csv_path = a.csv.clone();
     let duration = a.duration;
     let app = std::thread::spawn(move || {
         let started = std::time::Instant::now();
         let mut last_log = started;
         let mut last_err_log = started - Duration::from_secs(1);
         let stats_every = Duration::from_secs(a.stats_every);
-        let mut csv = csv_path.as_ref().map(|p| {
-            let mut f = std::fs::File::create(p).expect("create csv");
-            use std::io::Write;
-            writeln!(
-                f,
-                "t_s,tx,rx_accepted,rx_dropped,missed_ticks,watchdog_expirations,reused,\
-                 deferred,lat_max_us,lat_p9999_us,work_max_us,rxint_max_us"
-            )
-            .expect("csv header");
-            f
-        });
+        let mut csv = csv_file;
         while !app_stop.load(Ordering::Relaxed) {
             for r in run_app_cycle(&image) {
                 match r {
@@ -213,6 +213,9 @@ fn main() {
                 );
                 if let Some(f) = csv.as_mut() {
                     use std::io::Write;
+                    // Non-fatal by design: one row every `stats_every` seconds, unlike
+                    // the one-time create+header in `open_csv` where failing fast
+                    // matters — a transient write hiccup here shouldn't abort the run.
                     let _ = writeln!(
                         f,
                         "{},{},{},{},{},{},{},{},{},{},{},{}",
@@ -251,10 +254,15 @@ fn main() {
     let run_result = dev.run(&stop);
     stop.store(true, Ordering::Relaxed);
     let _ = app.join();
+    // Stops and bounded-joins the RT thread (Device's Drop -> stop_runner), so the
+    // histograms read below are final rather than still being written concurrently.
+    drop(dev);
     if let Some(p) = a.csv.as_ref() {
         let mut hist = p.clone().into_os_string();
         hist.push(".hist.csv");
-        write_hist_csv(std::path::Path::new(&hist), &stats_main);
+        if let Err(e) = write_hist_csv(std::path::Path::new(&hist), &stats_main) {
+            log::error!("--csv: writing histogram csv failed: {e}");
+        }
     }
     let thresholds = Thresholds {
         max_lateness_us: a.max_lateness_us,
@@ -373,18 +381,33 @@ fn verdict(
     }
 }
 
-fn write_hist_csv(path: &std::path::Path, stats: &profinet_rt::rt::RtStats) {
+/// Create the per-interval stats CSV and write its header. Called once in `main`,
+/// before the device starts, so a bad `--csv` path fails fast (see `main`) instead
+/// of panicking mid-run.
+fn open_csv(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(
+        f,
+        "t_s,tx,rx_accepted,rx_dropped,missed_ticks,watchdog_expirations,reused,\
+         deferred,lat_max_us,lat_p9999_us,work_max_us,rxint_max_us"
+    )?;
+    Ok(f)
+}
+
+fn write_hist_csv(path: &std::path::Path, stats: &profinet_rt::rt::RtStats) -> std::io::Result<()> {
     use std::io::Write;
     let (a, b, c) = (
         stats.tick_lateness.snapshot(),
         stats.cycle_work.snapshot(),
         stats.rx_interval.snapshot(),
     );
-    let mut f = std::fs::File::create(path).expect("create hist csv");
-    writeln!(f, "bin_us,tick_lateness,cycle_work,rx_interval").unwrap();
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "bin_us,tick_lateness,cycle_work,rx_interval")?;
     for i in 0..profinet_rt::rt::HIST_BINS {
-        writeln!(f, "{i},{},{},{}", a.bins[i], b.bins[i], c.bins[i]).unwrap();
+        writeln!(f, "{i},{},{},{}", a.bins[i], b.bins[i], c.bins[i])?;
     }
+    Ok(())
 }
 
 /// Parse "0-2", "0,1,2" or "3" into a CPU list.
