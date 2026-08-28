@@ -1,10 +1,12 @@
 //! Cyclic RTC1 exchange: frame codec, I/O layout, and the real-time provider/consumer thread.
 
 pub mod frame;
+pub mod layout;
 
 pub use frame::{
     frame_len, DataStatus, FrameError, RtFrame, APDU_LEN, CSDU_MIN, CYCLE_UNIT, TCI_RT,
 };
+pub use layout::{Cell, CrLayout, CsObject, IoObject, Layout, LayoutError};
 
 use thiserror::Error;
 
@@ -13,6 +15,8 @@ use thiserror::Error;
 pub enum RtError {
     #[error(transparent)]
     Frame(#[from] FrameError),
+    #[error(transparent)]
+    Layout(#[from] LayoutError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("scheduling error: {0}")]
