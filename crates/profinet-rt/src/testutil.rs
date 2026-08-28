@@ -27,6 +27,23 @@ pub fn golden(name: &str) -> Vec<u8> {
     parse_hex(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
 }
 
+/// Offsets inside a VLAN-tagged RTC1 golden frame.
+///
+/// Unused until later tasks' codec tests consume them; `dead_code` is allowed here
+/// rather than deferring the constants' addition.
+#[allow(dead_code)]
+pub const RT_FRAMEID_OFF: usize = 18;
+#[allow(dead_code)]
+pub const RT_CSDU_OFF: usize = 20;
+#[allow(dead_code)]
+pub const RT_APDU_OFF: usize = 60;
+
+/// Load `testdata/rt/<name>.hex` relative to the crate root.
+pub fn golden_rt(name: &str) -> Vec<u8> {
+    let path = format!("{}/testdata/rt/{name}.hex", env!("CARGO_MANIFEST_DIR"));
+    parse_hex(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,6 +69,21 @@ mod tests {
             ("appready_res", 174),
         ] {
             assert_eq!(golden(name).len(), len, "{name}");
+        }
+    }
+
+    #[test]
+    fn rt_goldens_are_64_byte_tagged_rtc1_frames() {
+        for name in [
+            "rtc_dev_8000",
+            "rtc_cpu_8001",
+            "echo_cpu_8001",
+            "echo_dev_8000",
+        ] {
+            let f = golden_rt(name);
+            assert_eq!(f.len(), 64, "{name}");
+            assert_eq!(&f[12..16], &[0x81, 0x00, 0xc0, 0x00], "{name} VLAN tag");
+            assert_eq!(&f[16..18], &[0x88, 0x92], "{name} ethertype");
         }
     }
 }

@@ -1,0 +1,5 @@
+# echo-2026-08-27-165307.pcapng frame 1: p-net -> CPU, ds 0x36 (Backup+Redundancy quirk), cc 0xec00 (64 bytes)
+ec 1c 5d 61 e7 3f 8c f3 19 cd 19 f8 81 00 c0 00
+88 92 80 00 80 80 80 a4 80 80 a5 80 80 12 b4 56
+78 7f 80 00 00 80 80 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 ec 00 36 00

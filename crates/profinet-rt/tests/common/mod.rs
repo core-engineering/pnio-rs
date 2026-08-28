@@ -25,3 +25,14 @@ pub fn golden(name: &str) -> Vec<u8> {
     let path = format!("{}/testdata/cm/{name}.hex", env!("CARGO_MANIFEST_DIR"));
     parse_hex(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
 }
+
+/// Offsets inside a VLAN-tagged RTC1 golden frame.
+pub const RT_FRAMEID_OFF: usize = 18;
+pub const RT_CSDU_OFF: usize = 20;
+pub const RT_APDU_OFF: usize = 60;
+
+/// Load `testdata/rt/<name>.hex` relative to the crate root.
+pub fn golden_rt(name: &str) -> Vec<u8> {
+    let path = format!("{}/testdata/rt/{name}.hex", env!("CARGO_MANIFEST_DIR"));
+    parse_hex(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
+}
