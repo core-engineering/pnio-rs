@@ -75,7 +75,6 @@ pub struct RtStats {
     pub missed_ticks: AtomicU64,
     pub input_snapshot_reused: AtomicU64,
     pub output_publish_deferred: AtomicU64,
-    pub max_tick_lateness_ns: AtomicU64,
     /// Timer wake-up minus scheduled expiry, per tick.
     pub tick_lateness: Histogram,
     /// Tick wake-up to `send` returned, per tick: our own cost.

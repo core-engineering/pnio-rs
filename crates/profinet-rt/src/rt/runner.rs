@@ -351,9 +351,6 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
                     );
                     if let Some(expected) = start.checked_add(offset) {
                         let lateness = now.saturating_duration_since(expected).as_nanos() as u64;
-                        stats
-                            .max_tick_lateness_ns
-                            .fetch_max(lateness, Ordering::Relaxed);
                         stats.tick_lateness.record(lateness);
                     }
 
