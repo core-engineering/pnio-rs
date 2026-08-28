@@ -194,31 +194,38 @@ impl IoImage {
     /// Call `f` with the current output image slice for `(slot, subslot)` and the
     /// validity of the frame it was published from.
     ///
-    /// Holds the `cells` lock for the whole operation, for the same TOCTOU-vs-`rebuild`
-    /// reason as [`IoImage::write_inputs`].
+    /// The cell lookup and bounds check happen under the `cells`/`outputs` locks (same
+    /// TOCTOU-vs-`rebuild` reasoning as [`IoImage::write_inputs`]), but both locks are
+    /// released *before* `f` runs: `f` executes with no `IoImage` lock held, so it may
+    /// freely call back into this image (e.g. `write_inputs` to mirror the read data
+    /// into the input image) without deadlocking. `std::sync::Mutex` is not reentrant,
+    /// so this matters even for callbacks that stay on the calling thread.
     pub fn read_outputs<T>(
         &self,
         slot: u16,
         subslot: u16,
         f: impl FnOnce(&[u8], &Validity) -> T,
     ) -> Result<T, ImageError> {
-        let cells = self.cells.lock().unwrap_or_else(|e| e.into_inner());
-        let cell = cells
-            .iter()
-            .find(|c| c.slot == slot && c.subslot == subslot)
-            .ok_or(ImageError::UnknownSubmodule { slot, subslot })?;
-        let off = cell
-            .output_off
-            .ok_or(ImageError::NoOutput { slot, subslot })?;
-        let len = cell.output_len;
-        let outputs = self.outputs.lock().unwrap_or_else(|e| e.into_inner());
-        if off + len > outputs.csdu.len() {
-            return Err(ImageError::LengthMismatch {
-                expected: len,
-                got: outputs.csdu.len().saturating_sub(off),
-            });
-        }
-        Ok(f(&outputs.csdu[off..off + len], &outputs.validity))
+        let (bytes, validity) = {
+            let cells = self.cells.lock().unwrap_or_else(|e| e.into_inner());
+            let cell = cells
+                .iter()
+                .find(|c| c.slot == slot && c.subslot == subslot)
+                .ok_or(ImageError::UnknownSubmodule { slot, subslot })?;
+            let off = cell
+                .output_off
+                .ok_or(ImageError::NoOutput { slot, subslot })?;
+            let len = cell.output_len;
+            let outputs = self.outputs.lock().unwrap_or_else(|e| e.into_inner());
+            if off + len > outputs.csdu.len() {
+                return Err(ImageError::LengthMismatch {
+                    expected: len,
+                    got: outputs.csdu.len().saturating_sub(off),
+                });
+            }
+            (outputs.csdu[off..off + len].to_vec(), outputs.validity)
+        };
+        Ok(f(&bytes, &validity))
     }
 
     /// Copy the whole output C-SDU (`min(dst.len(), csdu.len())` bytes) into `dst` and
@@ -425,6 +432,19 @@ mod tests {
         }
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn read_outputs_closure_may_write_inputs() {
+        let img = IoImage::new(&layout());
+        let mut csdu = vec![0u8; 40];
+        csdu[4] = 0x5a;
+        assert!(img.rt_publish(&csdu, fresh()));
+        img.read_outputs(2, 1, |b, _| img.write_inputs(1, 1, b).unwrap())
+            .unwrap();
+        let mut snap = vec![0u8; 40];
+        assert!(img.rt_snapshot_inputs(&mut snap));
+        assert_eq!(snap[3], 0x5a);
     }
 
     #[test]
