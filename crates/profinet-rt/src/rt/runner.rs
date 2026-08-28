@@ -14,7 +14,6 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +24,7 @@ use std::time::{Duration, Instant};
 use super::engine::{RtEngine, RtStats, RxVerdict, WatchdogVerdict};
 use super::image::{IoImage, Validity, WatchdogState};
 use super::layout::Layout;
+use super::sched;
 use super::RtError;
 use crate::eth::poll::{poll_readable_into, wait_readable};
 use crate::eth::AfPacketTransport;
@@ -62,6 +62,8 @@ pub struct RtConfig {
     pub cpu_pin: Option<usize>,
     /// Run the RT thread at this `SCHED_FIFO` priority, if set.
     pub rt_priority: Option<u8>,
+    /// Lock the process memory (`mlockall`) and pre-fault the RT stack before the loop.
+    pub lock_memory: bool,
 }
 
 /// Out-of-band conditions reported by the RT thread, drained by the acyclic side.
@@ -264,20 +266,27 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
         stats,
         cpu_pin,
         rt_priority,
+        lock_memory,
         ..
     } = cfg;
 
     // --- setup: allocation, formatting and warnings all happen before the loop ---
+    if let Some(cpu) = cpu_pin {
+        if let Err(e) = sched::set_affinity(&[cpu]) {
+            shared.push_event(RtEvent::SchedWarning(format!("CPU pin {cpu}: {e}")));
+        }
+    }
     if let Some(priority) = rt_priority {
-        if let Err(e) = set_fifo_priority(priority) {
+        if let Err(e) = sched::set_fifo(priority) {
             shared.push_event(RtEvent::SchedWarning(format!(
                 "SCHED_FIFO priority {priority}: {e}"
             )));
         }
     }
-    if let Some(cpu) = cpu_pin {
-        if let Err(e) = pin_to_cpu(cpu) {
-            shared.push_event(RtEvent::SchedWarning(format!("CPU pin {cpu}: {e}")));
+    if lock_memory {
+        match sched::lock_memory() {
+            Ok(()) => sched::prefault_stack(),
+            Err(e) => shared.push_event(RtEvent::SchedWarning(format!("mlockall: {e}"))),
         }
     }
 
@@ -631,63 +640,6 @@ fn drain_eventfd(fd: RawFd) {
     let _ = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
 }
 
-/// Move the calling thread to `SCHED_FIFO` at `priority` (needs `CAP_SYS_NICE`).
-///
-/// Goes through the raw syscall rather than `libc::sched_setscheduler`: musl's libc
-/// stubs that wrapper to always return `ENOSYS`, so on a musl build the RT thread
-/// would silently keep its default scheduling. The syscall itself is implemented by
-/// the kernel on both glibc and musl targets, so calling it directly works on either.
-fn set_fifo_priority(priority: u8) -> std::io::Result<()> {
-    // Safety: `sched_param` is a POD struct for which an all-zero bit pattern is
-    // valid; only `sched_priority` is meaningful to `sched_setscheduler` (musl
-    // carries extra reserved/deprecated fields glibc doesn't, both fine left zeroed).
-    let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
-    param.sched_priority = priority as libc::c_int;
-    // Safety: raw `sched_setscheduler(2)` syscall (bypassing musl's ENOSYS-stubbed
-    // libc wrapper); `param` is a fully-initialized `sched_param` live for the call,
-    // passed as a valid pointer, and pid 0 means the calling thread.
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_sched_setscheduler,
-            0 as libc::pid_t,
-            libc::SCHED_FIFO,
-            &param as *const libc::sched_param,
-        )
-    };
-    if ret < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Pin the calling thread to `cpu`.
-///
-/// Also goes through the raw syscall, for symmetry with [`set_fifo_priority`]: musl
-/// does implement `sched_setaffinity` (unlike `sched_setscheduler`), so this one does
-/// not currently need it, but keeping both paths on the syscall avoids the same
-/// ENOSYS surprise resurfacing here if that ever changes.
-fn pin_to_cpu(cpu: usize) -> std::io::Result<()> {
-    // Safety: `cpu_set_t` is a plain-old-data bitmap for which an all-zero bit
-    // pattern is a valid (empty) set; `CPU_SET` only writes inside it. Raw
-    // `sched_setaffinity(2)` syscall; `set` is fully initialized and live for the
-    // call, passed as a valid pointer with its exact size, and pid 0 means the
-    // calling thread.
-    let ret = unsafe {
-        let mut set: libc::cpu_set_t = mem::zeroed();
-        libc::CPU_SET(cpu, &mut set);
-        libc::syscall(
-            libc::SYS_sched_setaffinity,
-            0 as libc::pid_t,
-            mem::size_of::<libc::cpu_set_t>() as libc::size_t,
-            &set as *const libc::cpu_set_t,
-        )
-    };
-    if ret < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,6 +676,7 @@ mod tests {
             stats,
             cpu_pin: None,
             rt_priority: None,
+            lock_memory: false,
         }
     }
 

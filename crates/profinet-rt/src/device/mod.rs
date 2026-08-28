@@ -34,6 +34,9 @@ pub struct RtOptions {
     pub cpu_pin: Option<usize>,
     /// Run the RT thread at this `SCHED_FIFO` priority, if set.
     pub rt_priority: Option<u8>,
+    /// Lock process memory and pre-fault the RT stack (`mlockall`); needs
+    /// `CAP_IPC_LOCK` or a sufficient `RLIMIT_MEMLOCK`, otherwise a `SchedWarning`.
+    pub lock_memory: bool,
 }
 
 /// Static device identity + configuration handed to [`Device::new`]: the DCP identity
@@ -299,6 +302,7 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             stats: self.stats.clone(),
             cpu_pin: rt.cpu_pin,
             rt_priority: rt.rt_priority,
+            lock_memory: rt.lock_memory,
         };
         match (self.runner_factory)(cfg) {
             Ok(handle) => self.runner = Some(handle),
@@ -505,6 +509,7 @@ mod tests {
             iface: "mock".into(),
             cpu_pin: None,
             rt_priority: None,
+            lock_memory: false,
         });
         let mut dev = Device::new(s, eth, rpc);
         dev.with_runner_factory(|cfg| RtRunner::spawn_with_transport(cfg, MockTransport::new()));
@@ -545,6 +550,7 @@ mod tests {
             iface: "mock".into(),
             cpu_pin: None,
             rt_priority: None,
+            lock_memory: false,
         });
         let mut dev = Device::new(s, eth, rpc);
         // Shrink the cyclic period and the output watchdog so the runner's watchdog

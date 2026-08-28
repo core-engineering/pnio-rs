@@ -6,6 +6,8 @@ pub mod image;
 pub mod layout;
 #[cfg(target_os = "linux")]
 pub mod runner;
+#[cfg(target_os = "linux")]
+pub mod sched;
 
 pub use engine::{
     DropReason, RtEngine, RtStats, RxVerdict, StatsSnapshot, WatchdogVerdict, IOXS_BAD, IOXS_GOOD,

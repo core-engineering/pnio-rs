@@ -102,6 +102,7 @@ fn main() {
             iface: a.iface.clone(),
             cpu_pin: a.cpu,
             rt_priority: a.rt_priority,
+            lock_memory: false, // Task 5 adds the flag
         }),
     };
     let eth = AfPacketTransport::open(&a.iface).expect("AF_PACKET (need cap_net_raw)");
