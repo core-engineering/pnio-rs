@@ -10,7 +10,21 @@ facing the PLC — never re-address it, it is also a NAT gateway leg).
 - Debian 13 with the `linux-image-rt-amd64` PREEMPT_RT kernel installed and booted
   (verify with `uname -r` — it must end in `-rt-amd64` — and `cat /sys/kernel/realtime`
   must print `1`).
-- GRUB cmdline (spec §5.1), in `/etc/default/grub`:
+- GRUB cmdline, in `/etc/default/grub`. Two profiles:
+
+  **L2-pair profile (default of the scripts, recommended).** CPUs 2 and 3 share the
+  Atom E3940's 1 MiB L2 (no L3): isolate both, keep CPU 2 idle as a cache guard, run
+  the RT thread and the NIC IRQ on CPU 3, everything else on CPUs 0-1. This is what
+  the Plan 7 campaign showed is needed to hold the p99.99 threshold under load
+  (`docs/bench-pnet-device.md` §6e).
+
+  ```
+  GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=domain,managed_irq,2,3 nohz_full=2,3 rcu_nocbs=2,3 irqaffinity=0-1 intel_idle.max_cstate=1 processor.max_cstate=1 nosoftlockup"
+  ```
+
+  **Single-core profile (spec §5.1, Plan 7 campaign as first run).** Only CPU 3
+  isolated; housekeeping on CPUs 0-2. Run the scripts with `HK_CPUS=0-2`.
+  `edge-rt-tune.sh` warns that the L2 sibling is not isolated.
 
   ```
   GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=domain,managed_irq,3 nohz_full=3 rcu_nocbs=3 irqaffinity=0-2 intel_idle.max_cstate=1 processor.max_cstate=1 nosoftlockup"
@@ -24,8 +38,8 @@ facing the PLC — never re-address it, it is also a NAT gateway leg).
   ```
 
   After reboot, verify:
-  - `cat /sys/devices/system/cpu/isolated` = `3`
-  - `cat /sys/devices/system/cpu/nohz_full` = `3`
+  - `cat /sys/devices/system/cpu/isolated` = `2-3` (L2-pair profile) or `3` (single-core)
+  - `cat /sys/devices/system/cpu/nohz_full` = same as `isolated`
   - `cat /sys/kernel/realtime` = `1`
   - `ip -4 addr show eno2` = `172.16.2.10/24`
   - the NAT gateway still answers (`ping 192.168.1.200` from the Windows side, TTL 254)

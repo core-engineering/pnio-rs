@@ -9,7 +9,7 @@ BIN="${BIN:-$BENCH/rt_bringup}"
 PLC_IF="${PLC_IF:-eno2}"
 DEV_IP="${DEV_IP:-172.16.2.10}"
 RT_CPU="${RT_CPU:-3}"
-HK_CPUS="${HK_CPUS:-0-2}"
+HK_CPUS="${HK_CPUS:-0-1}"   # L2-pair profile (CPUs 2-3 isolated); use HK_CPUS=0-2 for the single-core profile
 RT_PRIO="${RT_PRIO:-80}"
 STAMP="${STAMP:-$(date +%Y%m%d-%H%M%S)}"
 OUT="$BENCH/logs/plan7-$STAMP"

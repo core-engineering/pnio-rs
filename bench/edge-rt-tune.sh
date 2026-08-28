@@ -5,7 +5,8 @@ set -euo pipefail
 
 PLC_IF="${PLC_IF:-eno2}"
 RT_CPU="${RT_CPU:-3}"
-HK_CPUS="${HK_CPUS:-0-2}"
+HK_CPUS="${HK_CPUS:-0-1}"   # L2-pair profile: CPUs 2-3 isolated, CPU 2 kept idle as a cache guard
+L2_GUARD_CPU="${L2_GUARD_CPU:-2}"
 IRQ_PRIO="${IRQ_PRIO:-90}"
 RX_USECS="${RX_USECS:-0}"
 TX_USECS="${TX_USECS:-0}"
@@ -25,6 +26,15 @@ isolated="$(cat /sys/devices/system/cpu/isolated)"
 # a range like "2-3".
 grep -qw "$RT_CPU" /sys/devices/system/cpu/isolated && ok "cpu $RT_CPU isolated" \
   || fail "cpu $RT_CPU not in isolated='$isolated' (GRUB cmdline?)"
+# The RT core's L2 sibling (CPUs 2-3 share the 1 MiB L2 on the Atom E3940) must be
+# isolated too, or housekeeping load thrashes the RT core's cache (Plan 7 campaign:
+# tick lateness p99.99 147-203 µs with load on CPU 2, 86 µs without). Warn only, so
+# the single-core profile (isolcpus=3, HK_CPUS=0-2) stays usable.
+if grep -qw "$L2_GUARD_CPU" /sys/devices/system/cpu/isolated; then
+  ok "cpu $L2_GUARD_CPU (L2 sibling of cpu $RT_CPU) isolated"
+else
+  warn "cpu $L2_GUARD_CPU (L2 sibling of cpu $RT_CPU) not isolated: single-core profile, expect L2 contention under load"
+fi
 
 # 2. governor
 for g in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
@@ -80,6 +90,8 @@ echo "----- state -----"
 echo "kernel:    $(uname -r)  realtime=$(cat /sys/kernel/realtime)"
 echo "cmdline:   $(cat /proc/cmdline)"
 echo "isolated:  $isolated   nohz_full: $(cat /sys/devices/system/cpu/nohz_full)"
+echo "hk_cpus:   $HK_CPUS   rt_cpu: $RT_CPU"
+for c in /sys/devices/system/cpu/cpu$RT_CPU/cache/index*; do echo "cache:     L$(cat "$c/level") $(cat "$c/type") $(cat "$c/size") shared_cpu_list=$(cat "$c/shared_cpu_list")"; done
 echo "governor:  $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)"
 echo "cpuidle:   $(for s in /sys/devices/system/cpu/cpu$RT_CPU/cpuidle/state*; do printf '%s(disable=%s) ' "$(cat "$s/name")" "$(cat "$s/disable")"; done)"
 awk -v ifc="$PLC_IF" '$NF == ifc || $NF ~ "^"ifc"-" {gsub(":","",$1); print "irq " $1 " " $NF}' /proc/interrupts | while read -r _ irq name; do
