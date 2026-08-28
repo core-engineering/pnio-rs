@@ -624,15 +624,28 @@ fn drain_eventfd(fd: RawFd) {
 }
 
 /// Move the calling thread to `SCHED_FIFO` at `priority` (needs `CAP_SYS_NICE`).
+///
+/// Goes through the raw syscall rather than `libc::sched_setscheduler`: musl's libc
+/// stubs that wrapper to always return `ENOSYS`, so on a musl build the RT thread
+/// would silently keep its default scheduling. The syscall itself is implemented by
+/// the kernel on both glibc and musl targets, so calling it directly works on either.
 fn set_fifo_priority(priority: u8) -> std::io::Result<()> {
     // Safety: `sched_param` is a POD struct for which an all-zero bit pattern is
     // valid; only `sched_priority` is meaningful to `sched_setscheduler` (musl
     // carries extra reserved/deprecated fields glibc doesn't, both fine left zeroed).
     let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
     param.sched_priority = priority as libc::c_int;
-    // Safety: `param` is a fully-initialized `sched_param` live for the call; pid 0
-    // means the calling thread.
-    let ret = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) };
+    // Safety: raw `sched_setscheduler(2)` syscall (bypassing musl's ENOSYS-stubbed
+    // libc wrapper); `param` is a fully-initialized `sched_param` live for the call,
+    // passed as a valid pointer, and pid 0 means the calling thread.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_sched_setscheduler,
+            0 as libc::pid_t,
+            libc::SCHED_FIFO,
+            &param as *const libc::sched_param,
+        )
+    };
     if ret < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -640,15 +653,26 @@ fn set_fifo_priority(priority: u8) -> std::io::Result<()> {
 }
 
 /// Pin the calling thread to `cpu`.
+///
+/// Also goes through the raw syscall, for symmetry with [`set_fifo_priority`]: musl
+/// does implement `sched_setaffinity` (unlike `sched_setscheduler`), so this one does
+/// not currently need it, but keeping both paths on the syscall avoids the same
+/// ENOSYS surprise resurfacing here if that ever changes.
 fn pin_to_cpu(cpu: usize) -> std::io::Result<()> {
     // Safety: `cpu_set_t` is a plain-old-data bitmap for which an all-zero bit
-    // pattern is a valid (empty) set; `CPU_SET` only writes inside it, and
-    // `sched_setaffinity` reads exactly the size we pass. pid 0 means the calling
-    // thread.
+    // pattern is a valid (empty) set; `CPU_SET` only writes inside it. Raw
+    // `sched_setaffinity(2)` syscall; `set` is fully initialized and live for the
+    // call, passed as a valid pointer with its exact size, and pid 0 means the
+    // calling thread.
     let ret = unsafe {
         let mut set: libc::cpu_set_t = mem::zeroed();
         libc::CPU_SET(cpu, &mut set);
-        libc::sched_setaffinity(0, mem::size_of::<libc::cpu_set_t>(), &set)
+        libc::syscall(
+            libc::SYS_sched_setaffinity,
+            0 as libc::pid_t,
+            mem::size_of::<libc::cpu_set_t>() as libc::size_t,
+            &set as *const libc::cpu_set_t,
+        )
     };
     if ret < 0 {
         return Err(std::io::Error::last_os_error());
