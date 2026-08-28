@@ -43,6 +43,7 @@ pub mod dcp;
 pub mod device;
 pub mod eth;
 pub mod rpc;
+pub mod rt;
 #[cfg(test)]
 pub(crate) mod testutil;
 
