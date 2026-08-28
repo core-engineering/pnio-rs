@@ -8,10 +8,9 @@
 //! conditions as [`RtEvent`]s on a queue backed by an `eventfd`, so the acyclic side
 //! can wait on `event_fd()` in its own `poll` and do the logging.
 //!
-//! The one allocation left in the cycle is the `Vec` [`EthTransport::recv`] returns
-//! for each received frame — it is part of that trait's signature. Everything else
-//! (TX frame, input snapshot, poll set, event queue capacity) is preallocated before
-//! the loop starts.
+//! Nothing is allocated once the loop runs: the RX buffer ([`MAX_FRAME_LEN`] bytes),
+//! the TX frame, the input snapshot, the poll set and the event queue capacity are
+//! all set up before it starts.
 
 use std::collections::VecDeque;
 use std::io;
@@ -29,7 +28,7 @@ use super::layout::Layout;
 use super::RtError;
 use crate::eth::poll::{poll_readable_into, wait_readable};
 use crate::eth::AfPacketTransport;
-use crate::eth::{EthTransport, MacAddr, TransportError};
+use crate::eth::{EthTransport, MacAddr, TransportError, MAX_FRAME_LEN};
 
 /// Upper bound on frames consumed in one receive pass, so a flooded socket cannot
 /// starve the send cycle: whatever is left waits for the next pass.
@@ -207,9 +206,7 @@ impl RtRunner {
     /// missing `CAP_NET_RAW` comes back as an error here rather than as an event
     /// from a thread that immediately dies.
     pub fn spawn(cfg: RtConfig) -> Result<RtHandle, RtError> {
-        let transport = AfPacketTransport::open(&cfg.iface).map_err(|e| match e {
-            TransportError::Io(e) => RtError::Io(e),
-        })?;
+        let transport = AfPacketTransport::open(&cfg.iface)?;
         Self::spawn_with_transport(cfg, transport)
     }
 
@@ -286,6 +283,7 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
 
     let period = layout.input_cr.period();
     let mut snapshot = vec![0u8; layout.input_cr.data_length];
+    let mut rx_buf = [0u8; MAX_FRAME_LEN];
     let mut engine = RtEngine::new(layout, our_mac, cpu_mac, Arc::clone(&stats));
 
     let socket_fd = transport.raw_fd();
@@ -391,6 +389,7 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
             let mut drained_frame = false;
             if !drain_rx(
                 &transport,
+                &mut rx_buf,
                 socket_fd,
                 &mut engine,
                 &image,
@@ -448,6 +447,7 @@ fn drain_should_continue(has_fd: bool, readable: bool, got_frame: bool) -> bool 
 #[allow(clippy::too_many_arguments)]
 fn drain_rx<T: EthTransport>(
     transport: &T,
+    rx_buf: &mut [u8; MAX_FRAME_LEN],
     socket_fd: Option<RawFd>,
     engine: &mut RtEngine,
     image: &IoImage,
@@ -470,12 +470,12 @@ fn drain_rx<T: EthTransport>(
             }
         }
 
-        let got_frame = match transport.recv(Some(Duration::ZERO)) {
+        let got_frame = match transport.recv_into(rx_buf, Some(Duration::ZERO)) {
             Ok(None) => false,
-            Ok(Some(frame)) => {
+            Ok(Some(n)) => {
                 *processed_frame = true;
                 let now = Instant::now();
-                if let RxVerdict::Accepted { .. } = engine.on_frame(&frame, now) {
+                if let RxVerdict::Accepted { .. } = engine.on_frame(&rx_buf[..n], now) {
                     let validity = Validity {
                         provider_run: engine.provider_run(),
                         primary: engine.primary(),
@@ -492,6 +492,13 @@ fn drain_rx<T: EthTransport>(
                         *pending = Some(Pending::Data(validity));
                     }
                 }
+                true
+            }
+            // An oversized frame is not ours to consume and not a socket failure:
+            // count it and keep draining.
+            Err(TransportError::FrameTooLong { .. }) => {
+                stats.rx_invalid.fetch_add(1, Ordering::Relaxed);
+                *processed_frame = true;
                 true
             }
             Err(e) => {
@@ -832,8 +839,12 @@ mod tests {
         fn send(&self, f: &[u8]) -> Result<(), crate::eth::TransportError> {
             self.0.send(f)
         }
-        fn recv(&self, t: Option<Duration>) -> Result<Option<Vec<u8>>, crate::eth::TransportError> {
-            self.0.recv(t)
+        fn recv_into(
+            &self,
+            buf: &mut [u8],
+            timeout: Option<Duration>,
+        ) -> Result<Option<usize>, crate::eth::TransportError> {
+            self.0.recv_into(buf, timeout)
         }
     }
 }

@@ -29,6 +29,8 @@ pub enum RtError {
     Layout(#[from] LayoutError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Transport(#[from] crate::eth::TransportError),
     #[error("scheduling error: {0}")]
     Sched(std::io::Error),
     #[error("stopped")]

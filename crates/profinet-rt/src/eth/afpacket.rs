@@ -5,7 +5,7 @@ use std::time::Duration;
 use nix::sys::socket::{send, MsgFlags};
 
 use super::poll::wait_readable;
-use super::transport::{EthTransport, TransportError};
+use super::transport::{EthTransport, TransportError, MAX_FRAME_LEN};
 use super::{ETHERTYPE_PROFINET, ETHERTYPE_VLAN};
 use crate::dcp::frame::DCP_MULTICAST_MAC;
 
@@ -129,15 +129,21 @@ impl EthTransport for AfPacketTransport {
         Ok(())
     }
 
-    /// Returns `Ok(Some(frame))` only for PROFINET frames (untagged or VLAN-tagged).
-    /// Returns `Ok(None)` for any other frame, or if `timeout` elapses before a
-    /// frame arrives.
-    fn recv(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, TransportError> {
+    /// Returns `Ok(Some(len))` only for PROFINET frames (untagged or VLAN-tagged).
+    /// Returns `Ok(None)` for any other frame, for our own looped-back frames, or if
+    /// `timeout` elapses before a frame arrives.
+    fn recv_into(
+        &self,
+        buf: &mut [u8],
+        timeout: Option<Duration>,
+    ) -> Result<Option<usize>, TransportError> {
+        if buf.len() < MAX_FRAME_LEN {
+            return Err(TransportError::BufferTooSmall);
+        }
         if !wait_readable(self.fd.as_raw_fd(), timeout)? {
             return Ok(None);
         }
-        let mut buf = vec![0u8; 1522];
-        // Safety: `buf` is a valid, writable allocation of `buf.len()` bytes and
+        // Safety: `buf` is a valid, writable slice of `buf.len()` bytes and
         // `from`/`from_len` a valid, fully-initialized `sockaddr_ll` plus its length,
         // all live for the duration of the call; `fd` is a valid, open socket.
         let mut from: libc::sockaddr_ll = unsafe { mem::zeroed() };
@@ -147,7 +153,7 @@ impl EthTransport for AfPacketTransport {
                 self.fd.as_raw_fd(),
                 buf.as_mut_ptr() as *mut libc::c_void,
                 buf.len(),
-                0,
+                libc::MSG_TRUNC,
                 &mut from as *mut libc::sockaddr_ll as *mut libc::sockaddr,
                 &mut from_len,
             )
@@ -155,15 +161,20 @@ impl EthTransport for AfPacketTransport {
         if n < 0 {
             return Err(TransportError::Io(std::io::Error::last_os_error()));
         }
+        let n = n as usize;
         // Our own transmissions are looped back to every `AF_PACKET` socket on the
         // interface, including the one that sent them: drop them here so the cyclic
         // engine never sees its own provider frames.
         if from.sll_pkttype == libc::PACKET_OUTGOING {
             return Ok(None);
         }
-        buf.truncate(n as usize);
-        if is_profinet_frame(&buf) {
-            Ok(Some(buf))
+        // With MSG_TRUNC the kernel reports the real length even when it exceeds
+        // the buffer: the frame was cut and must not be handed on.
+        if n > buf.len() {
+            return Err(TransportError::FrameTooLong { len: n });
+        }
+        if is_profinet_frame(&buf[..n]) {
+            Ok(Some(n))
         } else {
             Ok(None)
         }
