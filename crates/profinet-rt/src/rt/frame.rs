@@ -87,9 +87,18 @@ pub fn frame_len(csdu_len: usize) -> usize {
 impl<'a> RtFrame<'a> {
     /// Parses an RTC1 frame: Ethernet header (tagged or untagged) + FrameID + C-SDU + APDU status.
     pub fn parse(frame: &'a [u8]) -> Result<(EthHeader, RtFrame<'a>), FrameError> {
-        let (eth, off) = EthHeader::parse(frame).map_err(|_| FrameError::TooShort {
-            need: 14 + 2 + CSDU_MIN + APDU_LEN,
-            have: frame.len(),
+        let (eth, off) = EthHeader::parse(frame).map_err(|_| {
+            // `EthHeader::parse` failed before it could tell us the real header length; infer
+            // it from whatever bytes are visible (a VLAN tag makes the header 18 bytes, else 14).
+            let off = if frame.len() >= 14 && frame[12..14] == [0x81, 0x00] {
+                18
+            } else {
+                14
+            };
+            FrameError::TooShort {
+                need: off + 2 + CSDU_MIN + APDU_LEN,
+                have: frame.len(),
+            }
         })?;
 
         if eth.ethertype != ETHERTYPE_PROFINET {
@@ -131,7 +140,7 @@ impl<'a> RtFrame<'a> {
     /// header bytes are written directly into the caller's slice instead.
     pub fn write(&self, out: &mut [u8], dst: MacAddr, src: MacAddr) -> Result<usize, FrameError> {
         let csdu_len = self.csdu.len().max(CSDU_MIN);
-        let need = 18 + 2 + csdu_len + APDU_LEN;
+        let need = frame_len(self.csdu.len());
         if out.len() < need {
             return Err(FrameError::BufferTooSmall {
                 need,
@@ -242,6 +251,14 @@ mod tests {
         assert_eq!(
             RtFrame::parse(&golden_rt("rtc_cpu_8001")[..30]).unwrap_err(),
             FrameError::TooShort { need: 64, have: 30 }
+        );
+        assert_eq!(
+            RtFrame::parse(&golden_rt("rtc_cpu_8001")[..16]).unwrap_err(),
+            FrameError::TooShort { need: 64, have: 16 }
+        );
+        assert_eq!(
+            RtFrame::parse(&[0u8; 10]).unwrap_err(),
+            FrameError::TooShort { need: 60, have: 10 }
         );
         let mut ip = golden_rt("rtc_cpu_8001");
         ip[16] = 0x08;
