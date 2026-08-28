@@ -244,9 +244,45 @@ mod tests {
     }
 
     #[test]
-    fn run_stops_on_flag() {
-        let stop = std::sync::atomic::AtomicBool::new(true);
+    fn run_returns_when_flag_is_set_from_another_thread() {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut dev = Device::new(setup(), MockTransport::new(), MockRpcTransport::new());
+        let flipper = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            })
+        };
         dev.run(&stop).unwrap();
+        flipper.join().unwrap();
+    }
+
+    /// Wraps a `MockRpcTransport` for `recv`, but always fails `send` — used to prove
+    /// that a transport I/O error during `dispatch` is not swallowed by `step`.
+    struct FailingRpc(MockRpcTransport);
+
+    impl RpcTransport for FailingRpc {
+        fn send(&self, _buf: &[u8], _to: std::net::SocketAddr) -> Result<(), RpcError> {
+            Err(RpcError::Io(std::io::Error::other("boom")))
+        }
+        fn recv(
+            &self,
+            timeout: Option<Duration>,
+        ) -> Result<Option<(Vec<u8>, std::net::SocketAddr)>, RpcError> {
+            self.0.recv(timeout)
+        }
+    }
+
+    #[test]
+    fn transport_error_propagates_out_of_run() {
+        let eth = MockTransport::new();
+        let rpc = FailingRpc(MockRpcTransport::new());
+        let cpu = "172.16.2.100:54766".parse().unwrap();
+        rpc.0
+            .push_rx(golden("connect_req")[RPC_OFF..].to_vec(), cpu);
+        let mut dev = Device::new(setup(), eth, rpc);
+        let err = dev.step(Instant::now(), Some(Duration::ZERO)).unwrap_err();
+        assert!(matches!(err, DeviceError::Rpc(_)));
     }
 }
