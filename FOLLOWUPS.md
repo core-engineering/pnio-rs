@@ -108,10 +108,11 @@ Open points recorded from the AR-establishment HIL run (`docs/bench-pnet-device.
 Open points recorded from the cyclic-exchange HIL run (`docs/bench-pnet-device.md` §6d,
 `hil-rt-facts.md`), to be picked up by the plans noted:
 
-- **1 ms / determinism**: today's 32 ms run holds `max_tick_lateness` < 0.4 ms on a plain
-  Debian 13 kernel with no RT tuning; a 1 ms update time needs a `PREEMPT_RT` kernel on the
-  edge, `isolcpus`, IRQ affinity, and `mlockall`, plus a real jitter measurement campaign.
-  Plan 7.
+- ✅ **RESOLVED (HIL 2026-08-28, `docs/bench-pnet-device.md` §6e)** — **1 ms / determinism**:
+  1 ms held against a real S7-1500 on `PREEMPT_RT`, idle and under load, zero missed ticks and
+  zero watchdog expirations over 2.4 million cycles; the only spec §1 criterion not met under
+  the load pinned to CPUs 0-2 (tick lateness p99.99) is met once the load is kept off CPU 3's
+  L2 sibling. See "From Plan 7 (1 ms)" below for the follow-up.
 - **Per-socket BPF filters**: both `AF_PACKET` sockets currently see every `0x8892` frame
   (not just the ones addressed to each). `AfPacketTransport::recv` also allocates 1522 B per
   frame (needs a `recv_into` on the trait), and there is a double `poll` per drained frame.
@@ -141,3 +142,35 @@ Open points recorded from the cyclic-exchange HIL run (`docs/bench-pnet-device.m
   `SYS_sched_setaffinity`) directly instead of the libc wrappers.
 - ✅ **RESOLVED (Plan 4)** — `PACKET_OUTGOING` frames dropped in `AfPacketTransport::recv`
   (our own transmitted frames were being looped back and misread as received traffic).
+
+## From Plan 7 (1 ms)
+
+Open points recorded from the 1 ms HIL campaign (`docs/bench-pnet-device.md` §6e), to be
+picked up as noted:
+
+- **L2-pair isolation (Plan 7bis)**: `stress-ng` pinned to CPUs 0-2 (spec §1's own load) shares
+  CPU 3's L2 cache with CPU 2 (Atom E3940: L2 1 MiB unified, shared by CPUs 2-3, no L3) and
+  pushes tick lateness p99.99 to 147-203 µs, above the 100 µs budget (max still < 300 µs; zero
+  missed ticks either way). Keeping the load off CPUs 0-1 instead brings p99.99 back to 92 µs,
+  max 147.7 µs — both under budget. Recommended next edge configuration:
+  `isolcpus=domain,managed_irq,2,3` (both L2-sharing cores isolated), `HK_CPUS=0-1`.
+- **`PACKET_MMAP`** (TPACKET_V3 rings): out of scope for Plan 7 (kernel + isolation + minimal
+  code held the budget once the load layout above is applied); revisit only if a future
+  campaign under the original CPU-0-2 load pinning still needs the p99.99 budget.
+- **`SO_BUSY_POLL` / a spinning RT thread**: same trigger as `PACKET_MMAP` above.
+- **Triple syscall per received frame** (`SOCK_NONBLOCK` + skip `poll` on a zero timeout) —
+  noted in the Plan 7 final review, out of scope for the campaign itself; revisit if
+  `cycle_work` needs to shrink further.
+- **Default `recv` allocates before polling** (the `EthTransport::recv` convenience method,
+  not the RT-path `recv_into`) — same trigger as above.
+- **`RtHandle::join`'s 500 ms timeout** leaves the histograms live (not yet consistent with a
+  stopped thread) if it expires — a caveat on verdict exactness for a run stopped abnormally,
+  not exercised by any campaign run (`--duration` always stopped cleanly).
+- **Seqlock trigger (spec §9)**: `Mutex` + `try_lock` stays (see `docs/bench-pnet-device.md`
+  §6e — reused+deferred 0.08-0.12 % of ticks at 1 ms, zero dropped frames in every run);
+  revisit only if a consumer needs every single cycle's outputs rather than the latest one.
+- **`cyclictest` needs root** to open `/dev/cpu_dma_latency` (disables C-state entry during the
+  measurement); without it, it warns and continues — not exercised as a failure on the bench,
+  noted for anyone re-running the campaign without `sudo`.
+- **`PACKET_AUXDATA`** (RX VLAN priority) — still not implemented (carried over from Plan
+  3/4); not needed to operate, revisit only if a consumer needs the received VLAN priority.

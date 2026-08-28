@@ -1,6 +1,7 @@
 # Spec — Plan 7: 1 ms determinism (PREEMPT_RT edge, hardened RT path, jitter campaign)
 
-Date: 2026-08-28. Status: design validated in brainstorm, awaiting user review.
+Date: 2026-08-28. Status: implemented (feat/rt-1ms), HIL campaign 2026-08-28 — see
+docs/bench-pnet-device.md §6e.
 Parent: [`2026-06-25-profinet-rt-device-design.md`](2026-06-25-profinet-rt-device-design.md) §5.2 (thread model), §8.4 (determinism), §9 (NIC jitter risk).
 Builds on Plan 4 ([`2026-08-28-profinet-rt-rt-cyclic-design.md`](2026-08-28-profinet-rt-rt-cyclic-design.md)): the RT thread, `timerfd` pacing, `RtStats`, `RtOptions` and `examples/rt_bringup.rs` exist and hold 32 ms on a stock kernel (bench §6d run 4: 10 min, 18 717 frames, 0 missed ticks, max lateness 395 µs).
 
@@ -164,7 +165,7 @@ pub const HIST_BINS: usize = 2048;                 // 1 µs bins, 0..=2047 µs, 
 pub struct Histogram { bins: [AtomicU64; HIST_BINS], count: AtomicU64, max_ns: AtomicU64 }
 impl Histogram {
     pub const fn new() -> Self;
-    pub fn record(&self, ns: u64);                 // RT side: 1 fetch_add + fetch_max, relaxed
+    pub fn record(&self, ns: u64);                 // RT side: 2 fetch_add + 1 fetch_max, relaxed
     pub fn count(&self) -> u64; pub fn max_ns(&self) -> u64;
     pub fn percentile(&self, p: f64) -> Option<u64>;   // µs, None if empty; p in 0..=100
     pub fn snapshot(&self) -> HistSnapshot;        // plain arrays for CSV
