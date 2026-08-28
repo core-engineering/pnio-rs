@@ -40,6 +40,7 @@ pub mod capture;
 pub mod cm;
 pub mod data;
 pub mod dcp;
+pub mod device;
 pub mod eth;
 pub mod rpc;
 #[cfg(test)]

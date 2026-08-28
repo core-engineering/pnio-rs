@@ -40,6 +40,40 @@ pub(crate) fn wait_readable(fd: RawFd, timeout: Option<Duration>) -> std::io::Re
     }
 }
 
+/// Waits for any of `fds` to become readable.
+///
+/// Same `timeout` semantics as [`wait_readable`]. Returns `Ok(true)` once at least
+/// one fd is readable, `Ok(false)` if `timeout` elapsed first. Retries transparently
+/// on `EINTR`.
+pub(crate) fn wait_any_readable(fds: &[RawFd], timeout: Option<Duration>) -> std::io::Result<bool> {
+    let timeout_ms: libc::c_int = match timeout {
+        None => -1,
+        Some(d) => {
+            let ms = d.as_millis() + u128::from(d.subsec_nanos() % 1_000_000 != 0);
+            libc::c_int::try_from(ms).unwrap_or(libc::c_int::MAX)
+        }
+    };
+
+    loop {
+        // Safety: each `fd` is owned by the caller for the duration of this call; we
+        // only borrow it to build the pollfd entry, we never close or duplicate it here.
+        let borrowed: Vec<BorrowedFd> = fds
+            .iter()
+            .map(|&fd| unsafe { BorrowedFd::borrow_raw(fd) })
+            .collect();
+        let mut pollfds: Vec<PollFd> = borrowed
+            .iter()
+            .map(|fd| PollFd::new(fd, PollFlags::POLLIN))
+            .collect();
+        match poll(&mut pollfds, timeout_ms) {
+            Ok(0) => return Ok(false),
+            Ok(_) => return Ok(true),
+            Err(Errno::EINTR) => continue,
+            Err(e) => return Err(std::io::Error::from(e)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +103,29 @@ mod tests {
         let fd = sock.as_raw_fd();
 
         let ready = wait_readable(fd, Some(Duration::ZERO)).unwrap();
+        assert!(!ready);
+    }
+
+    #[test]
+    fn wait_any_readable_finds_the_ready_fd_among_several() {
+        let idle = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender
+            .send_to(b"hi", receiver.local_addr().unwrap())
+            .unwrap();
+
+        let fds = [idle.as_raw_fd(), receiver.as_raw_fd()];
+        let ready = wait_any_readable(&fds, Some(Duration::from_millis(200))).unwrap();
+        assert!(ready);
+    }
+
+    #[test]
+    fn wait_any_readable_times_out_when_none_ready() {
+        let a = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let fds = [a.as_raw_fd(), b.as_raw_fd()];
+        let ready = wait_any_readable(&fds, Some(Duration::ZERO)).unwrap();
         assert!(!ready);
     }
 }
