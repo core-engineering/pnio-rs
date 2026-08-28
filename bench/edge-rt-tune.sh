@@ -57,9 +57,9 @@ ethtool -C "$PLC_IF" rx-usecs "$RX_USECS" tx-usecs "$TX_USECS" >/dev/null 2>&1 &
 ethtool -K "$PLC_IF" gro off lro off >/dev/null 2>&1 && ok "$PLC_IF gro/lro off" || warn "$PLC_IF: gro/lro not settable"
 
 # 7. sysctl
-sysctl -q -w kernel.sched_rt_runtime_us=-1 && ok "sched_rt_runtime_us=-1"
-sysctl -q -w kernel.timer_migration=0 && ok "timer_migration=0"
-sysctl -q -w vm.stat_interval=120 && ok "vm.stat_interval=120"
+sysctl -q -w kernel.sched_rt_runtime_us=-1 && ok "sched_rt_runtime_us=-1" || warn "kernel.sched_rt_runtime_us not settable"
+sysctl -q -w kernel.timer_migration=0 && ok "timer_migration=0" || warn "kernel.timer_migration not settable"
+sysctl -q -w vm.stat_interval=120 && ok "vm.stat_interval=120" || warn "vm.stat_interval not settable"
 
 # 8. state
 echo "----- state -----"
