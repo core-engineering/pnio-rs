@@ -354,6 +354,7 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
                         stats
                             .max_tick_lateness_ns
                             .fetch_max(lateness, Ordering::Relaxed);
+                        stats.tick_lateness.record(lateness);
                     }
 
                     if let Some(p) = pending.take() {
@@ -390,6 +391,7 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
                         shared.push_event(RtEvent::SocketError(format!("send: {e}")));
                         break;
                     }
+                    stats.cycle_work.record(now.elapsed().as_nanos() as u64);
                 }
             }
         }
@@ -487,7 +489,13 @@ fn drain_rx<T: EthTransport>(
             Ok(Some(n)) => {
                 *processed_frame = true;
                 let now = Instant::now();
+                let prev_rx = engine.last_rx();
                 if let RxVerdict::Accepted { .. } = engine.on_frame(&rx_buf[..n], now) {
+                    if let Some(prev) = prev_rx {
+                        stats
+                            .rx_interval
+                            .record(now.saturating_duration_since(prev).as_nanos() as u64);
+                    }
                     let validity = Validity {
                         provider_run: engine.provider_run(),
                         primary: engine.primary(),
@@ -713,6 +721,9 @@ mod tests {
         assert!(stats.snapshot().tx >= 8);
         assert_eq!(stats.snapshot().rx_accepted, 1);
         assert_eq!(stats.snapshot().watchdog_expirations, 1);
+        assert_eq!(stats.cycle_work.count(), stats.snapshot().tx);
+        assert_eq!(stats.tick_lateness.count(), stats.snapshot().tx);
+        assert_eq!(stats.rx_interval.count(), 0); // one frame: no interval yet
         assert_eq!(h.take_event(), Some(RtEvent::WatchdogExpired));
         assert_eq!(h.take_event(), Some(RtEvent::Exited));
     }

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::frame::{frame_len, DataStatus, RtFrame};
+use super::hist::Histogram;
 use super::layout::Layout;
 use crate::eth::MacAddr;
 
@@ -75,6 +76,12 @@ pub struct RtStats {
     pub input_snapshot_reused: AtomicU64,
     pub output_publish_deferred: AtomicU64,
     pub max_tick_lateness_ns: AtomicU64,
+    /// Timer wake-up minus scheduled expiry, per tick.
+    pub tick_lateness: Histogram,
+    /// Tick wake-up to `send` returned, per tick: our own cost.
+    pub cycle_work: Histogram,
+    /// Interval between two consecutive accepted controller frames.
+    pub rx_interval: Histogram,
 }
 
 /// Plain-value snapshot of [`RtStats`], taken with a single relaxed load per field.
@@ -91,6 +98,8 @@ pub struct StatsSnapshot {
     pub input_snapshot_reused: u64,
     pub output_publish_deferred: u64,
     pub max_tick_lateness_ns: u64,
+    pub max_cycle_work_ns: u64,
+    pub max_rx_interval_ns: u64,
 }
 
 impl RtStats {
@@ -107,7 +116,9 @@ impl RtStats {
             missed_ticks: self.missed_ticks.load(Ordering::Relaxed),
             input_snapshot_reused: self.input_snapshot_reused.load(Ordering::Relaxed),
             output_publish_deferred: self.output_publish_deferred.load(Ordering::Relaxed),
-            max_tick_lateness_ns: self.max_tick_lateness_ns.load(Ordering::Relaxed),
+            max_tick_lateness_ns: self.tick_lateness.max_ns(),
+            max_cycle_work_ns: self.cycle_work.max_ns(),
+            max_rx_interval_ns: self.rx_interval.max_ns(),
         }
     }
 }
@@ -406,6 +417,18 @@ mod tests {
             CPU,
             Arc::new(RtStats::default()),
         )
+    }
+
+    #[test]
+    fn stats_snapshot_carries_the_histogram_maxima() {
+        let s = RtStats::default();
+        s.tick_lateness.record(1_500);
+        s.cycle_work.record(20_000);
+        s.rx_interval.record(1_010_000);
+        let snap = s.snapshot();
+        assert_eq!(snap.max_tick_lateness_ns, 1_500);
+        assert_eq!(snap.max_cycle_work_ns, 20_000);
+        assert_eq!(snap.max_rx_interval_ns, 1_010_000);
     }
 
     #[test]
