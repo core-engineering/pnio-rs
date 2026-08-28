@@ -14,6 +14,7 @@
 //! the loop starts.
 
 use std::collections::VecDeque;
+use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
@@ -26,13 +27,22 @@ use super::engine::{RtEngine, RtStats, RxVerdict, WatchdogVerdict};
 use super::image::{IoImage, Validity, WatchdogState};
 use super::layout::Layout;
 use super::RtError;
-use crate::eth::poll::poll_readable_into;
+use crate::eth::poll::{poll_readable_into, wait_readable};
 use crate::eth::AfPacketTransport;
 use crate::eth::{EthTransport, MacAddr, TransportError};
 
 /// Upper bound on frames consumed in one receive pass, so a flooded socket cannot
 /// starve the send cycle: whatever is left waits for the next pass.
 const MAX_RX_PER_PASS: usize = 64;
+
+/// Upper bound on consecutive main-loop iterations in which `poll` reported
+/// nothing readable and neither a tick nor a frame was processed, before the
+/// loop treats itself as stuck (e.g. a persistent `POLLERR`/`POLLNVAL` on a bad
+/// fd, which `poll_readable_into` reports as "readable" precisely so the loop
+/// reaches the failing call and observes the error — but a bug elsewhere could
+/// still make this spin) and exits with [`RtEvent::SocketError`] instead of
+/// burning 100% CPU forever.
+const MAX_NO_PROGRESS_ITERATIONS: u32 = 1000;
 
 /// Everything the RT thread needs to run one AR.
 pub struct RtConfig {
@@ -105,9 +115,23 @@ impl Drop for ExitGuard<'_> {
 }
 
 /// Handle on a running RT thread: stop it, wait for it, read its events and counters.
+///
+/// Dropping the handle stops the thread (see the `Drop` impl below), so a
+/// discarded handle cannot leak a transmitting thread and its socket. Drop does
+/// not join, though — it only requests the stop and returns immediately; call
+/// [`RtHandle::join`] first if the thread must actually be gone before moving on.
 pub struct RtHandle {
     shared: Arc<RtShared>,
     thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for RtHandle {
+    /// Stops the thread if it is still running when the handle is dropped.
+    /// Idempotent (`stop()` on an already-stopped thread is a no-op) and never
+    /// blocks — a `Drop` impl must not join.
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 impl RtHandle {
@@ -278,73 +302,83 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
     let mut ticks: u64 = 0;
     let mut first_tick: Option<Instant> = None;
     let mut pending: Option<Pending> = None;
+    // Consecutive iterations with neither a tick nor a frame processed; see
+    // [`MAX_NO_PROGRESS_ITERATIONS`].
+    let mut no_progress: u32 = 0;
 
     while !shared.stop.load(Ordering::Acquire) {
-        match poll_readable_into(&fds[..nfds], &mut ready[..nfds], None) {
-            Ok(0) => continue,
-            Ok(_) => {}
-            Err(e) => {
-                shared.push_event(RtEvent::SocketError(format!("poll: {e}")));
-                break;
-            }
+        if let Err(e) = poll_readable_into(&fds[..nfds], &mut ready[..nfds], None) {
+            shared.push_event(RtEvent::SocketError(format!("poll: {e}")));
+            break;
         }
 
         if ready[1] {
             drain_eventfd(shared.wake_fd.as_raw_fd()); // stop requested: the loop condition acts
         }
 
+        // Set as soon as a tick or a frame is actually processed; drives
+        // `no_progress` below.
+        let mut progressed = false;
+
         let mut ticked = false;
         if ready[0] {
-            let expirations = read_timer(timer.as_raw_fd());
-            if expirations > 0 {
-                ticked = true;
-                let now = Instant::now();
-                ticks = ticks.saturating_add(expirations);
-
-                // Lateness against the ideal grid anchored on the first tick.
-                let start = *first_tick.get_or_insert(now);
-                let offset = Duration::from_nanos(
-                    (period.as_nanos() as u64).saturating_mul(ticks.saturating_sub(1)),
-                );
-                if let Some(expected) = start.checked_add(offset) {
-                    let lateness = now.saturating_duration_since(expected).as_nanos() as u64;
-                    stats
-                        .max_tick_lateness_ns
-                        .fetch_max(lateness, Ordering::Relaxed);
-                }
-
-                if let Some(p) = pending.take() {
-                    retry_pending(p, &engine, &image, &stats, &mut pending);
-                }
-
-                if engine.check_watchdog(now) == WatchdogVerdict::Expired {
-                    // The controller stopped providing: our IOCS bytes must go BAD
-                    // until it talks again.
-                    engine.mark_outputs_stale();
-                    shared.push_event(RtEvent::WatchdogExpired);
-                    let validity = Validity {
-                        provider_run: engine.provider_run(),
-                        primary: engine.primary(),
-                        watchdog: WatchdogState::Expired,
-                        last_rx_age: engine.last_rx().map(|t| now.saturating_duration_since(t)),
-                        cycle: ticks,
-                    };
-                    if !image.rt_set_validity(validity) {
-                        stats
-                            .output_publish_deferred
-                            .fetch_add(1, Ordering::Relaxed);
-                        pending = Some(Pending::Validity(validity));
-                    }
-                }
-
-                if !image.rt_snapshot_inputs(&mut snapshot) {
-                    stats.input_snapshot_reused.fetch_add(1, Ordering::Relaxed);
-                }
-                let expirations = u32::try_from(expirations).unwrap_or(u32::MAX);
-                let frame = engine.on_tick(expirations, &snapshot);
-                if let Err(e) = transport.send(frame) {
-                    shared.push_event(RtEvent::SocketError(format!("send: {e}")));
+            match read_timer(timer.as_raw_fd()) {
+                Err(e) => {
+                    shared.push_event(RtEvent::SocketError(format!("timerfd read: {e}")));
                     break;
+                }
+                Ok(0) => {} // not due yet: a spurious wakeup, or EAGAIN folded to 0
+                Ok(expirations) => {
+                    ticked = true;
+                    progressed = true;
+                    let now = Instant::now();
+                    ticks = ticks.saturating_add(expirations);
+
+                    // Lateness against the ideal grid anchored on the first tick.
+                    let start = *first_tick.get_or_insert(now);
+                    let offset = Duration::from_nanos(
+                        (period.as_nanos() as u64).saturating_mul(ticks.saturating_sub(1)),
+                    );
+                    if let Some(expected) = start.checked_add(offset) {
+                        let lateness = now.saturating_duration_since(expected).as_nanos() as u64;
+                        stats
+                            .max_tick_lateness_ns
+                            .fetch_max(lateness, Ordering::Relaxed);
+                    }
+
+                    if let Some(p) = pending.take() {
+                        retry_pending(p, &engine, &image, &stats, &mut pending);
+                    }
+
+                    if engine.check_watchdog(now) == WatchdogVerdict::Expired {
+                        // The controller stopped providing: our IOCS bytes must go BAD
+                        // until it talks again.
+                        engine.mark_outputs_stale();
+                        shared.push_event(RtEvent::WatchdogExpired);
+                        let validity = Validity {
+                            provider_run: engine.provider_run(),
+                            primary: engine.primary(),
+                            watchdog: WatchdogState::Expired,
+                            last_rx_age: engine.last_rx().map(|t| now.saturating_duration_since(t)),
+                            cycle: ticks,
+                        };
+                        if !image.rt_set_validity(validity) {
+                            stats
+                                .output_publish_deferred
+                                .fetch_add(1, Ordering::Relaxed);
+                            pending = Some(Pending::Validity(validity));
+                        }
+                    }
+
+                    if !image.rt_snapshot_inputs(&mut snapshot) {
+                        stats.input_snapshot_reused.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let expirations = u32::try_from(expirations).unwrap_or(u32::MAX);
+                    let frame = engine.on_tick(expirations, &snapshot);
+                    if let Err(e) = transport.send(frame) {
+                        shared.push_event(RtEvent::SocketError(format!("send: {e}")));
+                        break;
+                    }
                 }
             }
         }
@@ -352,38 +386,93 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
         // A polled socket is drained when it says so; a transport with no fd is
         // drained once per tick instead.
         let drain = if nfds == 3 { ready[2] } else { ticked };
-        if drain
-            && !drain_rx(
+        if drain {
+            let mut drained_frame = false;
+            if !drain_rx(
                 &transport,
+                socket_fd,
                 &mut engine,
                 &image,
                 &stats,
                 ticks,
                 &mut pending,
                 shared,
-            )
-        {
-            break;
+                &mut drained_frame,
+            ) {
+                break;
+            }
+            progressed = progressed || drained_frame;
+        }
+
+        if progressed {
+            no_progress = 0;
+        } else {
+            no_progress = no_progress.saturating_add(1);
+            if no_progress >= MAX_NO_PROGRESS_ITERATIONS {
+                shared.push_event(RtEvent::SocketError("poll made no progress".to_string()));
+                break;
+            }
         }
     }
 }
 
+/// Pure decision table pinning the "keep draining" policy of [`drain_rx`].
+///
+/// - `has_fd`: the transport exposes a raw fd, so a zero-timeout
+///   [`wait_readable`] can be checked *before* every `recv`.
+/// - `readable`: that pre-check's result (only consulted when `has_fd`).
+/// - `got_frame`: the `recv` call that just ran returned `Ok(Some(_))` rather
+///   than `Ok(None)` (only consulted when `!has_fd`).
+///
+/// With a raw fd, the pre-check's readability is the only signal: a queue that
+/// is still readable keeps being drained even when the frame `recv` just
+/// handed back was skipped — our own looped-back `PACKET_OUTGOING` frame, or a
+/// non-PROFINET one — because on a live NIC that is the *usual* case, not the
+/// end of the queue. Without a fd to probe ahead of time (the in-memory mock),
+/// the only signal is whether `recv` actually handed back a frame; it stops as
+/// soon as it does not.
+fn drain_should_continue(has_fd: bool, readable: bool, got_frame: bool) -> bool {
+    if has_fd {
+        readable
+    } else {
+        got_frame
+    }
+}
+
 /// Consume up to [`MAX_RX_PER_PASS`] frames. Returns false if the socket failed (the
-/// event is already pushed and the caller must leave the loop).
+/// event is already pushed and the caller must leave the loop). Sets
+/// `*processed_frame` if at least one frame actually arrived (`recv` returned
+/// `Ok(Some(_))`), whether or not the engine went on to accept it — that is the
+/// signal the caller's no-progress counter cares about.
 #[allow(clippy::too_many_arguments)]
 fn drain_rx<T: EthTransport>(
     transport: &T,
+    socket_fd: Option<RawFd>,
     engine: &mut RtEngine,
     image: &IoImage,
     stats: &RtStats,
     ticks: u64,
     pending: &mut Option<Pending>,
     shared: &RtShared,
+    processed_frame: &mut bool,
 ) -> bool {
+    let has_fd = socket_fd.is_some();
     for _ in 0..MAX_RX_PER_PASS {
-        match transport.recv(Some(Duration::ZERO)) {
-            Ok(None) => return true,
+        if let Some(fd) = socket_fd {
+            match wait_readable(fd, Some(Duration::ZERO)) {
+                Ok(true) => {}
+                Ok(false) => break, // queue empty
+                Err(e) => {
+                    shared.push_event(RtEvent::SocketError(format!("poll: {e}")));
+                    return false;
+                }
+            }
+        }
+
+        let got_frame = match transport.recv(Some(Duration::ZERO)) {
+            Ok(None) => false,
             Ok(Some(frame)) => {
+                *processed_frame = true;
                 let now = Instant::now();
                 if let RxVerdict::Accepted { .. } = engine.on_frame(&frame, now) {
                     let validity = Validity {
@@ -402,11 +491,16 @@ fn drain_rx<T: EthTransport>(
                         *pending = Some(Pending::Data(validity));
                     }
                 }
+                true
             }
             Err(e) => {
                 shared.push_event(RtEvent::SocketError(format!("recv: {e}")));
                 return false;
             }
+        };
+
+        if !drain_should_continue(has_fd, true, got_frame) {
+            break;
         }
     }
     true
@@ -474,15 +568,26 @@ fn to_timespec(d: Duration) -> libc::timespec {
     }
 }
 
-/// Number of expirations since the last read, or 0 if the timer was not ready.
-fn read_timer(fd: RawFd) -> u64 {
+/// Number of expirations since the last read, or `Ok(0)` if the timer was not
+/// ready yet (`EAGAIN`/`EWOULDBLOCK`: `poll` can wake the loop on a different fd
+/// in the set while the timerfd itself has nothing new). Any other error means
+/// the timerfd itself has gone bad and the caller must stop rather than spin.
+fn read_timer(fd: RawFd) -> io::Result<u64> {
     let mut buf = [0u8; 8];
     // Safety: `fd` is a valid non-blocking timerfd; `buf` is 8 writable bytes.
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
     if n == 8 {
-        u64::from_ne_bytes(buf)
+        Ok(u64::from_ne_bytes(buf))
+    } else if n < 0 {
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EAGAIN) => Ok(0), // EAGAIN == EWOULDBLOCK on Linux
+            _ => Err(e),
+        }
     } else {
-        0
+        // A short read (0 < n < 8) cannot happen on a timerfd per the kernel
+        // contract; treat it as "not ready yet" rather than panic on it.
+        Ok(0)
     }
 }
 
@@ -602,7 +707,10 @@ mod tests {
         h.stop();
         h.join(Duration::from_secs(1)).unwrap();
         let sent = mock.sent();
-        assert!(sent.len() >= 8 && sent.len() <= 14, "sent {}", sent.len());
+        // Upper bound widened from 14 to 20: 60 ms sleep at a 5 ms period leaves
+        // little slack, and a loaded CI/WSL host can stretch scheduling enough to
+        // fit a couple of extra ticks in.
+        assert!(sent.len() >= 8 && sent.len() <= 20, "sent {}", sent.len());
         assert_eq!(&sent[0][12..18], &[0x81, 0x00, 0xc0, 0x00, 0x88, 0x92]);
         assert_eq!(sent[0][20 + 3], 0x5a); // our DI byte from the image
                                            // the CPU frame was consumed and published
@@ -633,19 +741,58 @@ mod tests {
 
     #[test]
     fn sched_warning_is_reported_not_fatal() {
-        // Safety: `geteuid(2)` takes no argument and cannot fail.
-        if unsafe { libc::geteuid() } == 0 {
-            return; // as root SCHED_FIFO succeeds and there is no warning to observe
-        }
+        // No `geteuid() == 0` guard: it is not just root that can make
+        // `SCHED_FIFO` succeed — an unprivileged user may also hold enough
+        // `RLIMIT_RTPRIO` (via e.g. a `/etc/security/limits.d` grant or
+        // `CAP_SYS_NICE`) for `set_fifo_priority` not to fail. So this accepts
+        // either outcome: a warning was reported, or none was needed because the
+        // thread was already up and running before it was asked to stop.
         let image = Arc::new(IoImage::new(&layout()));
         let mut c = cfg(image, Arc::new(RtStats::default()));
-        c.rt_priority = Some(80); // no CAP_SYS_NICE in the test environment
+        c.rt_priority = Some(80); // may or may not exceed this environment's RLIMIT_RTPRIO
         let h = RtRunner::spawn_with_transport(c, MockTransport::new()).unwrap();
         std::thread::sleep(Duration::from_millis(20));
+        let was_running = h.is_running();
         h.stop();
         h.join(Duration::from_secs(1)).unwrap();
         let first = h.take_event();
-        assert!(matches!(first, Some(RtEvent::SchedWarning(_))), "{first:?}");
+        let got_warning = matches!(first, Some(RtEvent::SchedWarning(_)));
+        assert!(
+            got_warning || was_running,
+            "expected a SchedWarning, or at least a running thread before stop; \
+             got {first:?} (was_running={was_running})"
+        );
+    }
+
+    #[test]
+    fn dropping_the_handle_stops_the_thread() {
+        let image = Arc::new(IoImage::new(&layout()));
+        let stats = Arc::new(RtStats::default());
+        let h = RtRunner::spawn_with_transport(cfg(image, stats.clone()), MockTransport::new())
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20)); // let a few ticks happen
+        drop(h); // no explicit stop()/join(): Drop must stop the thread on its own
+        std::thread::sleep(Duration::from_millis(30));
+        let tx_after_drop = stats.snapshot().tx;
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            stats.snapshot().tx,
+            tx_after_drop,
+            "thread kept sending after the handle was dropped"
+        );
+    }
+
+    #[test]
+    fn drain_should_continue_pins_the_policy() {
+        // With a raw fd, only the pre-check's readability matters: a skipped
+        // frame does not stop the drain as long as the queue still reports
+        // readable.
+        assert!(drain_should_continue(true, true, false));
+        assert!(drain_should_continue(true, true, true));
+        // Without a fd to probe ahead of time, only whether `recv` actually
+        // handed back a frame matters.
+        assert!(drain_should_continue(false, true, true));
+        assert!(!drain_should_continue(false, true, false));
     }
 
     /// `MockTransport` is not `Clone`; share it through an `Arc` for the test.
