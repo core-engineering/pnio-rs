@@ -3,28 +3,49 @@
 //! for parse errors (spec §8); only transport I/O failures abort the loop.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
 use crate::cm::model::DeviceModel;
-use crate::cm::{AbortReason, ArState, Cm, CmOutput};
+use crate::cm::{AbortReason, ArParams, ArState, Cm, CmOutput};
 use crate::dcp::{handle_dcp_frame, DeviceConfig as DcpDeviceConfig};
 use crate::eth::poll::wait_any_readable;
 use crate::eth::{EthTransport, TransportError};
 use crate::rpc::{RpcError, RpcTransport, Uuid};
+use crate::rt::{IoImage, RtStats};
+#[cfg(target_os = "linux")]
+use crate::rt::{Layout, RtConfig, RtError, RtEvent, RtHandle, RtRunner};
 
 /// Callback invoked once per AR state-change notification.
 type StateChangeCallback = Box<dyn FnMut(ArState, Option<AbortReason>) + Send>;
 
+/// Cyclic (RT) thread configuration for one AR.
+///
+/// `None` in [`DeviceSetup::rt`] means no cyclic thread is ever started — used by the
+/// mock-based tests and the AR-only example, which have no real Ethernet interface to
+/// send RTC1 frames on.
+#[derive(Debug, Clone)]
+pub struct RtOptions {
+    /// Interface the RT thread opens (`AF_PACKET`).
+    pub iface: String,
+    /// Pin the RT thread to this CPU, if set.
+    pub cpu_pin: Option<usize>,
+    /// Run the RT thread at this `SCHED_FIFO` priority, if set.
+    pub rt_priority: Option<u8>,
+}
+
 /// Static device identity + configuration handed to [`Device::new`]: the DCP identity
-/// answered on the wire, the AR/slot model `Cm` establishes connections against, and
-/// the activity UUID used for our outgoing ApplicationReady calls.
+/// answered on the wire, the AR/slot model `Cm` establishes connections against, the
+/// activity UUID used for our outgoing ApplicationReady calls, and the cyclic thread
+/// configuration (if any) started once the AR reaches `Data`.
 #[derive(Debug, Clone)]
 pub struct DeviceSetup {
     pub dcp: DcpDeviceConfig,
     pub model: DeviceModel,
     pub activity_seed: Uuid,
+    pub rt: Option<RtOptions>,
 }
 
 /// Counts of what one [`Device::step`] processed: frames/datagrams drained from each
@@ -56,6 +77,21 @@ pub struct Device<E: EthTransport, R: RpcTransport> {
     rpc: R,
     cm: Cm,
     on_state_change: Option<StateChangeCallback>,
+    /// The shared I/O image handed to the application via [`Device::image`]. Built
+    /// empty in `new` and (re)sized/indexed from the negotiated layout each time the
+    /// AR reaches `Data`.
+    image: Arc<IoImage>,
+    /// Counters updated by the RT thread, readable via [`Device::rt_stats`] whether
+    /// or not a runner is currently alive.
+    stats: Arc<RtStats>,
+    /// The currently running RT thread, if any (Linux-only: the runner itself is
+    /// only ever built on Linux).
+    #[cfg(target_os = "linux")]
+    runner: Option<RtHandle>,
+    /// How [`Device::start_runner`] spawns the RT thread; overridable via
+    /// [`Device::with_runner_factory`] (defaults to [`RtRunner::spawn`]).
+    #[cfg(target_os = "linux")]
+    runner_factory: Box<dyn Fn(RtConfig) -> Result<RtHandle, RtError> + Send>,
 }
 
 impl<E: EthTransport, R: RpcTransport> Device<E, R> {
@@ -67,6 +103,12 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             rpc,
             cm,
             on_state_change: None,
+            image: Arc::new(IoImage::empty()),
+            stats: Arc::new(RtStats::default()),
+            #[cfg(target_os = "linux")]
+            runner: None,
+            #[cfg(target_os = "linux")]
+            runner_factory: Box::new(RtRunner::spawn),
         }
     }
 
@@ -80,6 +122,23 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
 
     pub fn rpc(&self) -> &R {
         &self.rpc
+    }
+
+    /// The shared I/O image: empty (no cells) until the AR first reaches `Data`, then
+    /// rebuilt from the negotiated layout on every `Data` (including AR
+    /// re-negotiation).
+    pub fn image(&self) -> Arc<IoImage> {
+        self.image.clone()
+    }
+
+    /// The RT thread's counters. Readable (and all-zero) even with no runner alive.
+    pub fn rt_stats(&self) -> Arc<RtStats> {
+        self.stats.clone()
+    }
+
+    /// A clone of the current AR's negotiated parameters, if one is established.
+    pub fn ar_params(&self) -> Option<ArParams> {
+        self.cm.context().map(|c| c.params.clone())
     }
 
     /// Registers a callback invoked once per AR state-change notification produced by
@@ -120,11 +179,17 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             (None, None) => None,
         };
         if let (Some(eth_fd), Some(rpc_fd)) = (self.eth.raw_fd(), self.rpc.raw_fd()) {
-            wait_any_readable(&[eth_fd, rpc_fd], effective_wait)
+            let mut fds = vec![eth_fd, rpc_fd];
+            #[cfg(target_os = "linux")]
+            if let Some(runner) = &self.runner {
+                fds.push(runner.event_fd());
+            }
+            wait_any_readable(&fds, effective_wait)
                 .map_err(|e| DeviceError::Eth(TransportError::Io(e)))?;
         }
         // else: mock transports have no fds to poll on; proceed straight to draining
-        // (their `recv` ignores the timeout and returns immediately).
+        // (their `recv` ignores the timeout and returns immediately; the RT events are
+        // drained below regardless of whether we polled for them).
 
         let mut report = StepReport::default();
 
@@ -145,12 +210,18 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        self.drain_rt_events(now, &mut report)?;
+
         let out = self.cm.tick(now);
         self.dispatch(out, &mut report)?;
 
         Ok(report)
     }
 
+    /// Sends every PDU, then reports every AR notification to the state-change
+    /// callback and, in turn, starts or stops the RT runner: `Data` (from a fresh
+    /// negotiation, not a resend) starts it, an abort back to `Idle` stops it.
     fn dispatch(&mut self, out: CmOutput, report: &mut StepReport) -> Result<(), DeviceError> {
         for o in out.send {
             self.rpc.send(&o.bytes, o.to)?;
@@ -160,8 +231,126 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             if let Some(cb) = &mut self.on_state_change {
                 cb(state, reason);
             }
+            match (state, reason) {
+                (ArState::Data, None) => {
+                    #[cfg(target_os = "linux")]
+                    self.start_runner();
+                    #[cfg(not(target_os = "linux"))]
+                    if self.setup.rt.is_some() {
+                        log::error!("cyclic RT thread is Linux-only");
+                    }
+                }
+                (ArState::Idle, Some(_)) => {
+                    #[cfg(target_os = "linux")]
+                    self.stop_runner();
+                }
+                _ => {}
+            }
         }
         Ok(())
+    }
+}
+
+/// Runner lifecycle: kept in a private, Linux-only `impl` block so the platform split
+/// doesn't clutter the rest of `Device`.
+#[cfg(target_os = "linux")]
+impl<E: EthTransport, R: RpcTransport> Device<E, R> {
+    /// Registers the function `start_runner` uses to spawn the RT thread, overriding
+    /// the default [`RtRunner::spawn`]. A test/embedding hook: it's how
+    /// tests hand the runner an already-open transport
+    /// ([`RtRunner::spawn_with_transport`]) instead of a real `AF_PACKET` socket.
+    pub fn with_runner_factory(
+        &mut self,
+        f: impl Fn(RtConfig) -> Result<RtHandle, RtError> + Send + 'static,
+    ) {
+        self.runner_factory = Box::new(f);
+    }
+
+    /// True while the RT thread is alive.
+    pub fn rt_running(&self) -> bool {
+        self.runner.as_ref().is_some_and(|r| r.is_running())
+    }
+
+    /// Builds the cyclic layout from the just-negotiated AR parameters, rebuilds the
+    /// I/O image from it, and starts the RT thread — per [`DeviceSetup::rt`]. A
+    /// `Layout` build failure or a spawn failure is logged and leaves no runner
+    /// behind: the AR stays up without cyclic data, as in Plan 3.
+    fn start_runner(&mut self) {
+        let Some(rt) = self.setup.rt.clone() else {
+            return;
+        };
+        let Some(params) = self.cm.context().map(|c| c.params.clone()) else {
+            return; // unreachable in practice: a Data notify implies a live context
+        };
+        let layout = match Layout::from_ar(&params, &self.setup.model) {
+            Ok(layout) => layout,
+            Err(e) => {
+                log::error!("cyclic layout build failed, AR stays up without cyclic data: {e}");
+                return;
+            }
+        };
+        self.image.rebuild(&layout);
+        let cfg = RtConfig {
+            iface: rt.iface,
+            our_mac: self.setup.dcp.mac,
+            cpu_mac: params.initiator_mac,
+            layout,
+            image: self.image.clone(),
+            stats: self.stats.clone(),
+            cpu_pin: rt.cpu_pin,
+            rt_priority: rt.rt_priority,
+        };
+        match (self.runner_factory)(cfg) {
+            Ok(handle) => self.runner = Some(handle),
+            Err(e) => log::error!("RT runner spawn failed: {e}"),
+        }
+    }
+
+    /// Stops and joins the RT thread, if any, bounded so a stuck thread cannot hang
+    /// the acyclic loop forever.
+    fn stop_runner(&mut self) {
+        if let Some(runner) = self.runner.take() {
+            runner.stop();
+            if let Err(e) = runner.join(Duration::from_millis(500)) {
+                log::warn!("RT runner join timed out: {e}");
+            }
+        }
+    }
+
+    /// Drains and acts on every pending [`RtEvent`]: a watchdog or socket failure
+    /// aborts the AR (which stops the runner through the `Idle` notify in
+    /// `dispatch`, above); scheduling warnings and the thread's exit are only logged.
+    fn drain_rt_events(
+        &mut self,
+        now: Instant,
+        report: &mut StepReport,
+    ) -> Result<(), DeviceError> {
+        while let Some(ev) = self.runner.as_ref().and_then(|r| r.take_event()) {
+            match ev {
+                RtEvent::WatchdogExpired => {
+                    log::warn!("RT consumer watchdog expired; aborting the AR");
+                    let out = self.cm.abort(AbortReason::RtWatchdog, now);
+                    self.dispatch(out, report)?;
+                }
+                RtEvent::SocketError(s) => {
+                    log::error!("RT socket error, aborting the AR: {s}");
+                    let out = self.cm.abort(AbortReason::RtWatchdog, now);
+                    self.dispatch(out, report)?;
+                }
+                RtEvent::SchedWarning(s) => log::warn!("RT scheduling warning: {s}"),
+                RtEvent::Exited => log::info!("RT thread exited"),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<E: EthTransport, R: RpcTransport> Drop for Device<E, R> {
+    /// Stops (and bounded-joins) a still-running RT thread so dropping a `Device`
+    /// cannot leak a transmitting thread and its socket.
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.stop_runner();
     }
 }
 
@@ -172,6 +361,10 @@ mod tests {
     use crate::dcp::{DeviceConfig, DeviceProperties};
     use crate::eth::{MacAddr, MockTransport};
     use crate::rpc::{MockRpcTransport, Uuid};
+    #[cfg(target_os = "linux")]
+    use crate::rt::RtRunner;
+    #[cfg(target_os = "linux")]
+    use crate::testutil::golden_rt;
     use crate::testutil::{golden, RPC_OFF};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -198,6 +391,7 @@ mod tests {
             },
             model: DeviceModel::pnet_sample(MAC),
             activity_seed: Uuid::parse_str("14af198a-1234-1056-8079-8cf319cd19f8").unwrap(),
+            rt: None,
         }
     }
 
@@ -284,5 +478,90 @@ mod tests {
         let mut dev = Device::new(setup(), eth, rpc);
         let err = dev.step(Instant::now(), Some(Duration::ZERO)).unwrap_err();
         assert!(matches!(err, DeviceError::Rpc(_)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn data_starts_the_runner_and_idle_stops_it() {
+        let eth = MockTransport::new();
+        let rpc = MockRpcTransport::new();
+        let cpu = "172.16.2.100:54766".parse().unwrap();
+        let cpu_cm = "172.16.2.100:34964".parse().unwrap();
+        rpc.push_rx(golden("connect_req")[RPC_OFF..].to_vec(), cpu);
+        rpc.push_rx(golden("prmend_req")[RPC_OFF..].to_vec(), cpu);
+        rpc.push_rx(golden("appready_res")[RPC_OFF..].to_vec(), cpu_cm);
+        let mut s = setup();
+        s.rt = Some(RtOptions {
+            iface: "mock".into(),
+            cpu_pin: None,
+            rt_priority: None,
+        });
+        let mut dev = Device::new(s, eth, rpc);
+        dev.with_runner_factory(|cfg| RtRunner::spawn_with_transport(cfg, MockTransport::new()));
+        dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.state(), ArState::Data);
+        assert!(dev.rt_running());
+        assert_eq!(dev.image().cells().len(), 7);
+        // controller Release -> Idle -> runner stopped
+        let mut rel = golden("prmend_req")[RPC_OFF..].to_vec();
+        rel[68] = 1; // opnum Release (LE low byte)
+        rel[64] = 9; // new seq_num
+        rel[100] = 0x01;
+        rel[101] = 0x14; // block type ReleaseBlockReq
+                         // command field: RPC header (80) + NDR (20) = block at 100; block header (6) +
+                         // reserved (2) + ar_uuid (16) + session_key (2) + reserved (2) = command at 128.
+        rel[128] = 0x00;
+        rel[129] = 0x04; // command Release
+        dev.rpc().push_rx(rel, cpu);
+        dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.state(), ArState::Idle);
+        assert!(!dev.rt_running());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watchdog_event_aborts_the_ar() {
+        let eth = MockTransport::new();
+        let rpc = MockRpcTransport::new();
+        let cpu = "172.16.2.100:54766".parse().unwrap();
+        let cpu_cm = "172.16.2.100:34964".parse().unwrap();
+        rpc.push_rx(golden("connect_req")[RPC_OFF..].to_vec(), cpu);
+        rpc.push_rx(golden("prmend_req")[RPC_OFF..].to_vec(), cpu);
+        rpc.push_rx(golden("appready_res")[RPC_OFF..].to_vec(), cpu_cm);
+        let mut s = setup();
+        s.rt = Some(RtOptions {
+            iface: "mock".into(),
+            cpu_pin: None,
+            rt_priority: None,
+        });
+        let mut dev = Device::new(s, eth, rpc);
+        // Shrink the cyclic period and the output watchdog so the runner's watchdog
+        // fires quickly against a mock transport fed a single CPU frame: no further
+        // frames arrive after it, so the consumer watchdog trips a few cycles later.
+        dev.with_runner_factory(|mut cfg| {
+            cfg.layout.input_cr.cycle_step = 160;
+            cfg.layout.output_cr.cycle_step = 160;
+            cfg.layout.output_cr.watchdog = Duration::from_millis(10);
+            let mock = MockTransport::new();
+            mock.push_rx(golden_rt("rtc_cpu_8001"));
+            RtRunner::spawn_with_transport(cfg, mock)
+        });
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        dev.on_state_change(move |st, why| s2.lock().unwrap().push((st, why)));
+
+        dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.state(), ArState::Data);
+        assert!(dev.rt_running());
+
+        std::thread::sleep(Duration::from_millis(60));
+        dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
+
+        assert_eq!(dev.state(), ArState::Idle);
+        assert_eq!(
+            seen.lock().unwrap().last(),
+            Some(&(ArState::Idle, Some(AbortReason::RtWatchdog)))
+        );
+        assert!(!dev.rt_running());
     }
 }

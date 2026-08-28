@@ -34,6 +34,7 @@ fn reference_exchange_replays_byte_exact() {
         },
         model: DeviceModel::pnet_sample(MAC),
         activity_seed: Uuid::parse_str("14af198a-1234-1056-8079-8cf319cd19f8").unwrap(),
+        rt: None,
     };
     let eth = MockTransport::new();
     let rpc = MockRpcTransport::new();

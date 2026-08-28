@@ -298,6 +298,16 @@ impl Cm {
         output
     }
 
+    /// Force the AR to `Idle` for an externally-observed `reason` (e.g. the RT
+    /// runner's consumer watchdog expiring), mapping the resulting actions exactly
+    /// like [`Cm::tick`] does. A no-op (no `Notify`) if the AR is already `Idle`.
+    pub fn abort(&mut self, reason: AbortReason, now: Instant) -> CmOutput {
+        let mut output = CmOutput::default();
+        let actions = self.ar.on(Event::Abort(reason), now);
+        self.apply(actions, None, false, &mut output);
+        output
+    }
+
     /// Turn a batch of `Ar` actions into `CmOutput`: build+cache a Response PDU for each
     /// `Respond`, build a Request PDU to the controller for each `CallController`
     /// (`call_is_new` selects a fresh call sequence number vs. reusing the outstanding

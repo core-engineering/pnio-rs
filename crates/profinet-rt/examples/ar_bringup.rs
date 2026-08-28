@@ -85,6 +85,7 @@ fn main() {
             b[10..].copy_from_slice(&mac.0);
             Uuid(b)
         },
+        rt: None,
     };
     let eth = AfPacketTransport::open(&a.iface).expect("AF_PACKET (need cap_net_raw)");
     let rpc = UdpRpcTransport::bind(std::net::SocketAddr::from(([0, 0, 0, 0], PNIO_UDP_PORT)))

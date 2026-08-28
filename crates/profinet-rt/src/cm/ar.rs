@@ -59,6 +59,9 @@ pub enum AbortReason {
     /// alarm channel) and is establishing a new one. We drop the stale AR and process
     /// the Connect as if from `Idle`.
     ControllerReconnect,
+    /// The RT runner's consumer watchdog expired: the controller stopped providing
+    /// output data for the cyclic (RTC1) exchange within the negotiated window.
+    RtWatchdog,
     /// Any other externally-triggered abort (e.g. link down), free-form reason.
     External(&'static str),
 }
