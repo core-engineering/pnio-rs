@@ -130,6 +130,18 @@ impl IocrParams {
 /// Valid PROFINET RT frame ID range for IO cyclic data (IEC 61158-6-10 §4.10.3.1.2.1).
 const FRAME_ID_RANGE: std::ops::RangeInclusive<u16> = 0x8000..=0xBBFF;
 
+/// FrameID value `0xFFFF` in an Output CR's IOCRBlockReq: the IO controller leaves the
+/// choice to the IO device, which picks one and returns it in the IOCRBlockRes.
+pub const FRAME_ID_DEVICE_SELECTS: u16 = 0xFFFF;
+
+/// Pick a FrameID for a device-selected Output CR: the first value in `0x8001..=0xBBFF`
+/// that differs from the Input CR's FrameID.
+fn select_output_frame_id(input_frame_id: u16) -> u16 {
+    (0x8001..=0xBBFFu16)
+        .find(|&id| id != input_frame_id)
+        .unwrap_or(0x8001)
+}
+
 /// Validate one IOCR's structure and DataLength against the model: exactly one API
 /// (else reject `(IocrBlock, 15)`, NumberOfAPIs); every IODataObject must fit
 /// `frame_offset + model_len + 1` (payload plus its trailing IOPS byte), and every
@@ -189,10 +201,11 @@ pub fn validate(req: &ConnectReq, model: &DeviceModel) -> Result<ArParams, PnioS
         (Some(i), Some(o)) => (i, o),
         _ => return Err(PnioStatus::connect_reject(ConnectBlock::IocrBlock, 1)),
     };
-    for cr in [input, output] {
-        if !FRAME_ID_RANGE.contains(&cr.frame_id) {
-            return Err(PnioStatus::connect_reject(ConnectBlock::IocrBlock, 6));
-        }
+    if !FRAME_ID_RANGE.contains(&input.frame_id) {
+        return Err(PnioStatus::connect_reject(ConnectBlock::IocrBlock, 6));
+    }
+    if !FRAME_ID_RANGE.contains(&output.frame_id) && output.frame_id != FRAME_ID_DEVICE_SELECTS {
+        return Err(PnioStatus::connect_reject(ConnectBlock::IocrBlock, 6));
     }
     // Run before `check_iocr_data_length`: an identity or size mismatch against the
     // model is a more specific diagnosis (ExpectedSubmodule) than the data-length
@@ -244,6 +257,15 @@ pub fn validate(req: &ConnectReq, model: &DeviceModel) -> Result<ArParams, PnioS
         return Err(PnioStatus::connect_reject(ConnectBlock::AlarmCr, 1));
     }
 
+    let mut output_cr = IocrParams::from_req(output);
+    if output.frame_id == FRAME_ID_DEVICE_SELECTS {
+        output_cr.frame_id = select_output_frame_id(input.frame_id);
+        log::info!(
+            "Output CR requested a device-selected FrameID; selected {:#06x}",
+            output_cr.frame_id
+        );
+    }
+
     Ok(ArParams {
         ar_uuid: req.ar.ar_uuid,
         session_key: req.ar.session_key,
@@ -251,7 +273,7 @@ pub fn validate(req: &ConnectReq, model: &DeviceModel) -> Result<ArParams, PnioS
         initiator_object_uuid: req.ar.initiator_object_uuid,
         activity_timeout_factor: req.ar.activity_timeout_factor,
         input_cr: IocrParams::from_req(input),
-        output_cr: IocrParams::from_req(output),
+        output_cr,
         alarm_ref_remote: req.alarm_cr.local_alarm_reference,
         max_alarm_data_length: model.max_alarm_data_length,
     })
@@ -397,6 +419,53 @@ mod tests {
             validate(&req(), &model).unwrap_err(),
             PnioStatus::connect_reject(ConnectBlock::ExpectedSubmodule, 6)
         );
+    }
+
+    #[test]
+    fn output_cr_frame_id_0xffff_is_replaced_by_a_device_selected_id() {
+        let mut r = req();
+        let output = r
+            .iocrs
+            .iter_mut()
+            .find(|c| c.iocr_type == 2)
+            .expect("golden request has an Output CR");
+        output.frame_id = FRAME_ID_DEVICE_SELECTS;
+        let model = DeviceModel::pnet_sample(DEVICE_MAC);
+        let params = validate(&r, &model).unwrap();
+        assert_eq!(params.output_cr.frame_id, 0x8001);
+        assert_eq!(params.input_cr.frame_id, 0x8000);
+        let out = build_connect_res(&params, &model);
+        assert_eq!(out, &golden("connect_res")[RES_BLOCKS..]);
+    }
+
+    #[test]
+    fn input_cr_frame_id_0xffff_is_still_rejected() {
+        let mut r = req();
+        let input = r
+            .iocrs
+            .iter_mut()
+            .find(|c| c.iocr_type == 1)
+            .expect("golden request has an Input CR");
+        input.frame_id = FRAME_ID_DEVICE_SELECTS;
+        assert_eq!(
+            validate(&r, &DeviceModel::pnet_sample(DEVICE_MAC)).unwrap_err(),
+            PnioStatus::connect_reject(ConnectBlock::IocrBlock, 6)
+        );
+    }
+
+    #[test]
+    fn device_selected_id_avoids_the_input_cr_id() {
+        let mut r = req();
+        for cr in r.iocrs.iter_mut() {
+            match cr.iocr_type {
+                1 => cr.frame_id = 0x8001,
+                2 => cr.frame_id = FRAME_ID_DEVICE_SELECTS,
+                _ => unreachable!(),
+            }
+        }
+        let params = validate(&r, &DeviceModel::pnet_sample(DEVICE_MAC)).unwrap();
+        assert_eq!(params.input_cr.frame_id, 0x8001);
+        assert_eq!(params.output_cr.frame_id, 0x8002);
     }
 
     #[test]

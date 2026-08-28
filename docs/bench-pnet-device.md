@@ -366,6 +366,13 @@ campaign — none of this was exercised in Plan 4's HIL runs. `output_publish_de
 it should be watched at 1 ms and only needs a lock-free seqlock if it becomes significant
 (see `FOLLOWUPS.md`).
 
+### 2026-08-28 — Connect with Output CR FrameID 0xFFFF
+The S7-1500 (TIA project recreated today, ARProperties `0x40000011`, RTClass 2) sent the
+Output CR with `FrameID = 0xFFFF` ("the IO device selects the FrameID"), which `validate()`
+rejected as out of `FRAME_ID_RANGE`, keeping the AR stuck in Idle (`Connect: Faulty
+IOCRBlockReq`, `Error in Parameter LT`). Fixed by accepting `0xFFFF` on the Output CR and
+having the device select `0x8001`, returned in the IOCRBlockRes.
+
 ## 7. Next steps
 Plan 3 (`cm`/AR) and Plan 4 (`rt`, cyclic exchange) are both done. `examples/rt_bringup`
 reaches AR state `Data` against the real S7-1500 and holds a full RTC1 exchange (PPM/CPM,
