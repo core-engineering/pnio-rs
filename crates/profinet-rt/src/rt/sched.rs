@@ -49,12 +49,20 @@ fn cpu_set(cpus: &[usize]) -> libc::cpu_set_t {
     }
 }
 
-/// Restrict the calling thread to `cpus` (non-empty).
+/// Restrict the calling thread to `cpus` (non-empty, each `< 8 * size_of::<cpu_set_t>()`
+/// — the bitmap's width — so [`libc::CPU_SET`] never writes out of bounds).
 pub fn set_affinity(cpus: &[usize]) -> io::Result<()> {
     if cpus.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "empty CPU list",
+        ));
+    }
+    let max_cpu = 8 * mem::size_of::<libc::cpu_set_t>();
+    if let Some(&cpu) = cpus.iter().find(|&&cpu| cpu >= max_cpu) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("cpu {cpu} out of range (max {max_cpu})"),
         ));
     }
     let set = cpu_set(cpus);
@@ -118,6 +126,20 @@ mod tests {
     fn set_affinity_rejects_an_empty_list() {
         assert_eq!(
             set_affinity(&[]).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn set_affinity_rejects_a_cpu_beyond_the_bitmap_width() {
+        let max_cpu = 8 * mem::size_of::<libc::cpu_set_t>();
+        assert_eq!(
+            set_affinity(&[max_cpu]).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        // A valid CPU earlier in the slice does not save an out-of-range one later.
+        assert_eq!(
+            set_affinity(&[0, max_cpu]).unwrap_err().kind(),
             std::io::ErrorKind::InvalidInput
         );
     }

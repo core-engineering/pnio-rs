@@ -287,10 +287,13 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
         }
     }
     if lock_memory {
-        match sched::lock_memory() {
-            Ok(()) => sched::prefault_stack(),
-            Err(e) => shared.push_event(RtEvent::SchedWarning(format!("mlockall: {e}"))),
+        // Pre-fault the stack unconditionally: it is useful even when `mlockall`
+        // itself fails (the pages still get touched once, avoiding a page fault on
+        // the RT path), so a failed lock does not skip it.
+        if let Err(e) = sched::lock_memory() {
+            shared.push_event(RtEvent::SchedWarning(format!("mlockall: {e}")));
         }
+        sched::prefault_stack();
     }
 
     let period = layout.input_cr.period();
