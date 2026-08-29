@@ -719,10 +719,26 @@ per direction (slots 1-4).
 ### Setup
 
 Same edge (`lab-server`), same L2-pair profile as §6f — kernel `6.12.105+deb13-rt-amd64`,
-`isolcpus=domain,managed_irq,2,3`, `HK_CPUS=0-1` — unchanged since Plan 7bis. Binary
-`typed_bringup`, built at the `43da37c`-era (after the `IOConfigData` fix below, before this
-docs pass). Every run below reports `memory_locked=yes` (`--lock-memory` was set) and ran at the
-CPU's actual send clock, 1 ms.
+`isolcpus=domain,managed_irq,2,3`, `HK_CPUS=0-1` — unchanged since Plan 7bis. Binary: a musl
+build of `typed_bringup` from commit `43da37c` (md5 `d8f0a89e`), `setcap
+cap_net_raw,cap_net_admin,cap_sys_nice,cap_ipc_lock+eip` (same re-apply-after-`scp` requirement
+as §6c/§6d). Every run below was launched from `~/bench` on the edge with the same command line,
+only `--duration`/`--stats-every`/`--csv` varying per run:
+
+```bash
+./typed_bringup --iface eno2 --ip 172.16.2.10 --station pnio-dev --rt-priority 80 --cpu 3 \
+  --app-cpus 0-1 --lock-memory --duration <N> --stats-every <S> --csv logs/<name>.csv
+```
+
+| Run | `<name>` | `<N>` (s) | `<S>` (s) |
+|---|---|---|---|
+| Smoke | `plan6-smoke` | 60 | 10 |
+| 1 ms campaign | `plan6-1ms` | 600 | 5 |
+| STOP→RUN attempt #1 (no STOP happened) | `plan6-stoprun` | 180 | 5 |
+| STOP→RUN attempt #2 | `plan6-stoprun2` | 240 | 5 |
+
+Every run below reports `memory_locked=yes` (`--lock-memory` took effect) and ran at the CPU's
+actual send clock, 1 ms.
 
 ### GSDML import path
 
@@ -766,15 +782,17 @@ Exact match — the device view TIA assigned equals the address map `gen_gsdml` 
 
 ### Runs
 
-Same summary format as §6e/§6f (`typed_bringup`'s own `--csv`/verdict banner); L2-pair profile
-throughout, zero missed ticks and zero watchdog expirations in every run.
+All four runs used the command line in [Setup](#setup) above, only `<N>`/`<S>`/`<name>`
+varying per the table there. Same summary format as §6e/§6f (`typed_bringup`'s own
+`--csv`/verdict banner); L2-pair profile throughout, zero missed ticks and zero watchdog
+expirations in every run.
 
-| Run | Duration | Missed / watchdog | Tick lateness p99 / p99.99 / max (µs) | Cycle work p99.99 / max (µs) | RX interval p99.99 / max (µs) | Reused+deferred | Verdict |
-|---|---|---|---|---|---|---|---|
-| Smoke | 60 s | 0 / 0 | 0 / 0 / 4.6 | 19 / 37.8 | 1052 / 1066.1 | 0.12 % (21+52 / 59761) | PASS |
-| 1 ms campaign | 600 s | 0 / 0 | 2 / 29 / 61.1 | 54 / 76.0 | 1054 / 1087.5 | 0.11 % (158+522 / 599737) | PASS |
-| STOP→RUN attempt #1 (no STOP — user away) | 180 s | 0 / 0 | 5 / 31 / 45.3 | 62 / 99.2 | 1055 / 1075.6 | 0.11 % (55+138 / 179627) | PASS |
-| STOP→RUN attempt #2 | 240 s | 0 / 0 | 0 / 26 / 41.5 | 48 / 76.9 | 1052 / 1074.5 | 0.11 % (65+200 / 238499) | PASS |
+| Run | `<name>` | Duration | Missed / watchdog | Tick lateness p99 / p99.99 / max (µs) | Cycle work p99.99 / max (µs) | RX interval p99.99 / max (µs) | Reused+deferred | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| Smoke | `plan6-smoke` | 60 s | 0 / 0 | 0 / 0 / 4.6 | 19 / 37.8 | 1052 / 1066.1 | 0.12 % (21+52 / 59761) | PASS |
+| 1 ms campaign | `plan6-1ms` | 600 s | 0 / 0 | 2 / 29 / 61.1 | 54 / 76.0 | 1054 / 1087.5 | 0.11 % (158+522 / 599737) | PASS |
+| STOP→RUN attempt #1 (no STOP — user away) | `plan6-stoprun` | 180 s | 0 / 0 | 5 / 31 / 45.3 | 62 / 99.2 | 1055 / 1075.6 | 0.11 % (55+138 / 179627) | PASS |
+| STOP→RUN attempt #2 | `plan6-stoprun2` | 240 s | 0 / 0 | 0 / 26 / 41.5 | 48 / 76.9 | 1052 / 1074.5 | 0.11 % (65+200 / 238499) | PASS |
 
 `typed_bringup summary` lines: smoke `tx=59761`; 1 ms campaign `tx=599737 rx_accepted=599737`;
 STOP→RUN #1 `tx=179627`; STOP→RUN #2 `tx=238499 rx_accepted=238501`. `rx_dropped=0` in every run.
