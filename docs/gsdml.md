@@ -178,8 +178,9 @@ interface can cap the achievable send clock below what the GSDML declares: on th
 (`docs/bench-pnet-device.md` §6g), a 1515-2 PN's **X2** port — the device-facing segment — is
 RT-only with a fixed 1 ms send clock; 250/500 µs and IRT are only available on **X1**. TIA
 accepted `MinDeviceInterval="16"` in the file but its update-time list stopped at 1 ms anyway,
-because the ceiling is the physical port, not the GSDML. Testing 500 µs needs the device moved
-to X1.
+because the ceiling is the physical port, not the GSDML. With the device cable moved to X1 (same
+IP, X1 send clock 0.5 ms) the same file, binary and edge ran at 500 µs for 5 minutes with zero
+missed ticks (`docs/bench-pnet-device.md` §6g).
 
 ## Using the device
 

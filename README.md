@@ -39,7 +39,7 @@ S7‑1500 (1515‑2 PN).
 | Alarms + I&M | `alarm`/`im` | ⏳ |
 | Typed device configuration (builder, layout rule, DCP/model derivation) | `config` | ✅ |
 | Generated GSDML (V2.4, matches `config` by construction — see `docs/gsdml.md`) | `gsdml` | ✅ HIL with our own GSDML on the S7-1500, 2026-08-29: import accepted by TIA V21 (device-view addresses = computed), 10 min at 1 ms, L2-pair profile, tick lateness p99.99 29 µs / max 61.1 µs, 0 missed ticks over 599 737 cycles — see `docs/bench-pnet-device.md` §6g |
-| Typed device facade (`IoDevice`, typed reads/writes, per-slot snapshots) | `api` | ✅ HIL with our own GSDML on the S7-1500, 2026-08-29: typed `REAL`/`BOOL` round trip verified in the watch table, same 10-minute 1 ms run as `gsdml` above — see `docs/bench-pnet-device.md` §6g |
+| Typed device facade (`IoDevice`, typed reads/writes, per-slot snapshots) | `api` | ✅ HIL with our own GSDML on the S7-1500, 2026-08-29: typed `REAL`/`BOOL` round trip verified in the watch table, same 10-minute 1 ms run as `gsdml` above — see `docs/bench-pnet-device.md` §6g; 500 µs held for 5 min on the CPU's X1 port (0 missed ticks over 596 899 cycles, p99.99 lateness 27 µs) |
 | HIL integration + determinism (real S7‑1500, jitter measurement) | — | 1 ms held against a real S7-1500, idle and under load, on PREEMPT_RT ✅ (HIL 2026-08-28, `docs/bench-pnet-device.md` §6e/§6f — L2-pair profile now the default); see the `rt` row above for numbers |
 
 ## Architecture

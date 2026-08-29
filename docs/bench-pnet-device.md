@@ -830,12 +830,23 @@ observed in §6b. Diagnostic buffer: not recorded for this run.
    600 s campaign run above (`tick_lateness` p99.99 29 µs, max 61.1 µs; 0 missed ticks, 0
    watchdog expirations over 599 737 cycles).
 
-**Bonus, non-blocking, 500 µs: not testable on this bench.** TIA's update-time list stopped at
-1 ms because the CPU (1515-2 PN)'s **X2** interface — the device-facing segment, also the TIA
-NAT leg in this bench topology — has a fixed 1 ms send clock (RT class only; 250/500 µs and IRT
-are **X1**-only). Our GSDML declares `MinDeviceInterval="16"` (500 µs) and TIA accepted the
-file; the ceiling is the CPU port, not the GSDML. Follow-up: move the device to X1
-(`FOLLOWUPS.md`).
+**Bonus, non-blocking, 500 µs: met, on X1.** On X2 (the device-facing segment, also the TIA
+NAT leg) TIA's update-time list stopped at 1 ms: the 1515-2 PN's X2 port has a fixed 1 ms send
+clock (RT class only; 250/500 µs and IRT are **X1**-only). The user then moved the device cable
+from X2 to X1, gave X1 the same `172.16.2.100/24` address (X2 moved to another subnet), set the
+X1 send clock to 0.5 ms and the device update time to 0.5 ms — nothing changed on the edge, the
+device or the GSDML (`MinDeviceInterval="16"` was already declared and accepted). Same
+`typed_bringup` binary and flags, `--duration 60` then `300`:
+
+| Run (500 µs, X1) | Cycles | Missed / WD / dropped | Tick lateness p99 / p99.99 / max | Cycle work p99.99 / max | RX interval p50 / p99.99 / max | Verdict |
+|---|---|---|---|---|---|---|
+| `plan6-x1-smoke` (60 s) | 115 224 | 0 / 0 / 0 | 8 / 30 / 42.1 µs | 35 / 58.5 µs | 500 / 525 / 592.8 µs | PASS |
+| `plan6-x1-500us` (300 s) | 596 899 | 0 / 0 / 0 | 11 / 27 / 46.3 µs | 56 / 85.0 µs | 500 / 531 / 551.8 µs | PASS |
+
+At 500 µs the consumer watchdog is 1.5 ms; the worst CPU→device interval seen (551.8 µs) and
+the worst tick lateness (46.3 µs) leave the same order of headroom as at 1 ms. The application
+loop still sleeps 1 ms, so it refreshes our inputs every second cycle — fine for a mirror, and
+the reason `reused`/`deferred` stay at the 1 ms level.
 
 ### Lessons
 
@@ -855,6 +866,7 @@ file; the ceiling is the CPU port, not the GSDML. Follow-up: move the device to 
 - **The controller's own interface can cap the achievable send clock below what the GSDML
   declares.** The 1515-2 PN's X2 port is RT-only, fixed at 1 ms; the GSDML's `MinDeviceInterval`
   is necessary but not sufficient to get a shorter cycle — the CPU's physical port matters too.
+  On X1 the same device, binary and GSDML ran at 500 µs (0 missed ticks over 596 899 cycles).
 
 ## 7. Next steps
 Plan 3 (`cm`/AR), Plan 4 (`rt`, cyclic exchange), Plan 7 (1 ms determinism) and **Plan 7bis
@@ -872,18 +884,17 @@ without changing the CPU layout.
 `PNIO_Version="V2.3"`, `IOConfigData` counting IOxS), device-view addresses match
 `gen_gsdml`'s computed map, and `typed_bringup` held the 10-minute 1 ms criterion
 (`tick_lateness` p99.99 29 µs, 0 missed ticks over 599 737 cycles, L2-pair profile) with typed
-`REAL`/`BOOL` round trips verified in the watch table. The 500 µs bonus stayed untested: the
-CPU's X2 port (device-facing) is RT-only, fixed at 1 ms — 250/500 µs and IRT need X1 — so moving
-the device to X1 is a follow-up, not a code change (`FOLLOWUPS.md`).
+`REAL`/`BOOL` round trips verified in the watch table. The 500 µs bonus was then met on the
+CPU's X1 port (X2 is RT-only, fixed at 1 ms): 5 minutes at 500 µs, `PASS`, p99.99 lateness
+27 µs — no code, edge or GSDML change, only the cable and the CPU's send clock.
 
 Next is **Plan 5 (alarms + I&M/diagnosis)** — ERR-RTA on device stop, `ProblemIndicator`/
 diagnosis reporting, minimal `Read`/`ReadImplicit` beyond the PNIORW refusal. The V2.31+ GSDML
 profile (`LLDP_NoD_Supported`, `PTP_BoundarySupported`/`DCP_BoundarySupported`,
 `ResetToFactoryModes`, `CertificationInfo`) is a natural follow-on once Plan 5 lands, since it's
 exactly the feature set that mandate requires. §6g's jitter-headroom observation still stands:
-§6f's p99.99 lateness under load (13 µs) sits far inside the 100 µs budget, which makes a
-shorter update time (500/250 µs, design doc §10) worth revisiting once the device can reach it
-from X1. See `FOLLOWUPS.md`.
+500 µs is now demonstrated on X1 (§6g); 250 µs (design doc §10) would need the busy-poll /
+`PACKET_MMAP` work listed in `FOLLOWUPS.md` and a faster application loop.
 
 ## Pitfalls
 - **Never use CPL/PowerLine** on the segment (HomePlug `0x88e1` → jitter → RT watchdog expires, AR drops).
