@@ -813,10 +813,11 @@ Typed round trip (REAL big-endian, BOOL LSB-first) verified on our own GSDML —
 
 Attempt #1 (`plan6-stoprun`, 180 s): the user was away and no STOP happened; the run still
 completed and passed on its own merits. Attempt #2 (`plan6-stoprun2`, 240 s): the CPU went to
-STOP roughly 15 s into the run; the device reported `Freshness::Stopped` for three consecutive
-5 s stats samples, then back to `Fresh` on RUN. The AR stayed at `Data` the whole time — one AR
-for the entire run, no abort — matching the ProviderState=Stop behavior first observed in §6b.
-Diagnostic buffer: not recorded for this run.
+STOP between 25 s and 30 s into the run (the 5 s stats samples bracket it: last `Fresh` at
+11:09:27, first `Stopped` at 11:09:32); the device reported `Freshness::Stopped` for three
+consecutive 5 s stats samples, then back to `Fresh` on RUN. The AR stayed at `Data` the whole
+time — one AR for the entire run, no abort — matching the ProviderState=Stop behavior first
+observed in §6b. Diagnostic buffer: not recorded for this run.
 
 ### Verdict per spec §1 (HIL acceptance criterion)
 
