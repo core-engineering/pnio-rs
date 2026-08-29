@@ -1,7 +1,12 @@
 //! Typed device configuration: the single source from which the device model, the
 //! per-field byte/bit table, the DCP identity and the GSDML are derived (spec §4).
 
+use crate::cm::{DeviceModel, SlotModel, SubmoduleModel};
 use crate::data::FieldType;
+use crate::dcp::{DeviceConfig as DcpDeviceConfig, DeviceProperties};
+use crate::device::{DeviceSetup, RtOptions};
+use crate::eth::MacAddr;
+use crate::rpc::Uuid;
 use thiserror::Error;
 
 /// Largest C-SDU a submodule may occupy in one direction (RT frame budget).
@@ -198,6 +203,80 @@ impl DeviceConfig {
 
     pub fn output_len(&self, slot: Slot) -> Option<u16> {
         self.index_of(slot).map(|i| self.derived[i].output_len)
+    }
+
+    /// The plug-and-play model the `cm` layer validates Connect requests against.
+    pub fn model(&self, mac: MacAddr) -> DeviceModel {
+        let sm = |subslot: u16, ident: u32, i: u16, o: u16| SubmoduleModel {
+            subslot,
+            submodule_ident: ident,
+            input_len: i,
+            output_len: o,
+        };
+        let mut slots = vec![SlotModel {
+            slot: 0,
+            module_ident: 0x1,
+            submodules: vec![
+                sm(1, 0x1, 0, 0),
+                sm(0x8000, 0x8000, 0, 0),
+                sm(0x8001, 0x8001, 0, 0),
+            ],
+        }];
+        for (spec, d) in self.submodules.iter().zip(&self.derived) {
+            slots.push(SlotModel {
+                slot: spec.slot.0,
+                module_ident: 0x100 + spec.slot.0 as u32,
+                submodules: vec![sm(1, 0x1, d.input_len, d.output_len)],
+            });
+        }
+        DeviceModel {
+            vendor_id: self.vendor_id,
+            device_id: self.device_id,
+            instance: 1,
+            station_name: self.station_name.clone(),
+            mac,
+            max_alarm_data_length: 200,
+            slots,
+        }
+    }
+
+    /// DCP identity answered on the wire (Identify/Set), for the given IP (/24, no router).
+    pub fn dcp_properties(&self, ip: [u8; 4]) -> DeviceProperties {
+        DeviceProperties {
+            name_of_station: self.station_name.clone(),
+            type_of_station: self.station_type.clone(),
+            vendor_id: self.vendor_id,
+            device_id: self.device_id,
+            device_role: 0x0100,
+            device_instance: 1,
+            device_options: vec![1, 2, 2, 2, 2, 3],
+            ip,
+            subnet: [255, 255, 255, 0],
+            gateway: ip,
+            ip_block_info: 1,
+        }
+    }
+
+    /// The activity UUID seed our outgoing RPC calls use: fixed prefix + the MAC.
+    pub fn activity_seed(mac: MacAddr) -> Uuid {
+        let mut b = [
+            0x14, 0xaf, 0x19, 0x8a, 0x12, 0x34, 0x10, 0x56, 0x80, 0x79, 0, 0, 0, 0, 0, 0,
+        ];
+        b[10..].copy_from_slice(&mac.0);
+        Uuid(b)
+    }
+
+    /// Everything `device::Device::new` needs.
+    pub fn setup(&self, mac: MacAddr, ip: [u8; 4], rt: Option<RtOptions>) -> DeviceSetup {
+        DeviceSetup {
+            dcp: DcpDeviceConfig {
+                mac,
+                properties: self.dcp_properties(ip),
+            },
+            model: self.model(mac),
+            activity_seed: Self::activity_seed(mac),
+            rt,
+        }
     }
 }
 
@@ -512,5 +591,79 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(cfg.station_name(), "pnio-dev");
+    }
+
+    #[test]
+    fn model_is_derived_deterministically() {
+        use crate::cm::{DeviceModel, SubmoduleModel};
+        let mac = crate::eth::MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]);
+        let m = sample().model(mac);
+        let dap = DeviceModel::pnet_sample(mac);
+        assert_eq!(m.slots[0], dap.slots[0]); // DAP identical to the rt-labs profile
+        assert_eq!((m.vendor_id, m.device_id, m.instance), (0xFFFF, 0x0001, 1));
+        assert_eq!(m.station_name, "pnio-dev");
+        assert_eq!(m.max_alarm_data_length, 200);
+        let idents: Vec<(u16, u32)> = m.slots[1..]
+            .iter()
+            .map(|s| (s.slot, s.module_ident))
+            .collect();
+        assert_eq!(idents, vec![(1, 0x101), (2, 0x102), (3, 0x103), (4, 0x104)]);
+        assert_eq!(
+            m.slots[1].submodules,
+            vec![SubmoduleModel {
+                subslot: 1,
+                submodule_ident: 0x1,
+                input_len: 64,
+                output_len: 0
+            }]
+        );
+        assert_eq!(m.find(4, 1).unwrap().output_len, 4);
+    }
+
+    #[test]
+    fn dcp_properties_and_setup_carry_the_identity() {
+        let mac = crate::eth::MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]);
+        let cfg = sample();
+        let p = cfg.dcp_properties([172, 16, 2, 10]);
+        assert_eq!(
+            (p.vendor_id, p.device_id, p.device_role, p.device_instance),
+            (0xFFFF, 1, 0x0100, 1)
+        );
+        assert_eq!(p.name_of_station, "pnio-dev");
+        assert_eq!(p.type_of_station, "pnio device");
+        assert_eq!(
+            (p.ip, p.subnet, p.gateway, p.ip_block_info),
+            ([172, 16, 2, 10], [255, 255, 255, 0], [172, 16, 2, 10], 1)
+        );
+        assert_eq!(p.device_options, vec![1, 2, 2, 2, 2, 3]);
+        let s = cfg.setup(mac, [172, 16, 2, 10], None);
+        assert_eq!(s.dcp.mac, mac);
+        assert_eq!(s.model, cfg.model(mac));
+        assert_eq!(s.activity_seed.0[10..], mac.0);
+        assert!(s.rt.is_none());
+    }
+
+    #[test]
+    fn layout_from_ar_accepts_the_derived_model() {
+        use crate::cm::{validate, ConnectReq};
+        use crate::rt::Layout;
+        use crate::testutil::{synthetic_connect_req, SYNTH_BLOCKS_OFF};
+        let mac = crate::eth::MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]);
+        let model = sample().model(mac);
+        let pdu = synthetic_connect_req(&model);
+        let req = ConnectReq::parse(&pdu[SYNTH_BLOCKS_OFF..]).unwrap();
+        let params = validate(&req, &model).unwrap();
+        let layout = Layout::from_ar(&params, &model).unwrap();
+        // Input CR: DAP IOPS ×3 (offsets 0,1,2), then slot 1 data@3 (64 B)+IOPS@67,
+        // slot 2 data@68 (4 B)+IOPS@72, IOCS for slots 3 and 4 at 73, 74 -> 75 bytes.
+        assert_eq!(layout.input_cr.data_length, 75);
+        assert_eq!(layout.output_cr.data_length, 75);
+        let s1 = layout
+            .input_cr
+            .objects
+            .iter()
+            .find(|o| o.slot == 1)
+            .unwrap();
+        assert_eq!((s1.data_off, s1.data_len, s1.iops_off), (3, 64, 67));
     }
 }
