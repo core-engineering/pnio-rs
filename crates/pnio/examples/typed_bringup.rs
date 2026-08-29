@@ -280,13 +280,16 @@ fn run_app_cycle(dev: &IoDevice) -> Result<(), ApiError> {
         Err(ApiError::NoLayoutYet) => return Ok(()),
         Err(e) => return Err(e),
     }
-    let bits = dev.outputs(Slot(4))?;
-    dev.with_inputs(Slot(2), |w| {
-        for i in 0..32 {
-            w.bool(i, bits.bool(i)?)?;
-        }
-        Ok(())
-    })
+    match dev.outputs(Slot(4)) {
+        Ok(bits) => dev.with_inputs(Slot(2), |w| {
+            for i in 0..32 {
+                w.bool(i, bits.bool(i)?)?;
+            }
+            Ok(())
+        }),
+        Err(ApiError::NoLayoutYet) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 struct Thresholds {
