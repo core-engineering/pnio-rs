@@ -89,9 +89,19 @@ fn data_type(ty: FieldType) -> &'static str {
 /// Deviations from a plain textbook template, both made to match
 /// `GSDML-V2.4-RT-Labs-P-Net-Sample-App-20220324.xml` (the reference file TIA
 /// accepted), rather than inventing schema usage:
-/// - `DeviceAccessPointItem` carries `PNIO_Version="V2.4"` (present on the reference's
-///   DAP; declares the supported PROFINET version — needed together with
-///   `StartupMode="Advanced"`).
+/// - `DeviceAccessPointItem` carries `PNIO_Version="V2.3"`, not the reference's `"V2.4"`:
+///   TIA's GSD checker applies version-dependent checks, and for `PNIO_Version >=
+///   "V2.31"` it mandates `CertificationInfo` and `LLDP_NoD_Supported="true"` on the DAP,
+///   `ResetToFactoryModes="2"`, and `PTP_BoundarySupported="true"`/
+///   `DCP_BoundarySupported="true"` on `InterfaceSubmoduleItem` — none of which the device
+///   implements (no LLDP, no PTP/DCP boundary, no ResetToFactory). V2.3 is the last
+///   profile version without those mandates and still allows `StartupMode="Advanced"`.
+///   Revisit once LLDP/boundary/ResetToFactory support lands (Plan 5+).
+/// - `InterfaceSubmoduleItem` carries `SupportedProtocols=""` rather than the
+///   reference's `"SNMP;LLDP"`: the device implements neither. The v2.4 XSD makes the
+///   attribute `use="required"`, but its type (`base:TokenListT`, pattern
+///   `(([0-9a-zA-Z_]+;)*[0-9a-zA-Z_]+)?`) allows an empty token list, so an empty value
+///   is the honest declaration — omitting the attribute fails XSD validation.
 /// - `PortSubmoduleItem` lists its MAU type via a `<MAUTypeList><MAUTypeItem .../>`
 ///   child, as the reference does, instead of a flat `MAUTypes` attribute (which does
 ///   not appear anywhere in the reference). No `<SubslotList>` element is emitted
@@ -139,7 +149,7 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
     </DeviceFunction>
     <ApplicationProcess>
       <DeviceAccessPointList>
-        <DeviceAccessPointItem ID="DAP1" PNIO_Version="V2.4" PhysicalSlots="0..{n_slots}" ModuleIdentNumber="0x00000001" MinDeviceInterval="{mdi}" DNS_CompatibleName="{station}" FixedInSlots="0" ObjectUUID_LocalIndex="1" MultipleWriteSupported="true" DeviceAccessSupported="false" CheckDeviceID_Allowed="true" NameOfStationNotTransferable="false">
+        <DeviceAccessPointItem ID="DAP1" PNIO_Version="V2.3" PhysicalSlots="0..{n_slots}" ModuleIdentNumber="0x00000001" MinDeviceInterval="{mdi}" DNS_CompatibleName="{station}" FixedInSlots="0" ObjectUUID_LocalIndex="1" MultipleWriteSupported="true" DeviceAccessSupported="false" CheckDeviceID_Allowed="true" NameOfStationNotTransferable="false">
           <ModuleInfo>
             <Name TextId="T_DAP_Name"/>
             <InfoText TextId="T_DAP_Info"/>
@@ -182,7 +192,7 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
             </VirtualSubmoduleItem>
           </VirtualSubmoduleList>
           <SystemDefinedSubmoduleList>
-            <InterfaceSubmoduleItem ID="DAP1_IF" SubslotNumber="32768" TextId="T_Interface" SubmoduleIdentNumber="0x00008000" SupportedRT_Classes="RT_CLASS_1" SupportedProtocols="SNMP;LLDP" DCP_HelloSupported="false" PTP_BoundarySupported="false" DCP_BoundarySupported="false" DelayMeasurementSupported="false">
+            <InterfaceSubmoduleItem ID="DAP1_IF" SubslotNumber="32768" TextId="T_Interface" SubmoduleIdentNumber="0x00008000" SupportedRT_Classes="RT_CLASS_1" SupportedProtocols="" DCP_HelloSupported="false" PTP_BoundarySupported="false" DCP_BoundarySupported="false" DelayMeasurementSupported="false">
               <ApplicationRelations StartupMode="Advanced">
                 <TimingProperties SendClock="{send_clock}" ReductionRatio="1 2 4 8 16 32 64 128 256 512"/>
               </ApplicationRelations>
@@ -388,6 +398,24 @@ mod tests {
         // rt-labs reference file TIA accepted).
         assert_eq!(dap.attribute("CheckDeviceID_Allowed"), Some("true"));
         assert_eq!(dap.attribute("NameOfStationNotTransferable"), Some("false"));
+        // V2.3, not V2.4: TIA's GSD checker mandates LLDP/PTP-DCP boundary/ResetToFactory/
+        // CertificationInfo claims from PNIO_Version >= "V2.31", none of which the device
+        // implements (see the module doc).
+        assert_eq!(dap.attribute("PNIO_Version"), Some("V2.3"));
+        let iface = find("InterfaceSubmoduleItem")[0];
+        // The v2.4 XSD makes SupportedProtocols required; an empty value is the honest
+        // declaration since the device implements neither SNMP nor LLDP.
+        assert_eq!(iface.attribute("SupportedProtocols"), Some(""));
+        for id in [
+            "LLDP_NoD_Supported",
+            "ResetToFactoryModes",
+            "CertificationInfo",
+        ] {
+            assert!(
+                !xml.contains(id),
+                "unimplemented feature claim {id} must not appear in the document"
+            );
+        }
         for tag in ["Input", "Output"] {
             for n in find(tag) {
                 assert_eq!(

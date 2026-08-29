@@ -22,7 +22,7 @@
     </DeviceFunction>
     <ApplicationProcess>
       <DeviceAccessPointList>
-        <DeviceAccessPointItem ID="DAP1" PNIO_Version="V2.4" PhysicalSlots="0..4" ModuleIdentNumber="0x00000001" MinDeviceInterval="32" DNS_CompatibleName="pnio-dev" FixedInSlots="0" ObjectUUID_LocalIndex="1" MultipleWriteSupported="true" DeviceAccessSupported="false" CheckDeviceID_Allowed="true" NameOfStationNotTransferable="false">
+        <DeviceAccessPointItem ID="DAP1" PNIO_Version="V2.3" PhysicalSlots="0..4" ModuleIdentNumber="0x00000001" MinDeviceInterval="32" DNS_CompatibleName="pnio-dev" FixedInSlots="0" ObjectUUID_LocalIndex="1" MultipleWriteSupported="true" DeviceAccessSupported="false" CheckDeviceID_Allowed="true" NameOfStationNotTransferable="false">
           <ModuleInfo>
             <Name TextId="T_DAP_Name"/>
             <InfoText TextId="T_DAP_Info"/>
@@ -48,7 +48,7 @@
             </VirtualSubmoduleItem>
           </VirtualSubmoduleList>
           <SystemDefinedSubmoduleList>
-            <InterfaceSubmoduleItem ID="DAP1_IF" SubslotNumber="32768" TextId="T_Interface" SubmoduleIdentNumber="0x00008000" SupportedRT_Classes="RT_CLASS_1" SupportedProtocols="SNMP;LLDP" DCP_HelloSupported="false" PTP_BoundarySupported="false" DCP_BoundarySupported="false" DelayMeasurementSupported="false">
+            <InterfaceSubmoduleItem ID="DAP1_IF" SubslotNumber="32768" TextId="T_Interface" SubmoduleIdentNumber="0x00008000" SupportedRT_Classes="RT_CLASS_1" SupportedProtocols="" DCP_HelloSupported="false" PTP_BoundarySupported="false" DCP_BoundarySupported="false" DelayMeasurementSupported="false">
               <ApplicationRelations StartupMode="Advanced">
                 <TimingProperties SendClock="32" ReductionRatio="1 2 4 8 16 32 64 128 256 512"/>
               </ApplicationRelations>
