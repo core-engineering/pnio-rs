@@ -1,0 +1,18 @@
+// OB1 body — adjustable CPU load + slow round-trip self-check (bench §6h).
+// Paste into the project's OB1 (needs a temp: i : DInt). Load is tuned live via
+// "BenchData".LoadIter (0 = idle; 20000 was ~? ms on the bench 1515-2 PN — note the
+// measured OB1 cycle time in the report).
+// --- 1. adjustable load ---
+FOR #i := 1 TO "BenchData".LoadIter DO
+    "BenchData".Acc := SQRT(ABS(SIN(DINT_TO_REAL(#i)) * 3.14159) + 1.0);
+END_FOR;
+// --- 2. slow round-trip check on %QD0/%ID0 and %QB64/%IB64 (only while OB30 echo is
+//        NOT loaded: both write %QD0 — use one or the other, see §6h protocol) ---
+"BenchData".Cycle := "BenchData".Cycle + 1;
+IF "BenchData".Cycle MOD 10 = 0 THEN
+    "BenchData".Checks := "BenchData".Checks + 1;
+    IF "devIn_Counter" <> "devOut_Echo" THEN
+        // with the mirror app the echoed value must have settled after ~10 OB1 cycles
+        "BenchData".Errors := "BenchData".Errors + 1;
+    END_IF;
+END_IF;
