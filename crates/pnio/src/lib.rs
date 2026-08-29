@@ -38,6 +38,7 @@
 
 pub mod capture;
 pub mod cm;
+pub mod config;
 pub mod data;
 pub mod dcp;
 pub mod device;

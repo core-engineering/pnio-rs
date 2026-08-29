@@ -1,0 +1,516 @@
+//! Typed device configuration: the single source from which the device model, the
+//! per-field byte/bit table, the DCP identity and the GSDML are derived (spec §4).
+
+use crate::data::FieldType;
+use thiserror::Error;
+
+/// Largest C-SDU a submodule may occupy in one direction (RT frame budget).
+pub const MAX_SUBMODULE_BYTES: u16 = 1440;
+
+/// A module slot number; slot 0 is the DAP and cannot carry user data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Slot(pub u16);
+
+/// Data direction from the device's point of view: `Input` = device → controller
+/// (the controller's `%I`), `Output` = controller → device (its `%Q`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Input,
+    Output,
+    InputOutput,
+}
+
+/// One submodule: an ordered list of input fields and/or output fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmoduleSpec {
+    pub slot: Slot,
+    pub name: String,
+    pub inputs: Vec<FieldType>,
+    pub outputs: Vec<FieldType>,
+}
+
+impl SubmoduleSpec {
+    pub fn direction(&self) -> Direction {
+        match (self.inputs.is_empty(), self.outputs.is_empty()) {
+            (false, true) => Direction::Input,
+            (true, false) => Direction::Output,
+            _ => Direction::InputOutput,
+        }
+    }
+}
+
+/// Where one field lives inside its submodule's data: byte offset, bit (LSB-first,
+/// `0` for byte types) and type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldRef {
+    pub byte: u16,
+    pub bit: u8,
+    pub ty: FieldType,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ConfigError {
+    #[error("slot 0 is the DAP and cannot carry process data")]
+    SlotZeroReserved,
+    #[error("slot {0} declared twice")]
+    DuplicateSlot(u16),
+    #[error("slot {0} has neither inputs nor outputs")]
+    EmptySubmodule(u16),
+    #[error("no submodule declared")]
+    NoSubmodule,
+    #[error("slot {slot}: {bytes} bytes exceed the {max}-byte submodule limit")]
+    TooLong { slot: u16, bytes: u32, max: u16 },
+    #[error("station name {0:?} is not a valid PROFINET name of station")]
+    BadStationName(String),
+    #[error("min device interval {0} is not one of 8, 16, 32, 64, 128")]
+    BadInterval(u16),
+    #[error("vendor id must be non-zero")]
+    BadIdentity,
+}
+
+/// Lay out `fields` per the declaration-order rule: `Bool`s pack 8 per byte
+/// (LSB-first), a `Bool` after a byte-typed field opens a new byte, byte types are
+/// placed back-to-back big-endian with no padding. Returns the refs and the byte
+/// length.
+pub fn layout(fields: &[FieldType]) -> (Vec<FieldRef>, u16) {
+    let mut refs = Vec::with_capacity(fields.len());
+    let mut next_byte: u32 = 0; // first free byte
+    let mut bit_byte: Option<(u32, u8)> = None; // (byte, next bit) of the open bit-byte
+    for &ty in fields {
+        match ty.byte_len() {
+            None => {
+                let (byte, bit) = match bit_byte {
+                    Some((b, bit)) if bit < 8 => (b, bit),
+                    _ => {
+                        let b = next_byte;
+                        next_byte += 1;
+                        (b, 0)
+                    }
+                };
+                bit_byte = Some((byte, bit + 1));
+                refs.push(FieldRef {
+                    byte: byte as u16,
+                    bit,
+                    ty,
+                });
+            }
+            Some(n) => {
+                bit_byte = None;
+                refs.push(FieldRef {
+                    byte: next_byte as u16,
+                    bit: 0,
+                    ty,
+                });
+                next_byte += n as u32;
+            }
+        }
+    }
+    (refs, next_byte as u16)
+}
+
+/// Per-submodule derived tables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Derived {
+    inputs: Vec<FieldRef>,
+    input_len: u16,
+    outputs: Vec<FieldRef>,
+    output_len: u16,
+}
+
+/// A validated device configuration (build it with [`DeviceConfig::builder`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceConfig {
+    station_name: String,
+    station_type: String,
+    vendor_id: u16,
+    device_id: u16,
+    min_device_interval: u16,
+    submodules: Vec<SubmoduleSpec>,
+    derived: Vec<Derived>, // parallel to `submodules`
+}
+
+pub struct DeviceConfigBuilder {
+    station_name: String,
+    station_type: String,
+    vendor_id: u16,
+    device_id: u16,
+    min_device_interval: u16,
+    submodules: Vec<SubmoduleSpec>,
+}
+
+impl DeviceConfig {
+    pub fn builder(station_name: &str) -> DeviceConfigBuilder {
+        DeviceConfigBuilder {
+            station_name: station_name.to_string(),
+            station_type: "pnio device".to_string(),
+            vendor_id: 0xFFFF,
+            device_id: 0x0001,
+            min_device_interval: 32,
+            submodules: Vec::new(),
+        }
+    }
+
+    pub fn station_name(&self) -> &str {
+        &self.station_name
+    }
+    pub fn station_type(&self) -> &str {
+        &self.station_type
+    }
+    pub fn vendor_id(&self) -> u16 {
+        self.vendor_id
+    }
+    pub fn device_id(&self) -> u16 {
+        self.device_id
+    }
+    pub fn min_device_interval(&self) -> u16 {
+        self.min_device_interval
+    }
+    pub fn submodules(&self) -> &[SubmoduleSpec] {
+        &self.submodules
+    }
+
+    fn index_of(&self, slot: Slot) -> Option<usize> {
+        self.submodules.iter().position(|s| s.slot == slot)
+    }
+
+    pub fn submodule(&self, slot: Slot) -> Option<&SubmoduleSpec> {
+        self.index_of(slot).map(|i| &self.submodules[i])
+    }
+
+    /// The field refs of one direction of a slot (`InputOutput` is not a lookup key:
+    /// ask for `Input` or `Output`).
+    pub fn fields(&self, slot: Slot, dir: Direction) -> Option<&[FieldRef]> {
+        let d = &self.derived[self.index_of(slot)?];
+        match dir {
+            Direction::Input if !d.inputs.is_empty() => Some(&d.inputs),
+            Direction::Output if !d.outputs.is_empty() => Some(&d.outputs),
+            _ => None,
+        }
+    }
+
+    pub fn field(&self, slot: Slot, dir: Direction, index: usize) -> Option<FieldRef> {
+        self.fields(slot, dir)?.get(index).copied()
+    }
+
+    pub fn input_len(&self, slot: Slot) -> Option<u16> {
+        self.index_of(slot).map(|i| self.derived[i].input_len)
+    }
+
+    pub fn output_len(&self, slot: Slot) -> Option<u16> {
+        self.index_of(slot).map(|i| self.derived[i].output_len)
+    }
+}
+
+impl DeviceConfigBuilder {
+    pub fn station_type(mut self, s: &str) -> Self {
+        self.station_type = s.to_string();
+        self
+    }
+    pub fn identity(mut self, vendor_id: u16, device_id: u16) -> Self {
+        self.vendor_id = vendor_id;
+        self.device_id = device_id;
+        self
+    }
+    pub fn min_device_interval(mut self, v: u16) -> Self {
+        self.min_device_interval = v;
+        self
+    }
+    /// Device → controller data in `slot` (the controller's inputs).
+    pub fn input(self, slot: Slot, fields: &[FieldType]) -> Self {
+        self.submodule(slot, &format!("in{}", slot.0), fields, &[])
+    }
+    /// Controller → device data in `slot` (the controller's outputs).
+    pub fn output(self, slot: Slot, fields: &[FieldType]) -> Self {
+        self.submodule(slot, &format!("out{}", slot.0), &[], fields)
+    }
+    pub fn submodule(
+        mut self,
+        slot: Slot,
+        name: &str,
+        inputs: &[FieldType],
+        outputs: &[FieldType],
+    ) -> Self {
+        self.submodules.push(SubmoduleSpec {
+            slot,
+            name: name.to_string(),
+            inputs: inputs.to_vec(),
+            outputs: outputs.to_vec(),
+        });
+        self
+    }
+
+    pub fn build(self) -> Result<DeviceConfig, ConfigError> {
+        let station_name = normalize_station_name(&self.station_name)
+            .ok_or_else(|| ConfigError::BadStationName(self.station_name.clone()))?;
+        if !matches!(self.min_device_interval, 8 | 16 | 32 | 64 | 128) {
+            return Err(ConfigError::BadInterval(self.min_device_interval));
+        }
+        if self.vendor_id == 0 {
+            return Err(ConfigError::BadIdentity);
+        }
+        if self.submodules.is_empty() {
+            return Err(ConfigError::NoSubmodule);
+        }
+        let mut submodules = self.submodules;
+        submodules.sort_by_key(|s| s.slot);
+        let mut derived = Vec::with_capacity(submodules.len());
+        for (i, sm) in submodules.iter().enumerate() {
+            if sm.slot.0 == 0 {
+                return Err(ConfigError::SlotZeroReserved);
+            }
+            if i > 0 && submodules[i - 1].slot == sm.slot {
+                return Err(ConfigError::DuplicateSlot(sm.slot.0));
+            }
+            if sm.inputs.is_empty() && sm.outputs.is_empty() {
+                return Err(ConfigError::EmptySubmodule(sm.slot.0));
+            }
+            let (inputs, input_len) = checked_layout(sm.slot, &sm.inputs)?;
+            let (outputs, output_len) = checked_layout(sm.slot, &sm.outputs)?;
+            derived.push(Derived {
+                inputs,
+                input_len,
+                outputs,
+                output_len,
+            });
+        }
+        Ok(DeviceConfig {
+            station_name,
+            station_type: self.station_type,
+            vendor_id: self.vendor_id,
+            device_id: self.device_id,
+            min_device_interval: self.min_device_interval,
+            submodules,
+            derived,
+        })
+    }
+}
+
+/// `layout` plus the size guard (computed in `u32` so an oversized declaration is
+/// reported, not wrapped).
+fn checked_layout(slot: Slot, fields: &[FieldType]) -> Result<(Vec<FieldRef>, u16), ConfigError> {
+    let bytes: u32 = {
+        let mut n = 0u32;
+        let mut open_bits = 0u32;
+        for f in fields {
+            match f.byte_len() {
+                None => {
+                    if open_bits == 0 {
+                        n += 1;
+                    }
+                    open_bits = (open_bits + 1) % 8;
+                }
+                Some(k) => {
+                    open_bits = 0;
+                    n += k as u32;
+                }
+            }
+        }
+        n
+    };
+    if bytes > MAX_SUBMODULE_BYTES as u32 {
+        return Err(ConfigError::TooLong {
+            slot: slot.0,
+            bytes,
+            max: MAX_SUBMODULE_BYTES,
+        });
+    }
+    Ok(layout(fields))
+}
+
+/// PROFINET name-of-station rule (DCP): 1..=240 bytes, labels of `[a-z0-9-]`
+/// separated by `.`, no label empty, no label starting/ending with `-`, at least one
+/// label not all digits (a pure number would look like an IP). Uppercase is
+/// lowercased (TIA does the same).
+fn normalize_station_name(s: &str) -> Option<String> {
+    let s = s.to_ascii_lowercase();
+    if s.is_empty() || s.len() > 240 || !s.is_ascii() {
+        return None;
+    }
+    let mut any_non_numeric = false;
+    for label in s.split('.') {
+        if label.is_empty() || label.starts_with('-') || label.ends_with('-') {
+            return None;
+        }
+        if !label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return None;
+        }
+        if !label.bytes().all(|b| b.is_ascii_digit()) {
+            any_non_numeric = true;
+        }
+    }
+    any_non_numeric.then_some(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use FieldType::*;
+
+    fn refs(v: &[(u16, u8, FieldType)]) -> Vec<FieldRef> {
+        v.iter()
+            .map(|&(byte, bit, ty)| FieldRef { byte, bit, ty })
+            .collect()
+    }
+
+    #[test]
+    fn layout_mixes_bools_and_byte_types_in_declaration_order() {
+        let (f, len) = layout(&[Real, Bool, Bool, Int, Bool]);
+        assert_eq!(
+            f,
+            refs(&[
+                (0, 0, Real),
+                (4, 0, Bool),
+                (4, 1, Bool),
+                (5, 0, Int),
+                (7, 0, Bool)
+            ])
+        );
+        assert_eq!(len, 8);
+    }
+
+    #[test]
+    fn layout_packs_bools_eight_per_byte() {
+        assert_eq!(layout(&[Bool; 32]).1, 4);
+        let (f, len) = layout(&[Bool; 9]);
+        assert_eq!(len, 2);
+        assert_eq!(
+            f[8],
+            FieldRef {
+                byte: 1,
+                bit: 0,
+                ty: Bool
+            }
+        );
+        assert_eq!(layout(&[Bool, Int, Bool]).1, 4);
+        assert_eq!(layout(&[]).1, 0);
+    }
+
+    fn sample() -> DeviceConfig {
+        DeviceConfig::builder("pnio-dev")
+            .input(Slot(1), &[Real; 16])
+            .input(Slot(2), &[Bool; 32])
+            .output(Slot(3), &[Real; 16])
+            .output(Slot(4), &[Bool; 32])
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn builder_defaults_and_getters() {
+        let cfg = sample();
+        assert_eq!(cfg.station_name(), "pnio-dev");
+        assert_eq!(cfg.station_type(), "pnio device");
+        assert_eq!((cfg.vendor_id(), cfg.device_id()), (0xFFFF, 0x0001));
+        assert_eq!(cfg.min_device_interval(), 32);
+        assert_eq!(cfg.submodules().len(), 4);
+        assert_eq!(cfg.input_len(Slot(1)), Some(64));
+        assert_eq!(cfg.output_len(Slot(1)), Some(0));
+        assert_eq!(cfg.output_len(Slot(4)), Some(4));
+        assert_eq!(
+            cfg.submodule(Slot(2)).unwrap().direction(),
+            Direction::Input
+        );
+        assert_eq!(
+            cfg.field(Slot(2), Direction::Input, 31),
+            Some(FieldRef {
+                byte: 3,
+                bit: 7,
+                ty: Bool
+            })
+        );
+        assert_eq!(cfg.field(Slot(2), Direction::Input, 32), None);
+        assert_eq!(cfg.field(Slot(2), Direction::Output, 0), None);
+        assert_eq!(cfg.fields(Slot(3), Direction::Output).unwrap().len(), 16);
+        assert_eq!(cfg.fields(Slot(9), Direction::Output), None);
+    }
+
+    #[test]
+    fn slots_are_sorted_regardless_of_insertion_order() {
+        let cfg = DeviceConfig::builder("a")
+            .output(Slot(4), &[Bool])
+            .input(Slot(1), &[Int])
+            .build()
+            .unwrap();
+        let slots: Vec<u16> = cfg.submodules().iter().map(|s| s.slot.0).collect();
+        assert_eq!(slots, vec![1, 4]);
+    }
+
+    #[test]
+    fn mixed_submodule_has_both_directions() {
+        let cfg = DeviceConfig::builder("a")
+            .submodule(Slot(5), "mixed", &[Int, Bool], &[Dint])
+            .build()
+            .unwrap();
+        let sm = cfg.submodule(Slot(5)).unwrap();
+        assert_eq!(sm.direction(), Direction::InputOutput);
+        assert_eq!(
+            (cfg.input_len(Slot(5)), cfg.output_len(Slot(5))),
+            (Some(3), Some(4))
+        );
+        assert_eq!(sm.name, "mixed");
+    }
+
+    #[test]
+    fn every_config_error_is_reported() {
+        let e = |b: DeviceConfigBuilder| b.build().unwrap_err();
+        assert_eq!(
+            e(DeviceConfig::builder("a").input(Slot(0), &[Bool])),
+            ConfigError::SlotZeroReserved
+        );
+        assert_eq!(
+            e(DeviceConfig::builder("a")
+                .input(Slot(1), &[Bool])
+                .output(Slot(1), &[Bool])),
+            ConfigError::DuplicateSlot(1)
+        );
+        assert_eq!(
+            e(DeviceConfig::builder("a").input(Slot(1), &[])),
+            ConfigError::EmptySubmodule(1)
+        );
+        assert_eq!(e(DeviceConfig::builder("a")), ConfigError::NoSubmodule);
+        assert_eq!(
+            e(DeviceConfig::builder("a").input(Slot(1), &[Real; 361])),
+            ConfigError::TooLong {
+                slot: 1,
+                bytes: 1444,
+                max: MAX_SUBMODULE_BYTES
+            }
+        );
+        for bad in ["Edge_01", "-edge", "edge-", "123", "", "a..b", "édge"] {
+            assert_eq!(
+                e(DeviceConfig::builder(bad).input(Slot(1), &[Bool])),
+                ConfigError::BadStationName(bad.to_string()),
+                "{bad}"
+            );
+        }
+        assert!(DeviceConfig::builder("edge-reg-01.plant2")
+            .input(Slot(1), &[Bool])
+            .build()
+            .is_ok());
+        assert_eq!(
+            e(DeviceConfig::builder("a")
+                .min_device_interval(24)
+                .input(Slot(1), &[Bool])),
+            ConfigError::BadInterval(24)
+        );
+        assert_eq!(
+            e(DeviceConfig::builder("a")
+                .identity(0, 1)
+                .input(Slot(1), &[Bool])),
+            ConfigError::BadIdentity
+        );
+    }
+
+    #[test]
+    fn station_name_is_lowercased_on_input() {
+        // TIA lowercases; we accept mixed case and normalize so the DCP answer matches.
+        let cfg = DeviceConfig::builder("Pnio-Dev")
+            .input(Slot(1), &[Bool])
+            .build()
+            .unwrap();
+        assert_eq!(cfg.station_name(), "pnio-dev");
+    }
+}
