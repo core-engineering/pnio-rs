@@ -28,7 +28,7 @@ impl FieldType {
     }
 }
 
-/// Typed process value.
+/// Typed process value, encoded/decoded through the codecs below.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
     Bool(bool),
@@ -36,6 +36,53 @@ pub enum Value {
     Word(u16),
     Dint(i32),
     Real(f32),
+}
+
+impl Value {
+    /// The process type this value carries.
+    pub fn field_type(&self) -> FieldType {
+        match self {
+            Value::Bool(_) => FieldType::Bool,
+            Value::Int(_) => FieldType::Int,
+            Value::Word(_) => FieldType::Word,
+            Value::Dint(_) => FieldType::Dint,
+            Value::Real(_) => FieldType::Real,
+        }
+    }
+
+    /// Write this value at the start of `dst` (byte types, big-endian) or at bit index
+    /// `bit` of `dst` (`Bool`, LSB-first: byte `bit / 8`, mask `1 << (bit % 8)`).
+    pub fn encode(&self, dst: &mut [u8], bit: usize) -> Result<(), CodecError> {
+        fn put<const N: usize>(dst: &mut [u8], bytes: [u8; N]) -> Result<(), CodecError> {
+            if dst.len() < N {
+                return Err(CodecError::TooShort {
+                    need: N,
+                    have: dst.len(),
+                });
+            }
+            dst[..N].copy_from_slice(&bytes);
+            Ok(())
+        }
+        match *self {
+            Value::Bool(b) => set_bit(dst, bit, b),
+            Value::Int(v) => put(dst, encode_i16(v)),
+            Value::Word(v) => put(dst, encode_u16(v)),
+            Value::Dint(v) => put(dst, encode_i32(v)),
+            Value::Real(v) => put(dst, encode_f32(v)),
+        }
+    }
+
+    /// Read a value of type `ty` from the start of `src` (byte types) or from bit
+    /// index `bit` (`Bool`).
+    pub fn decode(ty: FieldType, src: &[u8], bit: usize) -> Result<Value, CodecError> {
+        Ok(match ty {
+            FieldType::Bool => Value::Bool(get_bit(src, bit)?),
+            FieldType::Int => Value::Int(decode_i16(src)?),
+            FieldType::Word => Value::Word(decode_u16(src)?),
+            FieldType::Dint => Value::Dint(decode_i32(src)?),
+            FieldType::Real => Value::Real(decode_f32(src)?),
+        })
+    }
 }
 
 /// Encoding/decoding errors.
@@ -224,5 +271,63 @@ mod tests {
             set_bit(&mut buf, 8, true),
             Err(CodecError::BitOutOfRange { bit: 8, bytes: 1 })
         );
+    }
+
+    #[test]
+    fn value_round_trips_every_type() {
+        let cases = [
+            (Value::Int(-2), FieldType::Int, vec![0xFF, 0xFE]),
+            (Value::Word(0xBEEF), FieldType::Word, vec![0xBE, 0xEF]),
+            (
+                Value::Dint(-1),
+                FieldType::Dint,
+                vec![0xFF, 0xFF, 0xFF, 0xFF],
+            ),
+            (
+                Value::Real(1.0),
+                FieldType::Real,
+                vec![0x3F, 0x80, 0x00, 0x00],
+            ),
+        ];
+        for (v, ty, bytes) in cases {
+            let mut buf = vec![0u8; bytes.len()];
+            v.encode(&mut buf, 0).unwrap();
+            assert_eq!(buf, bytes, "{v:?}");
+            assert_eq!(Value::decode(ty, &buf, 0).unwrap(), v);
+            assert_eq!(v.field_type(), ty);
+        }
+    }
+
+    #[test]
+    fn bool_value_uses_the_bit_argument_lsb_first() {
+        // Bench 2026-08-27 (captures/q-bits): TIA `%Q0.0 := TRUE` alone -> output byte 0x01;
+        // device input byte 0x80 -> `%I0.7` in TIA.
+        let mut buf = [0u8; 1];
+        Value::Bool(true).encode(&mut buf, 0).unwrap();
+        assert_eq!(buf, [0x01]);
+        assert_eq!(
+            Value::decode(FieldType::Bool, &[0x80], 7).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            Value::decode(FieldType::Bool, &[0x80], 6).unwrap(),
+            Value::Bool(false)
+        );
+        // bit 9 lives in byte 1
+        let mut two = [0u8; 2];
+        Value::Bool(true).encode(&mut two, 9).unwrap();
+        assert_eq!(two, [0x00, 0x02]);
+    }
+
+    #[test]
+    fn value_codec_errors_are_typed() {
+        assert!(matches!(
+            Value::Real(0.0).encode(&mut [0u8; 3], 0),
+            Err(CodecError::TooShort { need: 4, have: 3 })
+        ));
+        assert!(matches!(
+            Value::decode(FieldType::Bool, &[0u8; 1], 8),
+            Err(CodecError::BitOutOfRange { bit: 8, bytes: 1 })
+        ));
     }
 }
