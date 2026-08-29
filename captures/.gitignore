@@ -8,3 +8,4 @@ GSDML-*.xml
 # Plan 7 campaign outputs (logs, CSV, 100 MB pcap): local only, summarized in docs/bench-pnet-device.md §6e/§6f.
 plan7-*/
 plan6-*/
+robustness-*/
