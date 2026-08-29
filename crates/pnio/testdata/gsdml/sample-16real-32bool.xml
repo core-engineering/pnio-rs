@@ -31,7 +31,7 @@
             <HardwareRelease Value="1.0"/>
             <SoftwareRelease Value="V0.0.0"/>
           </ModuleInfo>
-          <IOConfigData MaxInputLength="68" MaxOutputLength="68"/>
+          <IOConfigData MaxInputLength="75" MaxOutputLength="75" MaxDataLength="150"/>
           <UseableModules>
             <ModuleItemRef ModuleItemTarget="M1" AllowedInSlots="1"/>
             <ModuleItemRef ModuleItemTarget="M2" AllowedInSlots="2"/>

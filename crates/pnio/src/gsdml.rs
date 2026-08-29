@@ -108,16 +108,22 @@ fn data_type(ty: FieldType) -> &'static str {
 ///   under `DeviceAccessPointItem` either: the reference has none, and the interface
 ///   and port subslot numbers are already carried as `SubslotNumber` attributes on
 ///   `InterfaceSubmoduleItem`/`PortSubmoduleItem` below.
+/// - `IOConfigData`'s `MaxInputLength`/`MaxOutputLength` are the *CR* C-SDU lengths
+///   ([`DeviceConfig::input_cr_len`]/[`DeviceConfig::output_cr_len`]), not the sum of
+///   the submodules' data lengths: TIA counts the IOPS byte that closes each
+///   submodule with data in that direction plus the IOCS byte reserved for each
+///   submodule with data only in the other direction (and the 3-byte DAP IOPS/IOCS),
+///   the same accounting `config::check_total_csdu` guards against the 1440-byte RT
+///   frame budget. The reference file declares flat data sums (`"244"`/`"244"`); this
+///   crate declares the exact CR sizes instead, matching what TIA itself computes.
+///   `MaxDataLength` (present in the V2.4 XSD, optional) is their sum.
 pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
     let mut x = String::with_capacity(16 * 1024);
     let mut texts: Vec<(String, String)> = Vec::new(); // (TextId, Value)
     let n_slots = cfg.submodules().last().map(|s| s.slot.0).unwrap_or(0);
-    let (max_in, max_out) = cfg.submodules().iter().fold((0u32, 0u32), |(i, o), s| {
-        (
-            i + cfg.input_len(s.slot).unwrap_or(0) as u32,
-            o + cfg.output_len(s.slot).unwrap_or(0) as u32,
-        )
-    });
+    let max_in = cfg.input_cr_len();
+    let max_out = cfg.output_cr_len();
+    let max_data = max_in as u32 + max_out as u32;
     let send_clock = if cfg.min_device_interval() < 32 {
         format!("{} 32", cfg.min_device_interval())
     } else {
@@ -158,7 +164,7 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
             <HardwareRelease Value="1.0"/>
             <SoftwareRelease Value="V0.0.0"/>
           </ModuleInfo>
-          <IOConfigData MaxInputLength="{max_in}" MaxOutputLength="{max_out}"/>
+          <IOConfigData MaxInputLength="{max_in}" MaxOutputLength="{max_out}" MaxDataLength="{max_data}"/>
           <UseableModules>
 "#,
         vid = cfg.vendor_id(),
@@ -170,7 +176,8 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
         station = escape(cfg.station_name()),
         order = escape(&meta.order_number),
         max_in = max_in,
-        max_out = max_out
+        max_out = max_out,
+        max_data = max_data
     );
     for s in cfg.submodules() {
         let _ = writeln!(
@@ -394,6 +401,15 @@ mod tests {
         assert_eq!(dap.attribute("DNS_CompatibleName"), Some("pnio-dev"));
         assert_eq!(dap.attribute("MinDeviceInterval"), Some("32"));
         assert_eq!(dap.attribute("PhysicalSlots"), Some("0..4"));
+        // Input/Output CR C-SDU lengths including the IOPS/IOCS bytes (the same
+        // accounting `config::check_total_csdu` guards), not the plain data sums
+        // (64 + 4 = 68): 3 (DAP IOPS) + (64+1) [slot1 in] + (4+1) [slot2 in] +
+        // 1 [slot3 out-only IOCS] + 1 [slot4 out-only IOCS] = 75, symmetrically for
+        // output.
+        let ioconfig = find("IOConfigData")[0];
+        assert_eq!(ioconfig.attribute("MaxInputLength"), Some("75"));
+        assert_eq!(ioconfig.attribute("MaxOutputLength"), Some("75"));
+        assert_eq!(ioconfig.attribute("MaxDataLength"), Some("150"));
         // Required by the PI XSD V2.4 on DeviceAccessPointItem (values as in the
         // rt-labs reference file TIA accepted).
         assert_eq!(dap.attribute("CheckDeviceID_Allowed"), Some("true"));

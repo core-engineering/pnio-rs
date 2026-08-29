@@ -224,6 +224,18 @@ impl DeviceConfig {
         self.index_of(slot).map(|i| self.derived[i].output_len)
     }
 
+    /// Input CR C-SDU length including the IOPS/IOCS bytes, as the controller will
+    /// compute it; ≤ 1440 by construction.
+    pub fn input_cr_len(&self) -> u16 {
+        cr_lengths(&self.submodules, &self.derived).0 as u16
+    }
+
+    /// Output CR C-SDU length including the IOPS/IOCS bytes, as the controller will
+    /// compute it; ≤ 1440 by construction.
+    pub fn output_cr_len(&self) -> u16 {
+        cr_lengths(&self.submodules, &self.derived).1 as u16
+    }
+
     /// The plug-and-play model the `cm` layer validates Connect requests against.
     pub fn model(&self, mac: MacAddr) -> DeviceModel {
         let sm = |subslot: u16, ident: u32, i: u16, o: u16| SubmoduleModel {
@@ -443,13 +455,11 @@ fn is_reserved_port_name(s: &str) -> bool {
     }
 }
 
-/// Reject a total C-SDU (either direction) over the 1440-byte RT frame budget — the
-/// same bound `rt::Layout` builds against, computed the way it lays the CR out: 3
-/// bytes of DAP IOPS/IOCS, then one `(data_len + 1)` per submodule that has data in
-/// that direction plus one IOCS byte per submodule that has data only in the other
-/// direction. Checked once here so `Layout::from_ar` on a config-derived model can
-/// never itself fail with `OutOfBounds`.
-fn check_total_csdu(submodules: &[SubmoduleSpec], derived: &[Derived]) -> Result<(), ConfigError> {
+/// The Input and Output CR C-SDU lengths the way the controller (and `rt::Layout`)
+/// compute them: 3 bytes of DAP IOPS/IOCS, then one `(data_len + 1)` per submodule
+/// that has data in that direction plus one IOCS byte per submodule that has data
+/// only in the other direction.
+fn cr_lengths(submodules: &[SubmoduleSpec], derived: &[Derived]) -> (u32, u32) {
     let (mut input_bytes, mut output_bytes): (u32, u32) = (3, 3);
     for (sm, d) in submodules.iter().zip(derived) {
         let has_in = !sm.inputs.is_empty();
@@ -467,6 +477,14 @@ fn check_total_csdu(submodules: &[SubmoduleSpec], derived: &[Derived]) -> Result
             output_bytes += 1;
         }
     }
+    (input_bytes, output_bytes)
+}
+
+/// Reject a total C-SDU (either direction) over the 1440-byte RT frame budget — the
+/// same bound `rt::Layout` builds against. Checked once here so `Layout::from_ar` on
+/// a config-derived model can never itself fail with `OutOfBounds`.
+fn check_total_csdu(submodules: &[SubmoduleSpec], derived: &[Derived]) -> Result<(), ConfigError> {
+    let (input_bytes, output_bytes) = cr_lengths(submodules, derived);
     if input_bytes > MAX_SUBMODULE_BYTES as u32 {
         return Err(ConfigError::TooLongTotal {
             direction: Direction::Input,
@@ -593,6 +611,18 @@ mod tests {
         assert_eq!(cfg.field(Slot(2), Direction::Output, 0), None);
         assert_eq!(cfg.fields(Slot(3), Direction::Output).unwrap().len(), 16);
         assert_eq!(cfg.fields(Slot(9), Direction::Output), None);
+    }
+
+    #[test]
+    fn cr_lengths_include_the_iops_iocs_bytes() {
+        let cfg = sample();
+        assert_eq!((cfg.input_cr_len(), cfg.output_cr_len()), (75, 75));
+
+        let one_bool = DeviceConfig::builder("a")
+            .input(Slot(1), &[Bool])
+            .build()
+            .unwrap();
+        assert_eq!((one_bool.input_cr_len(), one_bool.output_cr_len()), (5, 4));
     }
 
     #[test]
