@@ -5,3 +5,5 @@
 !.gitignore
 # GSDML of the p-net sample app (rt-labs, GPLv3 repo): test-bench input only, not ours to redistribute.
 GSDML-*.xml
+# Plan 7 campaign outputs (logs, CSV, 100 MB pcap): local only, summarized in docs/bench-pnet-device.md §6e/§6f.
+plan7-*/
