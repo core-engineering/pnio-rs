@@ -25,3 +25,7 @@ roxmltree = "0.20"
 [[example]]
 name = "rt_bringup"
 test = true
+
+[[example]]
+name = "typed_bringup"
+test = true
