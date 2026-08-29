@@ -1,9 +1,9 @@
 //! End-to-end: replay a pcapng holding a real DCP Identify request through the
 //! capture -> eth -> dcp pipeline and check the device produces the golden response.
 
-use profinet_rt::capture::PcapFrames;
-use profinet_rt::dcp::{handle_dcp_frame, DeviceConfig, DeviceProperties};
-use profinet_rt::eth::MacAddr;
+use pnio::capture::PcapFrames;
+use pnio::dcp::{handle_dcp_frame, DeviceConfig, DeviceProperties};
+use pnio::eth::MacAddr;
 use std::io::Cursor;
 
 // Golden Identify REQUEST frame (56 bytes), docs/dcp-golden-frames.md.

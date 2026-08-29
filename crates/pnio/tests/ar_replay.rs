@@ -3,12 +3,12 @@
 mod common;
 
 use common::{golden, RPC_OFF};
-use profinet_rt::cm::model::DeviceModel;
-use profinet_rt::cm::ArState;
-use profinet_rt::dcp::{DeviceConfig, DeviceProperties};
-use profinet_rt::device::{Device, DeviceSetup};
-use profinet_rt::eth::{MacAddr, MockTransport};
-use profinet_rt::rpc::{MockRpcTransport, Uuid};
+use pnio::cm::model::DeviceModel;
+use pnio::cm::ArState;
+use pnio::dcp::{DeviceConfig, DeviceProperties};
+use pnio::device::{Device, DeviceSetup};
+use pnio::eth::{MacAddr, MockTransport};
+use pnio::rpc::{MockRpcTransport, Uuid};
 use std::time::{Duration, Instant};
 
 const MAC: MacAddr = MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]);

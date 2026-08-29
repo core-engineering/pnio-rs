@@ -42,8 +42,8 @@ echo "campaign dir: $OUT"
   uname -r
   cat /proc/cmdline
   cat /sys/devices/system/cpu/isolated
-  journalctl -u profinet-rt-tune -n 200 --no-pager 2>&1 \
-    || systemctl status profinet-rt-tune -l --no-pager 2>&1
+  journalctl -u pnio-tune -n 200 --no-pager 2>&1 \
+    || systemctl status pnio-tune -l --no-pager 2>&1
 } > "$OUT/env.txt" 2>&1 || true
 
 step() { echo "== $(date +%T) $*"; }

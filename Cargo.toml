@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/profinet-rt"]
+members = ["crates/pnio"]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
 rust-version = "1.74"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/core-engineering/profinet-rt"
+repository = "https://github.com/core-engineering/pnio-rs"

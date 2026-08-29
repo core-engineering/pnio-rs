@@ -1,5 +1,5 @@
 [Unit]
-Description=profinet-rt edge tuning (isolated RT core, NIC IRQ affinity)
+Description=pnio edge tuning (isolated RT core, NIC IRQ affinity)
 After=network-online.target
 Wants=network-online.target
 

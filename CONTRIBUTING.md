@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in `profinet-rt`.
+Thanks for your interest in `pnio`.
 
 ## Development
 

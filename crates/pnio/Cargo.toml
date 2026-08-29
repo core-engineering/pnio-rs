@@ -1,5 +1,5 @@
 [package]
-name = "profinet-rt"
+name = "pnio"
 version = "0.0.0"
 description = "PROFINET RT IO-Device stack in pure Rust (community, not affiliated with PI)"
 edition.workspace = true

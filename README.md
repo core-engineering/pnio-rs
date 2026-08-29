@@ -1,6 +1,6 @@
-# profinet-rt
+# pnio
 
-[![CI](https://github.com/core-engineering/profinet-rt/actions/workflows/ci.yml/badge.svg)](https://github.com/core-engineering/profinet-rt/actions/workflows/ci.yml)
+[![CI](https://github.com/core-engineering/pnio-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/core-engineering/pnio-rs/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 ![status](https://img.shields.io/badge/status-pre--1.0%20(WIP)-orange)
 
@@ -61,8 +61,8 @@ S7‑1500 (1515‑2 PN).
 ## Quick Start
 
 ```bash
-git clone https://github.com/core-engineering/profinet-rt.git
-cd profinet-rt
+git clone https://github.com/core-engineering/pnio-rs.git
+cd pnio-rs
 cargo test          # unit suite + capture-replay integration test
 cargo clippy --all-targets -- -D warnings
 ```

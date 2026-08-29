@@ -1,4 +1,4 @@
-//! `profinet-rt` — pure-Rust PROFINET RT IO-Device stack.
+//! `pnio` — pure-Rust PROFINET RT IO-Device stack.
 //!
 //! Community project, NOT affiliated with or endorsed by PROFIBUS & PROFINET
 //! International. "PROFINET" is a registered trademark of PNO.
@@ -6,8 +6,8 @@
 //! # Example: answer a DCP Identify on the device side
 //!
 //! ```
-//! use profinet_rt::dcp::{handle_dcp_frame, DeviceConfig, DeviceProperties};
-//! use profinet_rt::eth::MacAddr;
+//! use pnio::dcp::{handle_dcp_frame, DeviceConfig, DeviceProperties};
+//! use pnio::eth::MacAddr;
 //!
 //! let cfg = DeviceConfig {
 //!     mac: MacAddr([0x02, 0xc0, 0xa8, 0x01, 0x0f, 0x02]),

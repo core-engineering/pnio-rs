@@ -239,7 +239,7 @@ impl RtRunner {
 
         let thread_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
-            .name("profinet-rt".to_string())
+            .name("pnio-rt".to_string())
             .spawn(move || {
                 let _exit = ExitGuard(&thread_shared);
                 run_loop(cfg, transport, timer, &thread_shared);

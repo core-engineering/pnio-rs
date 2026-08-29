@@ -174,7 +174,7 @@ with `tshark.exe` via WSL interop (`/mnt/c/Program Files/Wireshark/tshark.exe`).
 - **Alarm** (Button2): frame ID `0xfc01` Alarm High, Data-RTA (Alarm Notification, Process, slot 1)
   → CPU ACK-RTA → CPU Alarm Ack → device ACK-RTA.
 
-## 6c. HIL — profinet-rt itself as the IO-Device (2026-08-28)
+## 6c. HIL — pnio itself as the IO-Device (2026-08-28)
 
 With Plan 3 (`rpc` + `cm`) implemented, `examples/ar_bringup` replaces `pn_dev` as the peer
 facing the CPU on `eno2` — same topology, same TIA project `PLC_BENCH`, same p-net GSDML
@@ -259,7 +259,7 @@ is specific to an acyclic-only peer and should stop appearing once we produce RT
 the negotiated update time. Minimal `Read` support beyond the PNIORW refusal (index `0xfbff`,
 I&M reads) stays deferred to Plan 5 (see `FOLLOWUPS.md`).
 
-## 6d. HIL — cyclic exchange with profinet-rt (2026-08-28)
+## 6d. HIL — cyclic exchange with pnio (2026-08-28)
 
 With Plan 4 (`rt`) implemented, `examples/rt_bringup` replaces `ar_bringup` as the peer facing
 the CPU: same topology, same TIA project `PLC_BENCH`, same p-net GSDML (station

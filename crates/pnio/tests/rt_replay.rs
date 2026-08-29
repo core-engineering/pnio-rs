@@ -3,12 +3,12 @@
 mod common;
 
 use common::{golden, golden_rt, RPC_OFF, RT_CSDU_OFF};
-use profinet_rt::cm::{ArState, DeviceModel};
-use profinet_rt::dcp::{DeviceConfig, DeviceProperties};
-use profinet_rt::device::{Device, DeviceSetup};
-use profinet_rt::eth::{MacAddr, MockTransport};
-use profinet_rt::rpc::{MockRpcTransport, Uuid};
-use profinet_rt::rt::{
+use pnio::cm::{ArState, DeviceModel};
+use pnio::dcp::{DeviceConfig, DeviceProperties};
+use pnio::device::{Device, DeviceSetup};
+use pnio::eth::{MacAddr, MockTransport};
+use pnio::rpc::{MockRpcTransport, Uuid};
+use pnio::rt::{
     Freshness, IoImage, Layout, RtEngine, RtStats, RxVerdict, Validity, WatchdogState, IOXS_GOOD,
 };
 use std::sync::Arc;

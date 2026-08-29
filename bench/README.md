@@ -62,7 +62,7 @@ On the edge:
 
 ```
 chmod +x ~/bench/*.sh
-sudo cp ~/bench/profinet-rt-tune.service /etc/systemd/system/ && sudo systemctl enable --now profinet-rt-tune
+sudo cp ~/bench/pnio-tune.service /etc/systemd/system/ && sudo systemctl enable --now pnio-tune
 ```
 
 Capabilities (each binary needs them set directly on the file — `sudo`-running the
@@ -107,7 +107,7 @@ Directory layout, one directory per run, timestamped:
 
 ```
 ~/bench/logs/plan7-<YYYYmmdd-HHMMSS>/
-  env.txt                 kernel, cmdline, isolated CPUs, profinet-rt-tune unit status
+  env.txt                 kernel, cmdline, isolated CPUs, pnio-tune unit status
   cyclictest-idle.txt      cyclictest, idle
   load-cyclictest.txt      stress-ng output while cyclictest ran under load
   cyclictest-load.txt      cyclictest, under load

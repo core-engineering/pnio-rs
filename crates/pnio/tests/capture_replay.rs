@@ -1,5 +1,5 @@
 //! Integration test: replays a pcap fixture if present (otherwise skipped).
-use profinet_rt::capture::PcapFrames;
+use pnio::capture::PcapFrames;
 use std::path::Path;
 
 #[test]

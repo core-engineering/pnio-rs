@@ -2,11 +2,11 @@
 //! p-net sample GSDML (station `rt-labs-dev`). Success = a log line `AR state: Data`.
 //! Needs cap_net_raw + cap_net_admin (AF_PACKET) — e.g. `setcap cap_net_raw,cap_net_admin+eip`.
 use clap::Parser;
-use profinet_rt::cm::model::DeviceModel;
-use profinet_rt::dcp::{DeviceConfig, DeviceProperties};
-use profinet_rt::device::{Device, DeviceSetup};
-use profinet_rt::eth::{AfPacketTransport, MacAddr};
-use profinet_rt::rpc::{UdpRpcTransport, Uuid, PNIO_UDP_PORT};
+use pnio::cm::model::DeviceModel;
+use pnio::dcp::{DeviceConfig, DeviceProperties};
+use pnio::device::{Device, DeviceSetup};
+use pnio::eth::{AfPacketTransport, MacAddr};
+use pnio::rpc::{UdpRpcTransport, Uuid, PNIO_UDP_PORT};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -61,7 +61,7 @@ fn main() {
             mac,
             properties: DeviceProperties {
                 name_of_station: a.name.clone(),
-                type_of_station: "profinet-rt bring-up".into(),
+                type_of_station: "pnio bring-up".into(),
                 vendor_id: 0x0493,
                 device_id: 0x0002,
                 device_role: 0x0100,

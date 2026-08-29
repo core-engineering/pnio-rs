@@ -4,12 +4,12 @@
 //! back into its inputs, exactly like `tests/rt_replay.rs` does by hand.
 //! Needs cap_net_raw + cap_net_admin (AF_PACKET) — e.g. `setcap cap_net_raw,cap_net_admin+eip`.
 use clap::Parser;
-use profinet_rt::cm::model::DeviceModel;
-use profinet_rt::dcp::{DeviceConfig, DeviceProperties};
-use profinet_rt::device::{Device, DeviceSetup, RtOptions};
-use profinet_rt::eth::{AfPacketTransport, MacAddr};
-use profinet_rt::rpc::{UdpRpcTransport, Uuid, PNIO_UDP_PORT};
-use profinet_rt::rt::{ImageError, IoImage};
+use pnio::cm::model::DeviceModel;
+use pnio::dcp::{DeviceConfig, DeviceProperties};
+use pnio::device::{Device, DeviceSetup, RtOptions};
+use pnio::eth::{AfPacketTransport, MacAddr};
+use pnio::rpc::{UdpRpcTransport, Uuid, PNIO_UDP_PORT};
+use pnio::rt::{ImageError, IoImage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -96,7 +96,7 @@ fn main() {
         });
         // Threads spawned later (application loop) inherit this; the RT thread sets
         // its own affinity from --cpu.
-        if let Err(e) = profinet_rt::rt::sched::set_affinity(&cpus) {
+        if let Err(e) = pnio::rt::sched::set_affinity(&cpus) {
             log::warn!("app affinity {cpus:?}: {e}");
         }
         if a.cpu.is_none() {
@@ -109,7 +109,7 @@ fn main() {
     // Process-wide: doing it once here is equivalent to the RT thread doing it again
     // (the second `mlockall` is idempotent), but only here can we observe the result.
     let memory_locked = if a.lock_memory {
-        match profinet_rt::rt::sched::lock_memory() {
+        match pnio::rt::sched::lock_memory() {
             Ok(()) => true,
             Err(e) => {
                 log::warn!("mlockall: {e}");
@@ -138,7 +138,7 @@ fn main() {
             mac,
             properties: DeviceProperties {
                 name_of_station: a.name.clone(),
-                type_of_station: "profinet-rt bring-up".into(),
+                type_of_station: "pnio bring-up".into(),
                 vendor_id: 0x0493,
                 device_id: 0x0002,
                 device_role: 0x0100,
@@ -170,7 +170,7 @@ fn main() {
         }),
     };
     let eth = AfPacketTransport::open(&a.iface).expect("AF_PACKET (need cap_net_raw)");
-    eth.attach_filter(&profinet_rt::eth::bpf::acyclic_filter())
+    eth.attach_filter(&pnio::eth::bpf::acyclic_filter())
         .expect("attach acyclic BPF filter");
     let rpc = UdpRpcTransport::bind(std::net::SocketAddr::from(([0, 0, 0, 0], PNIO_UDP_PORT)))
         .expect("udp 34964");
@@ -312,13 +312,8 @@ struct Thresholds {
 }
 
 /// Print the summary and return true on PASS.
-fn verdict(
-    stats: &profinet_rt::rt::RtStats,
-    t: &Thresholds,
-    memory_locked: bool,
-    secs: u64,
-) -> bool {
-    use profinet_rt::rt::Histogram;
+fn verdict(stats: &pnio::rt::RtStats, t: &Thresholds, memory_locked: bool, secs: u64) -> bool {
+    use pnio::rt::Histogram;
     let s = stats.snapshot();
     let line = |name: &str, h: &Histogram| {
         eprintln!(
@@ -401,7 +396,7 @@ fn open_csv(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     Ok(f)
 }
 
-fn write_hist_csv(path: &std::path::Path, stats: &profinet_rt::rt::RtStats) -> std::io::Result<()> {
+fn write_hist_csv(path: &std::path::Path, stats: &pnio::rt::RtStats) -> std::io::Result<()> {
     use std::io::Write;
     let (a, b, c) = (
         stats.tick_lateness.snapshot(),
@@ -410,7 +405,7 @@ fn write_hist_csv(path: &std::path::Path, stats: &profinet_rt::rt::RtStats) -> s
     );
     let mut f = std::fs::File::create(path)?;
     writeln!(f, "bin_us,tick_lateness,cycle_work,rx_interval")?;
-    for i in 0..profinet_rt::rt::HIST_BINS {
+    for i in 0..pnio::rt::HIST_BINS {
         writeln!(f, "{i},{},{},{}", a.bins[i], b.bins[i], c.bins[i])?;
     }
     Ok(())
