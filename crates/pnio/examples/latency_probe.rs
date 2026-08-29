@@ -182,7 +182,8 @@ fn main() {
                         ob_gap += 1;
                         let delta = ob.wrapping_sub(ob_last);
                         if delta != 0 {
-                            ob_gap_hist.record(u64::from(ob_gap) * 1000);
+                            // +1: the iteration that observes the change belongs to the gap.
+                            ob_gap_hist.record(u64::from(ob_gap + 1) * 1000);
                             if delta >= 2 {
                                 ob_jumps += 1;
                             }
