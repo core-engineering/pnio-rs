@@ -44,6 +44,9 @@ pub enum ApiError {
     },
     #[error("slot {slot} has no {expected:?} data")]
     WrongDirection { slot: u16, expected: Direction },
+    /// Can still occur for a few microseconds after [`IoDevice::ar_state`] first
+    /// reports [`ArState::Data`] — see that method's doc. Poll [`IoDevice::ready`]
+    /// instead of `ar_state() == Data` to avoid it.
     #[error("no I/O layout yet: the AR has not reached Data")]
     NoLayoutYet,
     #[error(transparent)]
@@ -257,12 +260,24 @@ impl IoDevice {
     pub fn image(&self) -> Arc<IoImage> {
         self.image.clone()
     }
+    /// The AR's current state. Note: `ar_state() == ArState::Data` does *not* imply
+    /// the I/O image is laid out yet — `Device::dispatch` reports the `Data`
+    /// notification (what this reads) *before* calling `start_runner` (which rebuilds
+    /// the image) — so a reader/writer can still see [`ApiError::NoLayoutYet`] for a
+    /// few microseconds after this first reports `Data`. Use [`IoDevice::ready`] to
+    /// wait for both.
     pub fn ar_state(&self) -> ArState {
         self.shared
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .0
+    }
+    /// `ar_state() == Data` *and* the I/O image has actually been rebuilt from the
+    /// negotiated layout — the condition a caller should poll for before the first
+    /// read/write, since `ar_state()` alone can transiently lag it (see its doc).
+    pub fn ready(&self) -> bool {
+        self.ar_state() == ArState::Data && !self.image.cells().is_empty()
     }
     pub fn last_abort(&self) -> Option<AbortReason> {
         self.shared
@@ -430,6 +445,15 @@ impl IoDevice {
         self.write(s, i, Value::Real(v))
     }
     /// Modify several fields of one input slot and publish them in one go (same frame).
+    ///
+    /// `f` runs on a scratch copy of the slot's working buffer, not the buffer in
+    /// place: on `Err` (or a panicking unwind out of `f`) the working copy — and so
+    /// the image — is left exactly as it was before the call, never partially
+    /// overwritten by whichever fields `f` got to before failing. The per-slot lock
+    /// is held for the whole call, unlike [`IoImage::read_outputs`]'s callback (which
+    /// releases its locks first specifically so it can be reentered): `f` must not
+    /// call back into this `IoDevice` for `slot` (another `with_inputs`/`write_*` on
+    /// it), since `std::sync::Mutex` is not reentrant.
     pub fn with_inputs<T>(
         &self,
         slot: Slot,
@@ -445,12 +469,14 @@ impl IoDevice {
                 expected: sm.direction(),
             })?;
         let mut buf = self.inputs[i].lock().unwrap_or_else(|e| e.into_inner());
+        let mut scratch = buf.clone();
         let mut w = SlotWriter {
             slot,
             fields,
-            bytes: &mut buf,
+            bytes: &mut scratch,
         };
         let out = f(&mut w)?;
+        *buf = scratch;
         self.image.write_inputs(slot.0, 1, &buf)?;
         Ok(out)
     }
@@ -600,11 +626,20 @@ impl SlotWriter<'_> {
 }
 
 fn read_mac(iface: &str) -> Result<MacAddr, ApiError> {
-    let s = std::fs::read_to_string(format!("/sys/class/net/{iface}/address"))?;
+    let path = format!("/sys/class/net/{iface}/address");
+    let s = std::fs::read_to_string(&path)
+        .map_err(|e| ApiError::Io(std::io::Error::new(e.kind(), format!("{path}: {e}"))))?;
+    let parts: Vec<&str> = s.trim().split(':').collect();
+    if parts.len() != 6 {
+        return Err(ApiError::Io(std::io::Error::other(format!(
+            "{iface}: not a MAC address (expected 6 colon-separated hex octets, got {}): {s:?}",
+            parts.len()
+        ))));
+    }
     let mut m = [0u8; 6];
-    for (i, p) in s.trim().split(':').enumerate().take(6) {
+    for (i, p) in parts.iter().enumerate() {
         m[i] = u8::from_str_radix(p, 16)
-            .map_err(|_| std::io::Error::other(format!("bad mac {s:?}")))?;
+            .map_err(|_| ApiError::Io(std::io::Error::other(format!("{iface}: bad mac {s:?}"))))?;
     }
     Ok(MacAddr(m))
 }
@@ -745,20 +780,11 @@ mod tests {
         (dev, eth_acyclic)
     }
 
-    /// Waits for the AR to reach `st`. For `Data`, also waits for the image to
-    /// actually be rebuilt from the negotiated layout: `Device::dispatch` reports the
-    /// `Data` notify (which is what `ar_state()` reflects) *before* calling
-    /// `start_runner` (which rebuilds the image), so a caller that only waited for
-    /// `ar_state() == Data` could still see `ApiError::NoLayoutYet` for a few
-    /// microseconds after this returns.
-    fn wait_for(dev: &IoDevice, st: ArState) {
+    /// Waits for `dev.ready()` — AR at `Data` *and* the image actually laid out.
+    /// `ar_state() == Data` alone is not enough: see its doc.
+    fn wait_until_ready(dev: &IoDevice) {
         let t0 = std::time::Instant::now();
-        loop {
-            let ready =
-                dev.ar_state() == st && (st != ArState::Data || !dev.image().cells().is_empty());
-            if ready {
-                break;
-            }
+        while !dev.ready() {
             assert!(
                 t0.elapsed() < Duration::from_secs(2),
                 "AR stuck in {:?}",
@@ -766,6 +792,20 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// `rt_snapshot_inputs` is non-blocking (`try_lock`) and can lose a race with the
+    /// RT thread's own snapshot of the same buffer; retry rather than assert on the
+    /// first attempt.
+    fn snapshot_inputs_retry(image: &IoImage, len: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; len];
+        for _ in 0..50 {
+            if image.rt_snapshot_inputs(&mut buf) {
+                return buf;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("rt_snapshot_inputs never got the lock");
     }
 
     #[test]
@@ -796,7 +836,7 @@ mod tests {
     #[test]
     fn typed_errors_come_from_the_config_table() {
         let (dev, _eth) = started();
-        wait_for(&dev, ArState::Data);
+        wait_until_ready(&dev);
         assert_eq!(
             dev.read_real(Slot(9), 0).unwrap_err(),
             ApiError::UnknownSlot(9)
@@ -885,7 +925,7 @@ mod tests {
     #[test]
     fn writes_publish_the_whole_submodule_and_reads_decode_cpu_frames() {
         let (dev, eth) = started();
-        wait_for(&dev, ArState::Data);
+        wait_until_ready(&dev);
         let cfg = sample();
 
         // Group write: two fields of slot 1, one publish.
@@ -898,8 +938,7 @@ mod tests {
         let image = dev.image();
         let params = dev.ar_params().unwrap();
         let layout = Layout::from_ar(&params, &cfg.model(DEV)).unwrap();
-        let mut buf = vec![0u8; 80];
-        assert!(image.rt_snapshot_inputs(&mut buf));
+        let buf = snapshot_inputs_retry(&image, layout.input_cr.data_length);
         let s1_off = layout
             .input_cr
             .objects
@@ -950,15 +989,64 @@ mod tests {
         assert_eq!(snap.real(0).unwrap(), 1.0);
         assert_eq!(dev.read_real(Slot(3), 0).unwrap(), 1.0);
         assert_eq!(dev.freshness(), Freshness::Fresh);
+        // Bit 7 of slot 4 byte 3 (field index 31) was set; its neighbor (index 30,
+        // bit 6) must still read false — proves the bit write didn't spill over.
+        assert!(dev.read_bool(Slot(4), 31).unwrap());
+        assert!(!dev.read_bool(Slot(4), 30).unwrap());
         stop_feed.store(true, Ordering::Relaxed);
         feeder.join().unwrap();
         dev.stop().unwrap();
     }
 
     #[test]
+    fn with_inputs_rolls_back_the_working_copy_on_error() {
+        let (dev, _eth) = started();
+        wait_until_ready(&dev);
+        let cfg = sample();
+        let params = dev.ar_params().unwrap();
+        let layout = Layout::from_ar(&params, &cfg.model(DEV)).unwrap();
+        let s1_off = layout
+            .input_cr
+            .objects
+            .iter()
+            .find(|o| o.slot == 1)
+            .unwrap()
+            .data_off;
+
+        // Field 0 succeeds, field 99 (out of slot 1's 16 REALs) fails: the whole
+        // closure must be rejected without publishing field 0's write.
+        let err = dev
+            .with_inputs(Slot(1), |w| {
+                w.real(0, 1.0)?;
+                w.real(99, 0.0)
+            })
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ApiError::IndexOutOfRange {
+                slot: 1,
+                index: 99,
+                len: 16
+            }
+        );
+
+        // A later, independent write to a different field of the same slot must see
+        // the working copy exactly as it was before the failed attempt: field 0
+        // still 0.0 (not the 1.0 the failed closure set on its scratch copy), field 1
+        // now 2.0.
+        dev.write_real(Slot(1), 1, 2.0).unwrap();
+        let image = dev.image();
+        let buf = snapshot_inputs_retry(&image, layout.input_cr.data_length);
+        let s1 = &buf[s1_off..s1_off + 64];
+        assert_eq!(&s1[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&s1[4..8], &[0x40, 0x00, 0x00, 0x00]);
+        dev.stop().unwrap();
+    }
+
+    #[test]
     fn drop_without_stop_does_not_panic() {
         let (dev, _eth) = started();
-        wait_for(&dev, ArState::Data);
+        wait_until_ready(&dev);
         drop(dev);
     }
 }
