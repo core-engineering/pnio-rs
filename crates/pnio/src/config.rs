@@ -67,16 +67,30 @@ pub enum ConfigError {
     TooLong { slot: u16, bytes: u32, max: u16 },
     #[error("station name {0:?} is not a valid PROFINET name of station")]
     BadStationName(String),
-    #[error("min device interval {0} is not one of 8, 16, 32, 64, 128")]
+    #[error("min device interval {0} is not one of 16, 32")]
     BadInterval(u16),
     #[error("vendor id must be non-zero")]
     BadIdentity,
+    #[error(
+        "total {direction:?} C-SDU is {bytes} bytes, exceeding the {max}-byte RT frame budget"
+    )]
+    TooLongTotal {
+        direction: Direction,
+        bytes: u32,
+        max: u16,
+    },
 }
 
 /// Lay out `fields` per the declaration-order rule: `Bool`s pack 8 per byte
 /// (LSB-first), a `Bool` after a byte-typed field opens a new byte, byte types are
 /// placed back-to-back big-endian with no padding. Returns the refs and the byte
 /// length.
+///
+/// This is the raw packing rule with no size limit of its own — meaningful as a
+/// submodule's actual on-wire layout only once its byte length has been checked
+/// against [`MAX_SUBMODULE_BYTES`], which [`DeviceConfigBuilder::build`] does via
+/// `checked_layout` before ever storing a [`FieldRef`] table. Called directly (as
+/// the tests below do) it will happily lay out an oversized field list.
 pub fn layout(fields: &[FieldType]) -> (Vec<FieldRef>, u16) {
     let mut refs = Vec::with_capacity(fields.len());
     let mut next_byte: u32 = 0; // first free byte
@@ -134,6 +148,11 @@ pub struct DeviceConfig {
     derived: Vec<Derived>, // parallel to `submodules`
 }
 
+/// Accumulates a device declaration (station name, identity, interval, submodules)
+/// for [`DeviceConfigBuilder::build`] to validate and derive into a [`DeviceConfig`].
+/// Nothing here is checked until `build()` runs — a builder can be composed freely
+/// (any order, any number of `input`/`output`/`submodule` calls) and only fails, all
+/// at once, on `build()`.
 pub struct DeviceConfigBuilder {
     station_name: String,
     station_type: String,
@@ -290,6 +309,10 @@ impl DeviceConfigBuilder {
         self.device_id = device_id;
         self
     }
+    /// The AR's cyclic update time, in units of 31.25 µs: `16` = 500 µs, `32` = 1 ms
+    /// (the default). No other value is accepted — `8` would need a busy-poll device
+    /// we don't implement, and `64`/`128` are not send clocks this crate tests or
+    /// declares in the GSDML.
     pub fn min_device_interval(mut self, v: u16) -> Self {
         self.min_device_interval = v;
         self
@@ -318,10 +341,17 @@ impl DeviceConfigBuilder {
         self
     }
 
+    /// Validates the declaration and derives the per-submodule field tables. Runs, in
+    /// order: the station-name rule, `min_device_interval`, `vendor_id != 0`, at
+    /// least one submodule, then per submodule (in ascending slot order) slot != 0,
+    /// no duplicate slot, not empty, each direction's byte layout within
+    /// [`MAX_SUBMODULE_BYTES`] — and finally, once every submodule's layout is known,
+    /// the *total* C-SDU guard ([`ConfigError::TooLongTotal`]) against the same
+    /// 1440-byte RT frame budget, per direction across all submodules.
     pub fn build(self) -> Result<DeviceConfig, ConfigError> {
         let station_name = normalize_station_name(&self.station_name)
             .ok_or_else(|| ConfigError::BadStationName(self.station_name.clone()))?;
-        if !matches!(self.min_device_interval, 8 | 16 | 32 | 64 | 128) {
+        if !matches!(self.min_device_interval, 16 | 32) {
             return Err(ConfigError::BadInterval(self.min_device_interval));
         }
         if self.vendor_id == 0 {
@@ -352,6 +382,7 @@ impl DeviceConfigBuilder {
                 output_len,
             });
         }
+        check_total_csdu(&submodules, &derived)?;
         Ok(DeviceConfig {
             station_name,
             station_type: self.station_type,
@@ -396,13 +427,71 @@ fn checked_layout(slot: Slot, fields: &[FieldType]) -> Result<(Vec<FieldRef>, u1
     Ok(layout(fields))
 }
 
+/// True if `s` is one of the DCP-reserved auto-generated port-name forms
+/// `port-xyz` or `port-xyz-abcde` (`x`,`y`,`z`,`a`..`e` decimal digits) — those are
+/// assigned automatically to a device's ports and are never valid station names.
+fn is_reserved_port_name(s: &str) -> bool {
+    fn all_digits(s: &str, len: usize) -> bool {
+        s.len() == len && s.bytes().all(|b| b.is_ascii_digit())
+    }
+    let Some(rest) = s.strip_prefix("port-") else {
+        return false;
+    };
+    match rest.split_once('-') {
+        None => all_digits(rest, 3),
+        Some((xyz, abcde)) => all_digits(xyz, 3) && all_digits(abcde, 5),
+    }
+}
+
+/// Reject a total C-SDU (either direction) over the 1440-byte RT frame budget — the
+/// same bound `rt::Layout` builds against, computed the way it lays the CR out: 3
+/// bytes of DAP IOPS/IOCS, then one `(data_len + 1)` per submodule that has data in
+/// that direction plus one IOCS byte per submodule that has data only in the other
+/// direction. Checked once here so `Layout::from_ar` on a config-derived model can
+/// never itself fail with `OutOfBounds`.
+fn check_total_csdu(submodules: &[SubmoduleSpec], derived: &[Derived]) -> Result<(), ConfigError> {
+    let (mut input_bytes, mut output_bytes): (u32, u32) = (3, 3);
+    for (sm, d) in submodules.iter().zip(derived) {
+        let has_in = !sm.inputs.is_empty();
+        let has_out = !sm.outputs.is_empty();
+        if has_in {
+            input_bytes += d.input_len as u32 + 1;
+        }
+        if has_out {
+            output_bytes += d.output_len as u32 + 1;
+        }
+        if has_out {
+            input_bytes += 1; // IOCS point in the CR that doesn't carry this submodule's data
+        }
+        if has_in {
+            output_bytes += 1;
+        }
+    }
+    if input_bytes > MAX_SUBMODULE_BYTES as u32 {
+        return Err(ConfigError::TooLongTotal {
+            direction: Direction::Input,
+            bytes: input_bytes,
+            max: MAX_SUBMODULE_BYTES,
+        });
+    }
+    if output_bytes > MAX_SUBMODULE_BYTES as u32 {
+        return Err(ConfigError::TooLongTotal {
+            direction: Direction::Output,
+            bytes: output_bytes,
+            max: MAX_SUBMODULE_BYTES,
+        });
+    }
+    Ok(())
+}
+
 /// PROFINET name-of-station rule (DCP): 1..=240 bytes, labels of `[a-z0-9-]`
 /// separated by `.`, no label empty, no label starting/ending with `-`, at least one
-/// label not all digits (a pure number would look like an IP). Uppercase is
-/// lowercased (TIA does the same).
+/// label not all digits (a pure number would look like an IP), not a reserved
+/// `port-xyz`/`port-xyz-abcde` auto-port name. Uppercase is lowercased (TIA does the
+/// same).
 fn normalize_station_name(s: &str) -> Option<String> {
     let s = s.to_ascii_lowercase();
-    if s.is_empty() || s.len() > 240 || !s.is_ascii() {
+    if s.is_empty() || s.len() > 240 || !s.is_ascii() || is_reserved_port_name(&s) {
         return None;
     }
     let mut any_non_numeric = false;
@@ -558,7 +647,18 @@ mod tests {
                 max: MAX_SUBMODULE_BYTES
             }
         );
-        for bad in ["Edge_01", "-edge", "edge-", "123", "", "a..b", "édge"] {
+        for bad in [
+            "Edge_01",
+            "-edge",
+            "edge-",
+            "123",
+            "",
+            "a..b",
+            "édge",
+            "123.456",
+            "port-001",
+            "port-001-12345",
+        ] {
             assert_eq!(
                 e(DeviceConfig::builder(bad).input(Slot(1), &[Bool])),
                 ConfigError::BadStationName(bad.to_string()),
@@ -566,6 +666,10 @@ mod tests {
             );
         }
         assert!(DeviceConfig::builder("edge-reg-01.plant2")
+            .input(Slot(1), &[Bool])
+            .build()
+            .is_ok());
+        assert!(DeviceConfig::builder("port-a")
             .input(Slot(1), &[Bool])
             .build()
             .is_ok());
@@ -577,10 +681,37 @@ mod tests {
         );
         assert_eq!(
             e(DeviceConfig::builder("a")
+                .min_device_interval(64)
+                .input(Slot(1), &[Bool])),
+            ConfigError::BadInterval(64)
+        );
+        assert_eq!(
+            e(DeviceConfig::builder("a")
                 .identity(0, 1)
                 .input(Slot(1), &[Bool])),
             ConfigError::BadIdentity
         );
+    }
+
+    #[test]
+    fn total_csdu_over_1440_bytes_is_rejected() {
+        // Two 720-byte input slots: 3 (DAP IOPS) + (720+1)*2 = 1445 > 1440.
+        let e = DeviceConfig::builder("a")
+            .input(Slot(1), &[Real; 180])
+            .input(Slot(2), &[Real; 180])
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            e,
+            ConfigError::TooLongTotal {
+                direction: Direction::Input,
+                bytes: 1445,
+                max: MAX_SUBMODULE_BYTES,
+            }
+        );
+        // The sample config (75/75 bytes, see layout_from_ar_accepts_the_derived_model)
+        // stays well under the guard.
+        assert!(sample().input_len(Slot(1)).is_some());
     }
 
     #[test]
