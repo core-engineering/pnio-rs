@@ -21,17 +21,22 @@ Non-blocking findings for Plan 1, to be integrated into the briefs of the releva
   AF_PACKET backend — cross-module consistency done.
 
 ## For Plan 6 (`config` / GSDML / typed API)
-- ✅ **RESOLVED (bench 2026-08-27)** — **BOOL bit ordering (LSB-first) verified on the wire**
+- ✅ **RESOLVED (Plan 6, 2026-08-29)** — **BOOL bit ordering (LSB-first) verified on the wire**
   with a real S7-1500 (1515-2 PN FW V2.9.4) ↔ p-net device: `%Q0.0 := TRUE` alone → output
   byte `0x01` in the RTC1 frame (`captures/q-bits-2026-08-27-165102.pcapng`); device input
   byte `0x80` (Button1) → `%I0.7 = TRUE` in TIA (`captures/io-bits-2026-08-27-164448.pcapng`).
-  `data::get_bit`/`set_bit` (`1 << (i % 8)`) is correct. Still to do in Plan 6: add a test
-  vector from the capture, and check the declaration→(byte, bit) mapping for our own GSDML.
-- **`data::Value` pending use**: the `Value` enum is a forward declaration (no
-  constructor/consumer yet). Plan 6 must either wire it up (typed dispatch
-  `encode(Value)->bytes` / `decode(FieldType,&[u8])->Value`) or remove it (YAGNI).
-- **`Field`/`FieldType` naming consistency**: the API sketch in the spec (§5.4) uses
-  `Field::Real`, the code uses `FieldType::Real`. To be reconciled in Plan 6.
+  `data::get_bit`/`set_bit` (`1 << (i % 8)`) is correct. The `q-bits` capture is now a test
+  vector (`%Q0.0` → `0x01`, `0x80` → bit 7) and `config`'s own tests check the
+  declaration→(byte, bit) mapping for our GSDML (`layout_mixes_bools_and_byte_types_in_declaration_order`,
+  `layout_packs_bools_eight_per_byte`, `crates/pnio/src/config.rs`).
+- ✅ **RESOLVED (Plan 6, 2026-08-29)** — **`data::Value` wired up**: `Value::encode(&self, dst:
+  &mut [u8], bit: usize)` / `Value::decode(ty: FieldType, src: &[u8], bit: usize)` /
+  `Value::field_type()` are the typed dispatch `api` and `gsdml` build on (`crates/pnio/src/data.rs`).
+- ✅ **RESOLVED (Plan 6, 2026-08-29)** — **`Field`/`FieldType` naming reconciled**: the code's
+  name, `FieldType`, is the one kept everywhere (`config` re-exports `data::FieldType` as-is;
+  `config::FieldRef { byte, bit, ty: FieldType }` is the per-field byte/bit table entry). The
+  spec §5.4 sketch's `Field` naming was the one to give way; this doc set (`docs/gsdml.md`,
+  `README.md`) uses `FieldType` throughout.
 
 ## Doc
 - ✅ **RESOLVED (merge f4de284)** — **`recv` contract**: the `EthTransport::recv` trait doc now
@@ -183,3 +188,62 @@ picked up as noted:
   noted for anyone re-running the campaign without `sudo`.
 - **`PACKET_AUXDATA`** (RX VLAN priority) — still not implemented (carried over from Plan
   3/4); not needed to operate, revisit only if a consumer needs the received VLAN priority.
+
+## From Plan 6 (`config` / GSDML / `api`)
+
+Open points recorded while implementing the typed configuration, generated GSDML and device
+facade (`docs/gsdml.md`, `docs/bench-pnet-device.md` §6g):
+
+- **XSD vendoring**: the PI GSDML v2.4 XSD is not in the repo (its licence has not been
+  checked); the validation recipe in `docs/gsdml.md` relies on a local TIA Portal install
+  instead. Vendor it (once cleared) and wire a CI step that runs the golden GSDML through it on
+  every change to `gsdml::render`.
+- **V2.31+ profile**: `LLDP_NoD_Supported`, `PTP_BoundarySupported`/`DCP_BoundarySupported`,
+  `ResetToFactoryModes`, `CertificationInfo` all require `PNIO_Version >= "V2.31"` and none are
+  declared today because the device implements none of them (see `docs/gsdml.md#validation`).
+  Bump the declared `PNIO_Version` and add these attributes together, as one version-bump
+  change, once LLDP/PTP-DCP-boundary/ResetToFactory support lands.
+- **`CertificationInfo` / other optional DAP attributes**: beyond the V2.31+ mandates above,
+  the v2.4 XSD defines further optional `DeviceAccessPointItem` attributes (certification
+  claims, additional capability flags) this crate does not render any of; revisit once there is
+  something honest to declare through them.
+- **`with_inputs` scratch allocation per call**: `IoDevice::with_inputs` clones the slot's
+  working buffer into a scratch copy on every call (`crates/pnio/src/api.rs`) so a failed/
+  panicking closure can't leave a partial write behind. A persistent per-slot scratch buffer
+  (reused across calls, cleared before each) would drop that allocation from the hot path;
+  not done because no campaign has shown it matters yet.
+- **Duplicated acyclic loop in `api`**: `run_publishing_params` (`crates/pnio/src/api.rs`)
+  reimplements `Device::run`'s 200 ms-poll loop just to observe `ar_params()` on every state
+  change. A `Device::run_with` hook (a callback invoked after each `step`) would let `IoDevice`
+  reuse `Device::run` directly instead of duplicating its loop.
+- **`ApplicationLengthIncludesIOxS`/`MaxApplication*Length` not declared**: `gsdml::render`
+  emits `IOConfigData`'s `MaxInputLength`/`MaxOutputLength`/`MaxDataLength` (the CR C-SDU
+  lengths, see `docs/gsdml.md#validation`) but not these related, optional v2.4 XSD attributes;
+  revisit if a controller or checker ever expects them.
+- **Mixed-submodule branch of the total-C-SDU guard untested**: `config::check_total_csdu`'s
+  accounting for a submodule that has data in *both* directions (the `has_in && has_out` case
+  in `cr_lengths`) is exercised by `mixed_submodule_has_both_directions` for the plain field
+  table, but no test drives it specifically through the `TooLongTotal` guard itself. Add one.
+- **`ProfinetDevice` facade (approach 2)**: the spec's alternative facade that absorbs
+  `Device`/the threads entirely, rather than `IoDevice`'s thin wrapper — out of scope for Plan 6
+  (§2). Revisit if `IoDevice::start_with`'s transport/runner-factory hooks prove insufficient
+  for an embedding use case.
+- **Application config file**: `DeviceConfig` is Rust-builder-only by design (spec §3: "same
+  object renders the GSDML → no drift"); a TOML/YAML declaration format, parsed into the same
+  builder, stays a possible follow-up if a deployment needs to configure the device without
+  recompiling it.
+- **Official Vendor ID**: `0xFFFF`/`0x0001` stay the only identity this crate ships (see
+  `docs/gsdml.md#identity-caveat`); obtaining a PI-assigned Vendor ID is the user's step, not
+  this crate's.
+- **`read_mac` assumes standard 2-hex-digit octets**: `api::read_mac`
+  (`crates/pnio/src/api.rs`) splits `/sys/class/net/<iface>/address` on `:` and parses each part
+  with `u8::from_str_radix`, which happens to accept a single hex digit per octet (e.g. `"8"`
+  parses the same as `"08"`) without it being a deliberate, tested contract — Linux always
+  reports zero-padded two-digit octets in practice, so this has not mattered, but the function's
+  behavior on a non-standard `address` file is not specified or tested.
+- **`stop()` swallows a thread panic into `Ok(())`**: `IoDevice::stop`'s `h.join()` failure path
+  (`crates/pnio/src/api.rs`) already logs (`log::error!`) and returns `Ok(())` on a panicking
+  acyclic thread rather than propagating the panic — a deliberate simplification so a caller
+  never has to handle a `Box<dyn Any>` panic payload, but it means a caller can't distinguish "a
+  clean stop" from "the RT thread panicked mid-run" through the `Result` alone. Revisit if a
+  caller needs that distinction.

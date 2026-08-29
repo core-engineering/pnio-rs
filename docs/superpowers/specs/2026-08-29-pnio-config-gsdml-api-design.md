@@ -1,6 +1,7 @@
 # Spec — Plan 6: `config` + `gsdml` + `api` (typed configuration, generated GSDML, device facade)
 
-Date: 2026-08-29. Status: design validated in brainstorm, awaiting user review.
+Date: 2026-08-29. Status: implemented (feat/config-gsdml-api), HIL 2026-08-29 — see
+`docs/bench-pnet-device.md` §6g.
 Parent: [`2026-06-25-profinet-rt-device-design.md`](2026-06-25-profinet-rt-device-design.md) §5.1 (`config`, `api` modules), §5.3 (data types), §5.4 (API sketch), §7 (deliverables: example GSDML 16 `REAL` + 32 `BOOL`).
 Builds on Plans 3, 4 and 7: `cm::DeviceModel` (slots/submodules/idents/lengths) is already generic, `rt::IoImage` gives per-submodule consistent reads/writes, `device::Device` runs the acyclic loop, `rt::RtOptions` the RT thread. The crate is `pnio`, repository `core-engineering/pnio-rs`.
 
