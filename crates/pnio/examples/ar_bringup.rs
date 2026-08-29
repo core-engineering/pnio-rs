@@ -3,7 +3,7 @@
 //! Needs cap_net_raw + cap_net_admin (AF_PACKET) — e.g. `setcap cap_net_raw,cap_net_admin+eip`.
 use clap::Parser;
 use pnio::cm::model::DeviceModel;
-use pnio::dcp::{DeviceConfig, DeviceProperties};
+use pnio::dcp::{DcpConfig, DeviceProperties};
 use pnio::device::{Device, DeviceSetup};
 use pnio::eth::{AfPacketTransport, MacAddr};
 use pnio::rpc::{UdpRpcTransport, Uuid, PNIO_UDP_PORT};
@@ -57,7 +57,7 @@ fn main() {
     let mac = mac_of(&a.iface);
     let ip = a.ip.octets();
     let setup = DeviceSetup {
-        dcp: DeviceConfig {
+        dcp: DcpConfig {
             mac,
             properties: DeviceProperties {
                 name_of_station: a.name.clone(),

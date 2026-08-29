@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::cm::model::DeviceModel;
 use crate::cm::{AbortReason, ArParams, ArState, Cm, CmOutput};
-use crate::dcp::{handle_dcp_frame, DeviceConfig as DcpDeviceConfig};
+use crate::dcp::{handle_dcp_frame, DcpConfig};
 use crate::eth::poll::wait_any_readable;
 use crate::eth::{EthTransport, TransportError};
 use crate::rpc::{RpcError, RpcTransport, Uuid};
@@ -45,7 +45,7 @@ pub struct RtOptions {
 /// configuration (if any) started once the AR reaches `Data`.
 #[derive(Debug, Clone)]
 pub struct DeviceSetup {
-    pub dcp: DcpDeviceConfig,
+    pub dcp: DcpConfig,
     pub model: DeviceModel,
     pub activity_seed: Uuid,
     pub rt: Option<RtOptions>,
@@ -378,7 +378,7 @@ impl<E: EthTransport, R: RpcTransport> Drop for Device<E, R> {
 mod tests {
     use super::*;
     use crate::cm::model::DeviceModel;
-    use crate::dcp::{DeviceConfig, DeviceProperties};
+    use crate::dcp::{DcpConfig, DeviceProperties};
     use crate::eth::{MacAddr, MockTransport};
     use crate::rpc::{MockRpcTransport, Uuid};
     #[cfg(target_os = "linux")]
@@ -393,7 +393,7 @@ mod tests {
 
     fn setup() -> DeviceSetup {
         DeviceSetup {
-            dcp: DeviceConfig {
+            dcp: DcpConfig {
                 mac: MAC,
                 properties: DeviceProperties {
                     name_of_station: "rt-labs-dev".into(),

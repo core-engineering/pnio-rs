@@ -5,7 +5,7 @@ mod common;
 use common::{golden, RPC_OFF};
 use pnio::cm::model::DeviceModel;
 use pnio::cm::ArState;
-use pnio::dcp::{DeviceConfig, DeviceProperties};
+use pnio::dcp::{DcpConfig, DeviceProperties};
 use pnio::device::{Device, DeviceSetup};
 use pnio::eth::{MacAddr, MockTransport};
 use pnio::rpc::{MockRpcTransport, Uuid};
@@ -16,7 +16,7 @@ const MAC: MacAddr = MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]);
 #[test]
 fn reference_exchange_replays_byte_exact() {
     let setup = DeviceSetup {
-        dcp: DeviceConfig {
+        dcp: DcpConfig {
             mac: MAC,
             properties: DeviceProperties {
                 name_of_station: "rt-labs-dev".into(),

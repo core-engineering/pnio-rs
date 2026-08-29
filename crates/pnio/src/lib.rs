@@ -6,10 +6,10 @@
 //! # Example: answer a DCP Identify on the device side
 //!
 //! ```
-//! use pnio::dcp::{handle_dcp_frame, DeviceConfig, DeviceProperties};
+//! use pnio::dcp::{handle_dcp_frame, DcpConfig, DeviceProperties};
 //! use pnio::eth::MacAddr;
 //!
-//! let cfg = DeviceConfig {
+//! let cfg = DcpConfig {
 //!     mac: MacAddr([0x02, 0xc0, 0xa8, 0x01, 0x0f, 0x02]),
 //!     properties: DeviceProperties {
 //!         name_of_station: "i-device".to_string(),

@@ -33,14 +33,14 @@ use crate::eth::{EthHeader, MacAddr, ETHERTYPE_PROFINET};
 
 /// Identity + address this device answers DCP for.
 #[derive(Debug, Clone)]
-pub struct DeviceConfig {
+pub struct DcpConfig {
     pub mac: MacAddr,
     pub properties: DeviceProperties,
 }
 
 /// Handle one received Ethernet frame. Returns the response frame to send, or
 /// `None` if the frame is not a DCP request this device should answer.
-pub fn handle_dcp_frame(frame: &[u8], cfg: &DeviceConfig) -> Result<Option<Vec<u8>>, DcpError> {
+pub fn handle_dcp_frame(frame: &[u8], cfg: &DcpConfig) -> Result<Option<Vec<u8>>, DcpError> {
     let (eth, payload_off) =
         EthHeader::parse(frame).map_err(|_| DcpError::Malformed("bad Ethernet header"))?;
     if eth.ethertype != ETHERTYPE_PROFINET {
@@ -116,8 +116,8 @@ mod dispatch_tests {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
 
-    fn cfg() -> DeviceConfig {
-        DeviceConfig {
+    fn cfg() -> DcpConfig {
+        DcpConfig {
             mac: MacAddr([0x02, 0xc0, 0xa8, 0x01, 0x0f, 0x02]),
             properties: DeviceProperties {
                 name_of_station: "i-device".to_string(),

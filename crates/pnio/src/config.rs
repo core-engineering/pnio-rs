@@ -3,7 +3,7 @@
 
 use crate::cm::{DeviceModel, SlotModel, SubmoduleModel};
 use crate::data::FieldType;
-use crate::dcp::{DeviceConfig as DcpDeviceConfig, DeviceProperties};
+use crate::dcp::{DcpConfig, DeviceProperties};
 use crate::device::{DeviceSetup, RtOptions};
 use crate::eth::MacAddr;
 use crate::rpc::Uuid;
@@ -269,7 +269,7 @@ impl DeviceConfig {
     /// Everything `device::Device::new` needs.
     pub fn setup(&self, mac: MacAddr, ip: [u8; 4], rt: Option<RtOptions>) -> DeviceSetup {
         DeviceSetup {
-            dcp: DcpDeviceConfig {
+            dcp: DcpConfig {
                 mac,
                 properties: self.dcp_properties(ip),
             },

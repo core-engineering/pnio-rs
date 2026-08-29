@@ -4,7 +4,7 @@ mod common;
 
 use common::{golden, golden_rt, RPC_OFF, RT_CSDU_OFF};
 use pnio::cm::{ArState, DeviceModel};
-use pnio::dcp::{DeviceConfig, DeviceProperties};
+use pnio::dcp::{DcpConfig, DeviceProperties};
 use pnio::device::{Device, DeviceSetup};
 use pnio::eth::{MacAddr, MockTransport};
 use pnio::rpc::{MockRpcTransport, Uuid};
@@ -19,7 +19,7 @@ const DEV: MacAddr = MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]);
 
 fn setup() -> DeviceSetup {
     DeviceSetup {
-        dcp: DeviceConfig {
+        dcp: DcpConfig {
             mac: DEV,
             properties: DeviceProperties {
                 name_of_station: "rt-labs-dev".into(),

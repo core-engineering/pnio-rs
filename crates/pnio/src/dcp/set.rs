@@ -144,16 +144,16 @@ pub fn build_set_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dcp::{handle_dcp_frame, DeviceConfig, DeviceProperties};
+    use crate::dcp::{handle_dcp_frame, DcpConfig, DeviceProperties};
     use crate::eth::MacAddr;
     use crate::testutil::{golden, VLAN_PAYLOAD_OFF};
 
-    fn cfg(ip: [u8; 4]) -> DeviceConfig {
+    fn cfg(ip: [u8; 4]) -> DcpConfig {
         cfg_full(ip, [255, 255, 255, 0], ip)
     }
 
-    fn cfg_full(ip: [u8; 4], subnet: [u8; 4], gateway: [u8; 4]) -> DeviceConfig {
-        DeviceConfig {
+    fn cfg_full(ip: [u8; 4], subnet: [u8; 4], gateway: [u8; 4]) -> DcpConfig {
+        DcpConfig {
             mac: MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]),
             properties: DeviceProperties {
                 name_of_station: "rt-labs-dev".into(),

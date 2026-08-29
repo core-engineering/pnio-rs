@@ -2,7 +2,7 @@
 //! capture -> eth -> dcp pipeline and check the device produces the golden response.
 
 use pnio::capture::PcapFrames;
-use pnio::dcp::{handle_dcp_frame, DeviceConfig, DeviceProperties};
+use pnio::dcp::{handle_dcp_frame, DcpConfig, DeviceProperties};
 use pnio::eth::MacAddr;
 use std::io::Cursor;
 
@@ -60,8 +60,8 @@ fn make_pcapng(frames: &[&[u8]]) -> Vec<u8> {
     buf
 }
 
-fn device_cfg() -> DeviceConfig {
-    DeviceConfig {
+fn device_cfg() -> DcpConfig {
+    DcpConfig {
         mac: MacAddr([0x02, 0xc0, 0xa8, 0x01, 0x0f, 0x02]),
         properties: DeviceProperties {
             name_of_station: "i-device".to_string(),
