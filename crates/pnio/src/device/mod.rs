@@ -328,6 +328,12 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             v.watchdog = WatchdogState::Expired;
             v.provider_run = false;
             self.image.set_validity(v);
+            // Drop the stopped AR's cell index too: otherwise a caller polling
+            // `ar_state() == Data` after the *next* AR reaches `Data` (before
+            // `start_runner` rebuilds the image — see `dispatch`) could still read
+            // stale offsets belonging to the previous AR's layout instead of
+            // observing "no layout yet".
+            self.image.clear();
         }
     }
 
@@ -533,6 +539,10 @@ mod tests {
         assert!(!dev.rt_running());
         // A clean release must not leave the image `Fresh` over frozen outputs.
         assert_eq!(dev.image().validity().freshness(), Freshness::Stale);
+        // ... nor keep the stopped AR's cell index around: the next AR's `Data`
+        // must not be servable against a stale layout for the window between the
+        // state-change notify and `start_runner` rebuilding the image.
+        assert!(dev.image().cells().is_empty());
     }
 
     #[cfg(target_os = "linux")]

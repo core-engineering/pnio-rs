@@ -276,6 +276,14 @@ impl IoDevice {
     /// `ar_state() == Data` *and* the I/O image has actually been rebuilt from the
     /// negotiated layout — the condition a caller should poll for before the first
     /// read/write, since `ar_state()` alone can transiently lag it (see its doc).
+    ///
+    /// This is a lifecycle invariant, not just a start-up detail: the image's cell
+    /// index only ever exists while the *current* AR is in `Data`.
+    /// `device::Device::stop_runner` clears it (`IoImage::clear`) the moment the RT
+    /// runner stops (any `Data` -> `Idle` transition, including an AR
+    /// renegotiation), so a stale layout from a previous AR can never be mistaken
+    /// for the current one's — `ready()` reads `false` again until the next `Data`
+    /// rebuilds it.
     pub fn ready(&self) -> bool {
         self.ar_state() == ArState::Data && !self.image.cells().is_empty()
     }

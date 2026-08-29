@@ -153,6 +153,25 @@ impl IoImage {
         };
     }
 
+    /// Drop the layout: called when the RT runner stops. The cell index and both
+    /// buffers are emptied — every accessor keyed by `(slot, subslot)` reports
+    /// [`ImageError::UnknownSubmodule`] (the `NoLayoutYet`-class error at the
+    /// `api::IoDevice` facade) until the next [`IoImage::rebuild`] — but the
+    /// validity is left untouched: the caller (`device::Device::stop_runner`) sets it
+    /// to reflect the stopped runner (watchdog `Expired`, `provider_run = false`)
+    /// just before calling this, and that must survive.
+    ///
+    /// Same lock order as [`IoImage::rebuild`] (`cells` before `inputs` before
+    /// `outputs`), for the same TOCTOU-vs-concurrent-app-access reasoning.
+    pub fn clear(&self) {
+        let mut cells = self.cells.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inputs = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut outputs = self.outputs.lock().unwrap_or_else(|e| e.into_inner());
+        cells.clear();
+        inputs.clear();
+        outputs.csdu.clear();
+    }
+
     /// A clone of the current cell index, in model order.
     pub fn cells(&self) -> Vec<Cell> {
         self.cells.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -498,5 +517,38 @@ mod tests {
         img.rebuild(&layout());
         img.write_inputs(1, 1, &[1]).unwrap();
         assert_eq!(img.cells().len(), 7);
+    }
+
+    #[test]
+    fn clear_drops_the_layout_but_not_the_validity() {
+        let img = IoImage::new(&layout());
+        img.rebuild(&layout());
+        assert_eq!(img.cells().len(), 7);
+        // The validity `device::Device::stop_runner` just set (watchdog Expired,
+        // provider_run false) must survive `clear`.
+        let mut v = fresh();
+        v.watchdog = WatchdogState::Expired;
+        v.provider_run = false;
+        img.set_validity(v);
+
+        img.clear();
+
+        assert!(img.cells().is_empty());
+        assert_eq!(
+            img.write_inputs(1, 1, &[1]).unwrap_err(),
+            ImageError::UnknownSubmodule {
+                slot: 1,
+                subslot: 1
+            }
+        );
+        assert_eq!(
+            img.read_outputs(1, 1, |_, _| ()).unwrap_err(),
+            ImageError::UnknownSubmodule {
+                slot: 1,
+                subslot: 1
+            }
+        );
+        assert_eq!(img.validity(), v);
+        assert_eq!(img.validity().freshness(), Freshness::Stale);
     }
 }
