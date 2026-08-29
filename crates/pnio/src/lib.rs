@@ -43,6 +43,7 @@ pub mod data;
 pub mod dcp;
 pub mod device;
 pub mod eth;
+pub mod gsdml;
 pub mod rpc;
 pub mod rt;
 #[cfg(test)]

@@ -1,0 +1,377 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ISO15745Profile xmlns="http://www.profibus.com/GSDML/2003/11/DeviceProfile" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.profibus.com/GSDML/2003/11/DeviceProfile ..\xsd\GSDML-DeviceProfile-V2.4.xsd">
+  <ProfileHeader>
+    <ProfileIdentification>PROFINET Device Profile</ProfileIdentification>
+    <ProfileRevision>1.00</ProfileRevision>
+    <ProfileName>Device Profile for PROFINET Devices</ProfileName>
+    <ProfileSource>PROFIBUS Nutzerorganisation e. V. (PNO)</ProfileSource>
+    <ProfileClassID>Device</ProfileClassID>
+    <ISO15745Reference>
+      <ISO15745Part>4</ISO15745Part>
+      <ISO15745Edition>1</ISO15745Edition>
+      <ProfileTechnology>GSDML</ProfileTechnology>
+    </ISO15745Reference>
+  </ProfileHeader>
+  <ProfileBody>
+    <DeviceIdentity VendorID="0xFFFF" DeviceID="0x0001">
+      <InfoText TextId="T_InfoText"/>
+      <VendorName Value="Core Engineering"/>
+    </DeviceIdentity>
+    <DeviceFunction>
+      <Family MainFamily="I/O" ProductFamily="pnio"/>
+    </DeviceFunction>
+    <ApplicationProcess>
+      <DeviceAccessPointList>
+        <DeviceAccessPointItem ID="DAP1" PNIO_Version="V2.4" PhysicalSlots="0..4" ModuleIdentNumber="0x00000001" MinDeviceInterval="32" DNS_CompatibleName="pnio-dev" FixedInSlots="0" ObjectUUID_LocalIndex="1" MultipleWriteSupported="true" DeviceAccessSupported="false">
+          <ModuleInfo>
+            <Name TextId="T_DAP_Name"/>
+            <InfoText TextId="T_DAP_Info"/>
+            <VendorName Value="Core Engineering"/>
+            <OrderNumber Value="PNIO-SAMPLE"/>
+            <HardwareRelease Value="1.0"/>
+            <SoftwareRelease Value="V0.0.0"/>
+          </ModuleInfo>
+          <IOConfigData MaxInputLength="68" MaxOutputLength="68"/>
+          <UseableModules>
+            <ModuleItemRef ModuleItemTarget="M1" AllowedInSlots="1"/>
+            <ModuleItemRef ModuleItemTarget="M2" AllowedInSlots="2"/>
+            <ModuleItemRef ModuleItemTarget="M3" AllowedInSlots="3"/>
+            <ModuleItemRef ModuleItemTarget="M4" AllowedInSlots="4"/>
+          </UseableModules>
+          <VirtualSubmoduleList>
+            <VirtualSubmoduleItem ID="DAP1_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
+              <IOData/>
+              <ModuleInfo>
+                <Name TextId="T_DAP_Name"/>
+                <InfoText TextId="T_DAP_Info"/>
+              </ModuleInfo>
+            </VirtualSubmoduleItem>
+          </VirtualSubmoduleList>
+          <SystemDefinedSubmoduleList>
+            <InterfaceSubmoduleItem ID="DAP1_IF" SubslotNumber="32768" TextId="T_Interface" SubmoduleIdentNumber="0x00008000" SupportedRT_Classes="RT_CLASS_1" SupportedProtocols="SNMP;LLDP" DCP_HelloSupported="false" PTP_BoundarySupported="false" DCP_BoundarySupported="false" DelayMeasurementSupported="false">
+              <ApplicationRelations StartupMode="Advanced">
+                <TimingProperties SendClock="32" ReductionRatio="1 2 4 8 16 32 64 128 256 512"/>
+              </ApplicationRelations>
+            </InterfaceSubmoduleItem>
+            <PortSubmoduleItem ID="DAP1_P1" SubslotNumber="32769" TextId="T_Port1" SubmoduleIdentNumber="0x00008001" MaxPortTxDelay="160" MaxPortRxDelay="350">
+              <MAUTypeList>
+                <MAUTypeItem Value="16"/>
+              </MAUTypeList>
+            </PortSubmoduleItem>
+          </SystemDefinedSubmoduleList>
+        </DeviceAccessPointItem>
+      </DeviceAccessPointList>
+      <ModuleList>
+        <ModuleItem ID="M1" ModuleIdentNumber="0x00000101">
+          <ModuleInfo>
+            <Name TextId="M1_Name"/>
+            <InfoText TextId="M1_Info"/>
+            <OrderNumber Value="PNIO-SAMPLE-M1"/>
+          </ModuleInfo>
+          <VirtualSubmoduleList>
+            <VirtualSubmoduleItem ID="M1_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
+              <IOData>
+                <Input>
+                  <DataItem DataType="Float32" TextId="M1_In0"/>
+                  <DataItem DataType="Float32" TextId="M1_In1"/>
+                  <DataItem DataType="Float32" TextId="M1_In2"/>
+                  <DataItem DataType="Float32" TextId="M1_In3"/>
+                  <DataItem DataType="Float32" TextId="M1_In4"/>
+                  <DataItem DataType="Float32" TextId="M1_In5"/>
+                  <DataItem DataType="Float32" TextId="M1_In6"/>
+                  <DataItem DataType="Float32" TextId="M1_In7"/>
+                  <DataItem DataType="Float32" TextId="M1_In8"/>
+                  <DataItem DataType="Float32" TextId="M1_In9"/>
+                  <DataItem DataType="Float32" TextId="M1_In10"/>
+                  <DataItem DataType="Float32" TextId="M1_In11"/>
+                  <DataItem DataType="Float32" TextId="M1_In12"/>
+                  <DataItem DataType="Float32" TextId="M1_In13"/>
+                  <DataItem DataType="Float32" TextId="M1_In14"/>
+                  <DataItem DataType="Float32" TextId="M1_In15"/>
+                </Input>
+              </IOData>
+              <ModuleInfo>
+                <Name TextId="M1_Name"/>
+                <InfoText TextId="M1_Info"/>
+              </ModuleInfo>
+            </VirtualSubmoduleItem>
+          </VirtualSubmoduleList>
+        </ModuleItem>
+        <ModuleItem ID="M2" ModuleIdentNumber="0x00000102">
+          <ModuleInfo>
+            <Name TextId="M2_Name"/>
+            <InfoText TextId="M2_Info"/>
+            <OrderNumber Value="PNIO-SAMPLE-M2"/>
+          </ModuleInfo>
+          <VirtualSubmoduleList>
+            <VirtualSubmoduleItem ID="M2_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
+              <IOData>
+                <Input>
+                  <DataItem DataType="Unsigned8" UseAsBits="true" TextId="M2_In0_bits">
+                    <BitDataItem BitOffset="0" TextId="M2_In0_b"/>
+                    <BitDataItem BitOffset="1" TextId="M2_In1_b"/>
+                    <BitDataItem BitOffset="2" TextId="M2_In2_b"/>
+                    <BitDataItem BitOffset="3" TextId="M2_In3_b"/>
+                    <BitDataItem BitOffset="4" TextId="M2_In4_b"/>
+                    <BitDataItem BitOffset="5" TextId="M2_In5_b"/>
+                    <BitDataItem BitOffset="6" TextId="M2_In6_b"/>
+                    <BitDataItem BitOffset="7" TextId="M2_In7_b"/>
+                  </DataItem>
+                  <DataItem DataType="Unsigned8" UseAsBits="true" TextId="M2_In8_bits">
+                    <BitDataItem BitOffset="0" TextId="M2_In8_b"/>
+                    <BitDataItem BitOffset="1" TextId="M2_In9_b"/>
+                    <BitDataItem BitOffset="2" TextId="M2_In10_b"/>
+                    <BitDataItem BitOffset="3" TextId="M2_In11_b"/>
+                    <BitDataItem BitOffset="4" TextId="M2_In12_b"/>
+                    <BitDataItem BitOffset="5" TextId="M2_In13_b"/>
+                    <BitDataItem BitOffset="6" TextId="M2_In14_b"/>
+                    <BitDataItem BitOffset="7" TextId="M2_In15_b"/>
+                  </DataItem>
+                  <DataItem DataType="Unsigned8" UseAsBits="true" TextId="M2_In16_bits">
+                    <BitDataItem BitOffset="0" TextId="M2_In16_b"/>
+                    <BitDataItem BitOffset="1" TextId="M2_In17_b"/>
+                    <BitDataItem BitOffset="2" TextId="M2_In18_b"/>
+                    <BitDataItem BitOffset="3" TextId="M2_In19_b"/>
+                    <BitDataItem BitOffset="4" TextId="M2_In20_b"/>
+                    <BitDataItem BitOffset="5" TextId="M2_In21_b"/>
+                    <BitDataItem BitOffset="6" TextId="M2_In22_b"/>
+                    <BitDataItem BitOffset="7" TextId="M2_In23_b"/>
+                  </DataItem>
+                  <DataItem DataType="Unsigned8" UseAsBits="true" TextId="M2_In24_bits">
+                    <BitDataItem BitOffset="0" TextId="M2_In24_b"/>
+                    <BitDataItem BitOffset="1" TextId="M2_In25_b"/>
+                    <BitDataItem BitOffset="2" TextId="M2_In26_b"/>
+                    <BitDataItem BitOffset="3" TextId="M2_In27_b"/>
+                    <BitDataItem BitOffset="4" TextId="M2_In28_b"/>
+                    <BitDataItem BitOffset="5" TextId="M2_In29_b"/>
+                    <BitDataItem BitOffset="6" TextId="M2_In30_b"/>
+                    <BitDataItem BitOffset="7" TextId="M2_In31_b"/>
+                  </DataItem>
+                </Input>
+              </IOData>
+              <ModuleInfo>
+                <Name TextId="M2_Name"/>
+                <InfoText TextId="M2_Info"/>
+              </ModuleInfo>
+            </VirtualSubmoduleItem>
+          </VirtualSubmoduleList>
+        </ModuleItem>
+        <ModuleItem ID="M3" ModuleIdentNumber="0x00000103">
+          <ModuleInfo>
+            <Name TextId="M3_Name"/>
+            <InfoText TextId="M3_Info"/>
+            <OrderNumber Value="PNIO-SAMPLE-M3"/>
+          </ModuleInfo>
+          <VirtualSubmoduleList>
+            <VirtualSubmoduleItem ID="M3_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
+              <IOData>
+                <Output>
+                  <DataItem DataType="Float32" TextId="M3_Out0"/>
+                  <DataItem DataType="Float32" TextId="M3_Out1"/>
+                  <DataItem DataType="Float32" TextId="M3_Out2"/>
+                  <DataItem DataType="Float32" TextId="M3_Out3"/>
+                  <DataItem DataType="Float32" TextId="M3_Out4"/>
+                  <DataItem DataType="Float32" TextId="M3_Out5"/>
+                  <DataItem DataType="Float32" TextId="M3_Out6"/>
+                  <DataItem DataType="Float32" TextId="M3_Out7"/>
+                  <DataItem DataType="Float32" TextId="M3_Out8"/>
+                  <DataItem DataType="Float32" TextId="M3_Out9"/>
+                  <DataItem DataType="Float32" TextId="M3_Out10"/>
+                  <DataItem DataType="Float32" TextId="M3_Out11"/>
+                  <DataItem DataType="Float32" TextId="M3_Out12"/>
+                  <DataItem DataType="Float32" TextId="M3_Out13"/>
+                  <DataItem DataType="Float32" TextId="M3_Out14"/>
+                  <DataItem DataType="Float32" TextId="M3_Out15"/>
+                </Output>
+              </IOData>
+              <ModuleInfo>
+                <Name TextId="M3_Name"/>
+                <InfoText TextId="M3_Info"/>
+              </ModuleInfo>
+            </VirtualSubmoduleItem>
+          </VirtualSubmoduleList>
+        </ModuleItem>
+        <ModuleItem ID="M4" ModuleIdentNumber="0x00000104">
+          <ModuleInfo>
+            <Name TextId="M4_Name"/>
+            <InfoText TextId="M4_Info"/>
+            <OrderNumber Value="PNIO-SAMPLE-M4"/>
+          </ModuleInfo>
+          <VirtualSubmoduleList>
+            <VirtualSubmoduleItem ID="M4_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
+              <IOData>
+                <Output>
+                  <DataItem DataType="Unsigned8" UseAsBits="true" TextId="M4_Out0_bits">
+                    <BitDataItem BitOffset="0" TextId="M4_Out0_b"/>
+                    <BitDataItem BitOffset="1" TextId="M4_Out1_b"/>
+                    <BitDataItem BitOffset="2" TextId="M4_Out2_b"/>
+                    <BitDataItem BitOffset="3" TextId="M4_Out3_b"/>
+                    <BitDataItem BitOffset="4" TextId="M4_Out4_b"/>
+                    <BitDataItem BitOffset="5" TextId="M4_Out5_b"/>
+                    <BitDataItem BitOffset="6" TextId="M4_Out6_b"/>
+                    <BitDataItem BitOffset="7" TextId="M4_Out7_b"/>
+                  </DataItem>
+                  <DataItem DataType="Unsigned8" UseAsBits="true" TextId="M4_Out8_bits">
+                    <BitDataItem BitOffset="0" TextId="M4_Out8_b"/>
+                    <BitDataItem BitOffset="1" TextId="M4_Out9_b"/>
+                    <BitDataItem BitOffset="2" TextId="M4_Out10_b"/>
+                    <BitDataItem BitOffset="3" TextId="M4_Out11_b"/>
+                    <BitDataItem BitOffset="4" TextId="M4_Out12_b"/>
+                    <BitDataItem BitOffset="5" TextId="M4_Out13_b"/>
+                    <BitDataItem BitOffset="6" TextId="M4_Out14_b"/>
+                    <BitDataItem BitOffset="7" TextId="M4_Out15_b"/>
+                  </DataItem>
+                  <DataItem DataType="Unsigned8" UseAsBits="true" TextId="M4_Out16_bits">
+                    <BitDataItem BitOffset="0" TextId="M4_Out16_b"/>
+                    <BitDataItem BitOffset="1" TextId="M4_Out17_b"/>
+                    <BitDataItem BitOffset="2" TextId="M4_Out18_b"/>
+                    <BitDataItem BitOffset="3" TextId="M4_Out19_b"/>
+                    <BitDataItem BitOffset="4" TextId="M4_Out20_b"/>
+                    <BitDataItem BitOffset="5" TextId="M4_Out21_b"/>
+                    <BitDataItem BitOffset="6" TextId="M4_Out22_b"/>
+                    <BitDataItem BitOffset="7" TextId="M4_Out23_b"/>
+                  </DataItem>
+                  <DataItem DataType="Unsigned8" UseAsBits="true" TextId="M4_Out24_bits">
+                    <BitDataItem BitOffset="0" TextId="M4_Out24_b"/>
+                    <BitDataItem BitOffset="1" TextId="M4_Out25_b"/>
+                    <BitDataItem BitOffset="2" TextId="M4_Out26_b"/>
+                    <BitDataItem BitOffset="3" TextId="M4_Out27_b"/>
+                    <BitDataItem BitOffset="4" TextId="M4_Out28_b"/>
+                    <BitDataItem BitOffset="5" TextId="M4_Out29_b"/>
+                    <BitDataItem BitOffset="6" TextId="M4_Out30_b"/>
+                    <BitDataItem BitOffset="7" TextId="M4_Out31_b"/>
+                  </DataItem>
+                </Output>
+              </IOData>
+              <ModuleInfo>
+                <Name TextId="M4_Name"/>
+                <InfoText TextId="M4_Info"/>
+              </ModuleInfo>
+            </VirtualSubmoduleItem>
+          </VirtualSubmoduleList>
+        </ModuleItem>
+      </ModuleList>
+      <ExternalTextList>
+        <PrimaryLanguage>
+          <Text TextId="T_InfoText" Value="pnio sample device: 16 REAL + 32 BOOL per direction"/>
+          <Text TextId="T_DAP_Name" Value="pnio DAP"/>
+          <Text TextId="T_DAP_Info" Value="Device access point"/>
+          <Text TextId="T_Interface" Value="PROFINET interface"/>
+          <Text TextId="T_Port1" Value="Port 1"/>
+          <Text TextId="M1_Name" Value="in1"/>
+          <Text TextId="M1_Info" Value="Slot 1: 64 input bytes, 0 output bytes"/>
+          <Text TextId="M1_In0" Value="In 0 (Real)"/>
+          <Text TextId="M1_In1" Value="In 1 (Real)"/>
+          <Text TextId="M1_In2" Value="In 2 (Real)"/>
+          <Text TextId="M1_In3" Value="In 3 (Real)"/>
+          <Text TextId="M1_In4" Value="In 4 (Real)"/>
+          <Text TextId="M1_In5" Value="In 5 (Real)"/>
+          <Text TextId="M1_In6" Value="In 6 (Real)"/>
+          <Text TextId="M1_In7" Value="In 7 (Real)"/>
+          <Text TextId="M1_In8" Value="In 8 (Real)"/>
+          <Text TextId="M1_In9" Value="In 9 (Real)"/>
+          <Text TextId="M1_In10" Value="In 10 (Real)"/>
+          <Text TextId="M1_In11" Value="In 11 (Real)"/>
+          <Text TextId="M1_In12" Value="In 12 (Real)"/>
+          <Text TextId="M1_In13" Value="In 13 (Real)"/>
+          <Text TextId="M1_In14" Value="In 14 (Real)"/>
+          <Text TextId="M1_In15" Value="In 15 (Real)"/>
+          <Text TextId="M2_Name" Value="in2"/>
+          <Text TextId="M2_Info" Value="Slot 2: 4 input bytes, 0 output bytes"/>
+          <Text TextId="M2_In0_bits" Value="In bits 0..7"/>
+          <Text TextId="M2_In0_b" Value="In 0 (Bool)"/>
+          <Text TextId="M2_In1_b" Value="In 1 (Bool)"/>
+          <Text TextId="M2_In2_b" Value="In 2 (Bool)"/>
+          <Text TextId="M2_In3_b" Value="In 3 (Bool)"/>
+          <Text TextId="M2_In4_b" Value="In 4 (Bool)"/>
+          <Text TextId="M2_In5_b" Value="In 5 (Bool)"/>
+          <Text TextId="M2_In6_b" Value="In 6 (Bool)"/>
+          <Text TextId="M2_In7_b" Value="In 7 (Bool)"/>
+          <Text TextId="M2_In8_bits" Value="In bits 8..15"/>
+          <Text TextId="M2_In8_b" Value="In 8 (Bool)"/>
+          <Text TextId="M2_In9_b" Value="In 9 (Bool)"/>
+          <Text TextId="M2_In10_b" Value="In 10 (Bool)"/>
+          <Text TextId="M2_In11_b" Value="In 11 (Bool)"/>
+          <Text TextId="M2_In12_b" Value="In 12 (Bool)"/>
+          <Text TextId="M2_In13_b" Value="In 13 (Bool)"/>
+          <Text TextId="M2_In14_b" Value="In 14 (Bool)"/>
+          <Text TextId="M2_In15_b" Value="In 15 (Bool)"/>
+          <Text TextId="M2_In16_bits" Value="In bits 16..23"/>
+          <Text TextId="M2_In16_b" Value="In 16 (Bool)"/>
+          <Text TextId="M2_In17_b" Value="In 17 (Bool)"/>
+          <Text TextId="M2_In18_b" Value="In 18 (Bool)"/>
+          <Text TextId="M2_In19_b" Value="In 19 (Bool)"/>
+          <Text TextId="M2_In20_b" Value="In 20 (Bool)"/>
+          <Text TextId="M2_In21_b" Value="In 21 (Bool)"/>
+          <Text TextId="M2_In22_b" Value="In 22 (Bool)"/>
+          <Text TextId="M2_In23_b" Value="In 23 (Bool)"/>
+          <Text TextId="M2_In24_bits" Value="In bits 24..31"/>
+          <Text TextId="M2_In24_b" Value="In 24 (Bool)"/>
+          <Text TextId="M2_In25_b" Value="In 25 (Bool)"/>
+          <Text TextId="M2_In26_b" Value="In 26 (Bool)"/>
+          <Text TextId="M2_In27_b" Value="In 27 (Bool)"/>
+          <Text TextId="M2_In28_b" Value="In 28 (Bool)"/>
+          <Text TextId="M2_In29_b" Value="In 29 (Bool)"/>
+          <Text TextId="M2_In30_b" Value="In 30 (Bool)"/>
+          <Text TextId="M2_In31_b" Value="In 31 (Bool)"/>
+          <Text TextId="M3_Name" Value="out3"/>
+          <Text TextId="M3_Info" Value="Slot 3: 0 input bytes, 64 output bytes"/>
+          <Text TextId="M3_Out0" Value="Out 0 (Real)"/>
+          <Text TextId="M3_Out1" Value="Out 1 (Real)"/>
+          <Text TextId="M3_Out2" Value="Out 2 (Real)"/>
+          <Text TextId="M3_Out3" Value="Out 3 (Real)"/>
+          <Text TextId="M3_Out4" Value="Out 4 (Real)"/>
+          <Text TextId="M3_Out5" Value="Out 5 (Real)"/>
+          <Text TextId="M3_Out6" Value="Out 6 (Real)"/>
+          <Text TextId="M3_Out7" Value="Out 7 (Real)"/>
+          <Text TextId="M3_Out8" Value="Out 8 (Real)"/>
+          <Text TextId="M3_Out9" Value="Out 9 (Real)"/>
+          <Text TextId="M3_Out10" Value="Out 10 (Real)"/>
+          <Text TextId="M3_Out11" Value="Out 11 (Real)"/>
+          <Text TextId="M3_Out12" Value="Out 12 (Real)"/>
+          <Text TextId="M3_Out13" Value="Out 13 (Real)"/>
+          <Text TextId="M3_Out14" Value="Out 14 (Real)"/>
+          <Text TextId="M3_Out15" Value="Out 15 (Real)"/>
+          <Text TextId="M4_Name" Value="out4"/>
+          <Text TextId="M4_Info" Value="Slot 4: 0 input bytes, 4 output bytes"/>
+          <Text TextId="M4_Out0_bits" Value="Out bits 0..7"/>
+          <Text TextId="M4_Out0_b" Value="Out 0 (Bool)"/>
+          <Text TextId="M4_Out1_b" Value="Out 1 (Bool)"/>
+          <Text TextId="M4_Out2_b" Value="Out 2 (Bool)"/>
+          <Text TextId="M4_Out3_b" Value="Out 3 (Bool)"/>
+          <Text TextId="M4_Out4_b" Value="Out 4 (Bool)"/>
+          <Text TextId="M4_Out5_b" Value="Out 5 (Bool)"/>
+          <Text TextId="M4_Out6_b" Value="Out 6 (Bool)"/>
+          <Text TextId="M4_Out7_b" Value="Out 7 (Bool)"/>
+          <Text TextId="M4_Out8_bits" Value="Out bits 8..15"/>
+          <Text TextId="M4_Out8_b" Value="Out 8 (Bool)"/>
+          <Text TextId="M4_Out9_b" Value="Out 9 (Bool)"/>
+          <Text TextId="M4_Out10_b" Value="Out 10 (Bool)"/>
+          <Text TextId="M4_Out11_b" Value="Out 11 (Bool)"/>
+          <Text TextId="M4_Out12_b" Value="Out 12 (Bool)"/>
+          <Text TextId="M4_Out13_b" Value="Out 13 (Bool)"/>
+          <Text TextId="M4_Out14_b" Value="Out 14 (Bool)"/>
+          <Text TextId="M4_Out15_b" Value="Out 15 (Bool)"/>
+          <Text TextId="M4_Out16_bits" Value="Out bits 16..23"/>
+          <Text TextId="M4_Out16_b" Value="Out 16 (Bool)"/>
+          <Text TextId="M4_Out17_b" Value="Out 17 (Bool)"/>
+          <Text TextId="M4_Out18_b" Value="Out 18 (Bool)"/>
+          <Text TextId="M4_Out19_b" Value="Out 19 (Bool)"/>
+          <Text TextId="M4_Out20_b" Value="Out 20 (Bool)"/>
+          <Text TextId="M4_Out21_b" Value="Out 21 (Bool)"/>
+          <Text TextId="M4_Out22_b" Value="Out 22 (Bool)"/>
+          <Text TextId="M4_Out23_b" Value="Out 23 (Bool)"/>
+          <Text TextId="M4_Out24_bits" Value="Out bits 24..31"/>
+          <Text TextId="M4_Out24_b" Value="Out 24 (Bool)"/>
+          <Text TextId="M4_Out25_b" Value="Out 25 (Bool)"/>
+          <Text TextId="M4_Out26_b" Value="Out 26 (Bool)"/>
+          <Text TextId="M4_Out27_b" Value="Out 27 (Bool)"/>
+          <Text TextId="M4_Out28_b" Value="Out 28 (Bool)"/>
+          <Text TextId="M4_Out29_b" Value="Out 29 (Bool)"/>
+          <Text TextId="M4_Out30_b" Value="Out 30 (Bool)"/>
+          <Text TextId="M4_Out31_b" Value="Out 31 (Bool)"/>
+        </PrimaryLanguage>
+      </ExternalTextList>
+    </ApplicationProcess>
+  </ProfileBody>
+</ISO15745Profile>
