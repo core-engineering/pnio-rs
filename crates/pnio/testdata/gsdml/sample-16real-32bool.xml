@@ -22,7 +22,7 @@
     </DeviceFunction>
     <ApplicationProcess>
       <DeviceAccessPointList>
-        <DeviceAccessPointItem ID="DAP1" PNIO_Version="V2.4" PhysicalSlots="0..4" ModuleIdentNumber="0x00000001" MinDeviceInterval="32" DNS_CompatibleName="pnio-dev" FixedInSlots="0" ObjectUUID_LocalIndex="1" MultipleWriteSupported="true" DeviceAccessSupported="false">
+        <DeviceAccessPointItem ID="DAP1" PNIO_Version="V2.4" PhysicalSlots="0..4" ModuleIdentNumber="0x00000001" MinDeviceInterval="32" DNS_CompatibleName="pnio-dev" FixedInSlots="0" ObjectUUID_LocalIndex="1" MultipleWriteSupported="true" DeviceAccessSupported="false" CheckDeviceID_Allowed="true" NameOfStationNotTransferable="false">
           <ModuleInfo>
             <Name TextId="T_DAP_Name"/>
             <InfoText TextId="T_DAP_Info"/>
@@ -71,7 +71,7 @@
           <VirtualSubmoduleList>
             <VirtualSubmoduleItem ID="M1_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
               <IOData>
-                <Input>
+                <Input Consistency="All items consistency">
                   <DataItem DataType="Float32" TextId="M1_In0"/>
                   <DataItem DataType="Float32" TextId="M1_In1"/>
                   <DataItem DataType="Float32" TextId="M1_In2"/>
@@ -106,7 +106,7 @@
           <VirtualSubmoduleList>
             <VirtualSubmoduleItem ID="M2_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
               <IOData>
-                <Input>
+                <Input Consistency="All items consistency">
                   <DataItem DataType="Unsigned8" UseAsBits="true" TextId="M2_In0_bits">
                     <BitDataItem BitOffset="0" TextId="M2_In0_b"/>
                     <BitDataItem BitOffset="1" TextId="M2_In1_b"/>
@@ -165,7 +165,7 @@
           <VirtualSubmoduleList>
             <VirtualSubmoduleItem ID="M3_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
               <IOData>
-                <Output>
+                <Output Consistency="All items consistency">
                   <DataItem DataType="Float32" TextId="M3_Out0"/>
                   <DataItem DataType="Float32" TextId="M3_Out1"/>
                   <DataItem DataType="Float32" TextId="M3_Out2"/>
@@ -200,7 +200,7 @@
           <VirtualSubmoduleList>
             <VirtualSubmoduleItem ID="M4_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
               <IOData>
-                <Output>
+                <Output Consistency="All items consistency">
                   <DataItem DataType="Unsigned8" UseAsBits="true" TextId="M4_Out0_bits">
                     <BitDataItem BitOffset="0" TextId="M4_Out0_b"/>
                     <BitDataItem BitOffset="1" TextId="M4_Out1_b"/>

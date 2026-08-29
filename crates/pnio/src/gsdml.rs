@@ -36,7 +36,7 @@ pub fn file_name(meta: &GsdmlMeta) -> String {
 }
 
 /// Escape the five XML specials for attribute/text content.
-pub fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -113,8 +113,6 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
     } else {
         "32".to_string()
     };
-    let (y, m, d) = meta.date;
-
     let _ = write!(
         x,
         r#"<?xml version="1.0" encoding="utf-8"?>
@@ -141,7 +139,7 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
     </DeviceFunction>
     <ApplicationProcess>
       <DeviceAccessPointList>
-        <DeviceAccessPointItem ID="DAP1" PNIO_Version="V2.4" PhysicalSlots="0..{n_slots}" ModuleIdentNumber="0x00000001" MinDeviceInterval="{mdi}" DNS_CompatibleName="{station}" FixedInSlots="0" ObjectUUID_LocalIndex="1" MultipleWriteSupported="true" DeviceAccessSupported="false">
+        <DeviceAccessPointItem ID="DAP1" PNIO_Version="V2.4" PhysicalSlots="0..{n_slots}" ModuleIdentNumber="0x00000001" MinDeviceInterval="{mdi}" DNS_CompatibleName="{station}" FixedInSlots="0" ObjectUUID_LocalIndex="1" MultipleWriteSupported="true" DeviceAccessSupported="false" CheckDeviceID_Allowed="true" NameOfStationNotTransferable="false">
           <ModuleInfo>
             <Name TextId="T_DAP_Name"/>
             <InfoText TextId="T_DAP_Info"/>
@@ -243,7 +241,10 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
             let Some(fields) = cfg.fields(s.slot, dir) else {
                 continue;
             };
-            let _ = writeln!(x, "                <{tag}>");
+            let _ = writeln!(
+                x,
+                r#"                <{tag} Consistency="All items consistency">"#
+            );
             for item in items(fields) {
                 match item {
                     Item::Scalar(ty, i) => {
@@ -313,7 +314,6 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
 </ISO15745Profile>
 "#
     );
-    let _ = (y, m, d); // the date lives in the file name; GSDML V2.4 has no release-date attribute we need
     x
 }
 
@@ -384,6 +384,19 @@ mod tests {
         assert_eq!(dap.attribute("DNS_CompatibleName"), Some("pnio-dev"));
         assert_eq!(dap.attribute("MinDeviceInterval"), Some("32"));
         assert_eq!(dap.attribute("PhysicalSlots"), Some("0..4"));
+        // Required by the PI XSD V2.4 on DeviceAccessPointItem (values as in the
+        // rt-labs reference file TIA accepted).
+        assert_eq!(dap.attribute("CheckDeviceID_Allowed"), Some("true"));
+        assert_eq!(dap.attribute("NameOfStationNotTransferable"), Some("false"));
+        for tag in ["Input", "Output"] {
+            for n in find(tag) {
+                assert_eq!(
+                    n.attribute("Consistency"),
+                    Some("All items consistency"),
+                    "{tag}"
+                );
+            }
+        }
         let modules = find("ModuleItem");
         assert_eq!(modules.len(), 4);
         let mac = crate::eth::MacAddr([0; 6]);
