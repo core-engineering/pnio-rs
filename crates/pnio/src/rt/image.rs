@@ -163,7 +163,7 @@ impl IoImage {
     ///
     /// Same lock order as [`IoImage::rebuild`] (`cells` before `inputs` before
     /// `outputs`), for the same TOCTOU-vs-concurrent-app-access reasoning.
-    pub fn clear(&self) {
+    pub(crate) fn clear(&self) {
         let mut cells = self.cells.lock().unwrap_or_else(|e| e.into_inner());
         let mut inputs = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
         let mut outputs = self.outputs.lock().unwrap_or_else(|e| e.into_inner());

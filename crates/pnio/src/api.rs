@@ -35,12 +35,12 @@ pub enum ApiError {
     UnknownSlot(u16),
     #[error("slot {slot} index {index} out of range (len {len})")]
     IndexOutOfRange { slot: u16, index: usize, len: usize },
-    #[error("slot {slot} index {index} is {expected:?}, not {got:?}")]
+    #[error("slot {slot} index {index} is {declared:?}, not {requested:?}")]
     TypeMismatch {
         slot: u16,
         index: usize,
-        expected: FieldType,
-        got: FieldType,
+        declared: FieldType,
+        requested: FieldType,
     },
     #[error("slot {slot} has no {expected:?} data")]
     WrongDirection { slot: u16, expected: Direction },
@@ -85,16 +85,16 @@ impl PartialEq for ApiError {
                 TypeMismatch {
                     slot: s1,
                     index: i1,
-                    expected: e1,
-                    got: g1,
+                    declared: d1,
+                    requested: r1,
                 },
                 TypeMismatch {
                     slot: s2,
                     index: i2,
-                    expected: e2,
-                    got: g2,
+                    declared: d2,
+                    requested: r2,
                 },
-            ) => (s1, i1, e1, g1) == (s2, i2, e2, g2),
+            ) => (s1, i1, d1, r1) == (s2, i2, d2, r2),
             (
                 WrongDirection {
                     slot: s1,
@@ -257,6 +257,14 @@ impl IoDevice {
     pub fn config(&self) -> &DeviceConfig {
         &self.cfg
     }
+    /// Escape hatch onto the untyped `rt::IoImage` this `IoDevice` is built over, for
+    /// callers that need something the typed accessors don't offer (e.g. a raw slot
+    /// snapshot without going through the config's field table, or `validity()`
+    /// beyond what [`IoDevice::validity`] exposes). Safe to read from concurrently
+    /// with every typed accessor above — they are all built on the same
+    /// `IoImage` — but writing through it bypasses the config's field table
+    /// entirely: no slot/index/type/direction checks, and any error is `rt`'s
+    /// [`ImageError`], not [`ApiError`].
     pub fn image(&self) -> Arc<IoImage> {
         self.image.clone()
     }
@@ -355,8 +363,8 @@ impl IoDevice {
                 return Err(ApiError::TypeMismatch {
                     slot: slot.0,
                     index,
-                    expected: f.ty,
-                    got: w,
+                    declared: f.ty,
+                    requested: w,
                 });
             }
         }
@@ -462,6 +470,12 @@ impl IoDevice {
     /// releases its locks first specifically so it can be reentered): `f` must not
     /// call back into this `IoDevice` for `slot` (another `with_inputs`/`write_*` on
     /// it), since `std::sync::Mutex` is not reentrant.
+    ///
+    /// The working copy is updated before the publish to the image is attempted, so
+    /// a call while the AR is down (`f` succeeds but the trailing `write_inputs`
+    /// returns [`ApiError::NoLayoutYet`]) is not lost: it is kept in the working copy
+    /// and published whole by the first call — to `with_inputs` or a `write_*` — that
+    /// succeeds after the AR reconnects.
     pub fn with_inputs<T>(
         &self,
         slot: Slot,
@@ -493,11 +507,21 @@ impl IoDevice {
         self.stop.store(true, Ordering::Relaxed);
         let h = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take();
         match h {
-            Some(h) => h.join().unwrap_or(Ok(())),
+            Some(h) => h.join().unwrap_or_else(|e| {
+                log::error!("pnio-acyclic thread panicked: {e:?}");
+                Ok(())
+            }),
             None => Ok(()),
         }
     }
 }
+
+/// Compile-time check: `IoDevice` must stay `Send + Sync` (spec §6) — it is shared
+/// across the application and acyclic threads via `&IoDevice`/`Arc<IoDevice>`.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<IoDevice>();
+};
 
 impl Drop for IoDevice {
     fn drop(&mut self) {
@@ -581,12 +605,12 @@ impl SlotSnapshot {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-    fn mismatch(&self, index: usize, got: FieldType, v: Value) -> ApiError {
+    fn mismatch(&self, index: usize, requested: FieldType, v: Value) -> ApiError {
         ApiError::TypeMismatch {
             slot: self.slot.0,
             index,
-            expected: v.field_type(),
-            got,
+            declared: v.field_type(),
+            requested,
         }
     }
 }
@@ -609,8 +633,8 @@ impl SlotWriter<'_> {
             return Err(ApiError::TypeMismatch {
                 slot: self.slot.0,
                 index,
-                expected: f.ty,
-                got: v.field_type(),
+                declared: f.ty,
+                requested: v.field_type(),
             });
         }
         v.encode(&mut self.bytes[f.byte as usize..], f.bit as usize)?;
@@ -862,8 +886,8 @@ mod tests {
             ApiError::TypeMismatch {
                 slot: 3,
                 index: 0,
-                expected: Real,
-                got: Bool
+                declared: Real,
+                requested: Bool
             }
         );
         assert_eq!(
