@@ -13,13 +13,15 @@ One `DeviceAccessPointItem` ("DAP1") plus one `ModuleItem` per declared slot:
 
 - **DAP** (slot 0): `ModuleIdentNumber="0x00000001"`, `PNIO_Version="V2.3"` (see
   [Validation](#validation) for why), `MinDeviceInterval` from `cfg.min_device_interval()`,
-  `DNS_CompatibleName` = the station name, plus the attributes the v2.4 XSD requires on
-  `DeviceAccessPointItem` beyond the obviously-needed ones — `CheckDeviceID_Allowed="true"`,
-  `NameOfStationNotTransferable="false"`, `MultipleWriteSupported="true"`,
-  `DeviceAccessSupported="false"` — set to the values the rt-labs reference file TIA accepted
-  uses. `IOConfigData` carries `MaxInputLength`/`MaxOutputLength`/`MaxDataLength` — see
-  [Validation](#validation), these are not the plain per-direction data sums. The interface
-  submodule (subslot `32768`) and port submodule (subslot `32769`) are system-defined, fixed.
+  `DNS_CompatibleName` = the station name, plus four more `DeviceAccessPointItem` attributes:
+  two the v2.4 XSD actually requires — `CheckDeviceID_Allowed="true"` and
+  `NameOfStationNotTransferable="false"` (TIA's XSD validation failed without them, the HIL
+  bench's first rejection, `docs/bench-pnet-device.md` §6g) — and two more that are not
+  schema-mandated but are declared to match the rt-labs reference file TIA accepted,
+  `MultipleWriteSupported="true"` and `DeviceAccessSupported="false"`. `IOConfigData` carries
+  `MaxInputLength`/`MaxOutputLength`/`MaxDataLength` — see [Validation](#validation), these are
+  not the plain per-direction data sums. The interface submodule (subslot `32768`) and port
+  submodule (subslot `32769`) are system-defined, fixed.
 - **One module per slot, pinned to that slot**: slot *n* → `ModuleItem ID="M<n>"
   ModuleIdentNumber="0x100+n"`, referenced from the DAP's `UseableModules` as
   `ModuleItemRef ModuleItemTarget="M<n>" AllowedInSlots="<n>"` — module *n* is allowed in slot
@@ -170,6 +172,14 @@ declares. This value only affects the **GSDML** (`MinDeviceInterval` and `Timing
 `SendClock`); the actual update time is whatever TIA's interface properties are set to (it must
 be one the GSDML declares as supported — set it explicitly during import, see
 [Importing in TIA](#importing-in-tia)). `gen_gsdml --interval 16` renders the 500 µs variant.
+
+**A GSDML declaring 500 µs does not guarantee TIA will offer it.** The controller's own
+interface can cap the achievable send clock below what the GSDML declares: on the HIL bench
+(`docs/bench-pnet-device.md` §6g), a 1515-2 PN's **X2** port — the device-facing segment — is
+RT-only with a fixed 1 ms send clock; 250/500 µs and IRT are only available on **X1**. TIA
+accepted `MinDeviceInterval="16"` in the file but its update-time list stopped at 1 ms anyway,
+because the ceiling is the physical port, not the GSDML. Testing 500 µs needs the device moved
+to X1.
 
 ## Using the device
 

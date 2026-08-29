@@ -38,8 +38,8 @@ S7‑1500 (1515‑2 PN).
 | RT cyclic exchange (PPM/CPM, IOPS/IOCS, watchdog, `SCHED_FIFO` thread) | `rt` | ✅ 1 ms held on PREEMPT_RT (edge Atom E3940). **L2-pair profile (default, Plan 7bis, HIL 2026-08-28)**: under load p99.99 13 µs / max 22.4 µs, idle p99.99 20 µs / max 22.7 µs, 0 missed ticks / 0 watchdog expirations over 1.2 M cycles (600078 + 597969). Single-core profile (Plan 7, HIL 2026-08-28), under load on CPUs 0-2: p99.99 147-203 µs / max ≤ 284 µs — see `docs/bench-pnet-device.md` §6e/§6f |
 | Alarms + I&M | `alarm`/`im` | ⏳ |
 | Typed device configuration (builder, layout rule, DCP/model derivation) | `config` | ✅ |
-| Generated GSDML (V2.4, matches `config` by construction — see `docs/gsdml.md`) | `gsdml` | ✅ HIL with our own GSDML on the S7-1500: 2026-08-29 — see `docs/bench-pnet-device.md` §6g |
-| Typed device facade (`IoDevice`, typed reads/writes, per-slot snapshots) | `api` | ✅ HIL with our own GSDML on the S7-1500: 2026-08-29 — see `docs/bench-pnet-device.md` §6g |
+| Generated GSDML (V2.4, matches `config` by construction — see `docs/gsdml.md`) | `gsdml` | ✅ HIL with our own GSDML on the S7-1500, 2026-08-29: import accepted by TIA V21 (device-view addresses = computed), 10 min at 1 ms, L2-pair profile, tick lateness p99.99 29 µs / max 61.1 µs, 0 missed ticks over 599 737 cycles — see `docs/bench-pnet-device.md` §6g |
+| Typed device facade (`IoDevice`, typed reads/writes, per-slot snapshots) | `api` | ✅ HIL with our own GSDML on the S7-1500, 2026-08-29: typed `REAL`/`BOOL` round trip verified in the watch table, same 10-minute 1 ms run as `gsdml` above — see `docs/bench-pnet-device.md` §6g |
 | HIL integration + determinism (real S7‑1500, jitter measurement) | — | 1 ms held against a real S7-1500, idle and under load, on PREEMPT_RT ✅ (HIL 2026-08-28, `docs/bench-pnet-device.md` §6e/§6f — L2-pair profile now the default); see the `rt` row above for numbers |
 
 ## Architecture

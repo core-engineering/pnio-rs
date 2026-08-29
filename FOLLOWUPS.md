@@ -247,3 +247,12 @@ facade (`docs/gsdml.md`, `docs/bench-pnet-device.md` §6g):
   never has to handle a `Box<dyn Any>` panic payload, but it means a caller can't distinguish "a
   clean stop" from "the RT thread panicked mid-run" through the `Result` alone. Revisit if a
   caller needs that distinction.
+- **500 µs bonus run, still untested**: the HIL bench's CPU (1515-2 PN) has the device wired to
+  its **X2** port, which is RT-only with a fixed 1 ms send clock — 250/500 µs and IRT are X1-only
+  (`docs/bench-pnet-device.md` §6g). Our GSDML declares `MinDeviceInterval="16"` (500 µs) and TIA
+  accepted it, but the bench never offered a shorter update time to test against. Move the device
+  to X1 (or find an X1-capable bench) and rerun the 500 µs, 5-minute bonus from spec §1.
+- **Diagnostic buffer not recorded for the §6g STOP→RUN run**: §6e/§6f's STOP→RUN tests confirmed
+  and recorded a clean TIA diagnostic buffer; the Plan 6 HIL run (`plan6-stoprun2`,
+  `docs/bench-pnet-device.md` §6g) confirmed the AR/freshness behavior but the diagnostic buffer
+  itself was not checked/recorded. Re-check it on the next STOP→RUN run with our own GSDML.
