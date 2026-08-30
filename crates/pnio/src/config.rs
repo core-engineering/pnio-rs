@@ -164,7 +164,10 @@ pub struct DeviceConfigBuilder {
     device_id: u16,
     min_device_interval: u16,
     submodules: Vec<SubmoduleSpec>,
-    im0: Im0,
+    /// `None` until [`DeviceConfigBuilder::im0`] is called: `build()` then derives
+    /// `order_id` from `station_type` (spec §5.4) instead of taking
+    /// [`Im0::default`]'s placeholder.
+    im0: Option<Im0>,
 }
 
 impl DeviceConfig {
@@ -176,7 +179,7 @@ impl DeviceConfig {
             device_id: 0x0001,
             min_device_interval: 32,
             submodules: Vec::new(),
-            im0: Im0::default(),
+            im0: None,
         }
     }
 
@@ -349,10 +352,16 @@ impl DeviceConfigBuilder {
         self.min_device_interval = v;
         self
     }
-    /// I&M0 device identity: order number, serial, hardware/software revision. Validated
-    /// by [`ImError`] on `build()`; defaults to [`Im0::default`].
+    /// I&M0 device identity: order number, serial, hardware/software revision.
+    /// Validated by [`ImError`] on `build()`.
+    ///
+    /// Left unset, `build()` takes [`Im0::default`] but replaces its placeholder
+    /// `order_id` with [`DeviceConfigBuilder::station_type`] truncated to 20 ASCII
+    /// bytes (spec §5.4), so a device that declares only its type still reports that
+    /// type as its I&M0 `OrderID` and in the GSDML's `ModuleInfo`. [`Im0::default`]
+    /// itself is unchanged for callers who build an `Im0` directly.
     pub fn im0(mut self, im0: Im0) -> Self {
-        self.im0 = im0;
+        self.im0 = Some(im0);
         self
     }
     /// Device → controller data in `slot` (the controller's inputs).
@@ -395,7 +404,11 @@ impl DeviceConfigBuilder {
         if self.vendor_id == 0 {
             return Err(ConfigError::BadIdentity);
         }
-        self.im0.validate()?;
+        let im0 = self.im0.unwrap_or_else(|| Im0 {
+            order_id: order_id_from_station_type(&self.station_type),
+            ..Im0::default()
+        });
+        im0.validate()?;
         if self.submodules.is_empty() {
             return Err(ConfigError::NoSubmodule);
         }
@@ -430,9 +443,19 @@ impl DeviceConfigBuilder {
             min_device_interval: self.min_device_interval,
             submodules,
             derived,
-            im0: self.im0,
+            im0,
         })
     }
+}
+
+/// The I&M0 `OrderID` a device gets when the builder was given no [`Im0`]: its
+/// `station_type`, kept to ASCII (the record's charset) and to the field's 20 bytes.
+fn order_id_from_station_type(station_type: &str) -> String {
+    station_type
+        .chars()
+        .filter(char::is_ascii)
+        .take(20)
+        .collect()
 }
 
 /// `layout` plus the size guard (computed in `u32` so an oversized declaration is
@@ -866,6 +889,47 @@ mod tests {
         let mac = crate::eth::MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]);
         let s = sample().setup(mac, [172, 16, 2, 10], None);
         assert_eq!(s.im0.serial_number, "PNIO-CD19F8");
+    }
+
+    #[test]
+    fn default_im0_takes_its_order_id_from_the_station_type() {
+        let cfg = DeviceConfig::builder("a")
+            .station_type("Foo")
+            .input(Slot(1), &[Bool])
+            .build()
+            .unwrap();
+        assert_eq!(cfg.im0().order_id, "Foo");
+        // Everything else stays `Im0::default()`.
+        assert_eq!(
+            cfg.im0(),
+            &Im0 {
+                order_id: "Foo".into(),
+                ..Im0::default()
+            }
+        );
+
+        // Longer than the 20-byte OrderID field: truncated, not a build error.
+        let cfg = DeviceConfig::builder("a")
+            .station_type("a station type far longer than twenty bytes")
+            .input(Slot(1), &[Bool])
+            .build()
+            .unwrap();
+        assert_eq!(cfg.im0().order_id, "a station type far l");
+
+        // An explicit `im0` still wins, whatever the station type.
+        let cfg = DeviceConfig::builder("a")
+            .station_type("Foo")
+            .input(Slot(1), &[Bool])
+            .im0(Im0 {
+                order_id: "Bar".into(),
+                ..Im0::default()
+            })
+            .build()
+            .unwrap();
+        assert_eq!(cfg.im0().order_id, "Bar");
+
+        // `Im0::default()` itself is untouched for direct users.
+        assert_eq!(Im0::default().order_id, "pnio device");
     }
 
     #[test]
