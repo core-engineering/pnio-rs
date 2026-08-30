@@ -146,10 +146,7 @@ fn alarm_handshake_err_rta_and_im0_read_replay_byte_exact() {
         .push_rx(golden_alarm("im0_read_req")[RPC_OFF..].to_vec(), cpu);
     dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
     let last = dev.rpc().sent().last().unwrap().0.clone();
-    assert_eq!(
-        last[80 + 20..],
-        golden_alarm("im0_read_res")[RPC_OFF + 80 + 20..]
-    );
+    assert_eq!(last, golden_alarm("im0_read_res")[RPC_OFF..].to_vec());
 
     // Diagnosis raise -> notification. Slot 1's idents (0x30/0x130) come from
     // `DeviceModel::pnet_sample`.
