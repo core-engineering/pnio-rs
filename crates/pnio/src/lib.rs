@@ -45,6 +45,7 @@ pub mod config;
 pub mod data;
 pub mod dcp;
 pub mod device;
+pub mod diag;
 pub mod eth;
 pub mod gsdml;
 pub mod rpc;
