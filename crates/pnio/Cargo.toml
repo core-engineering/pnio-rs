@@ -29,3 +29,7 @@ test = true
 [[example]]
 name = "typed_bringup"
 test = true
+
+[[example]]
+name = "latency_probe"
+test = true
