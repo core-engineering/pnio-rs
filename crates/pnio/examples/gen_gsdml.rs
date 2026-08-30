@@ -47,8 +47,7 @@ fn main() {
     let meta = GsdmlMeta {
         vendor_name: "Core Engineering".into(),
         product_family: "pnio".into(),
-        info_text: "pnio sample device: 16 REAL + 32 BOOL per direction (development identity)"
-            .into(),
+        info_text: "pnio sample device: 16 REAL + 32 BOOL per direction".into(),
         date: (2026, 8, 29),
     };
     let path = a.out.join(file_name(&meta));
