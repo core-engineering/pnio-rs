@@ -42,6 +42,10 @@ impl DataStatus {
     /// Primary provider, RUN, data valid, station OK: the steady-state cyclic value.
     pub const RUN_PRIMARY_VALID_OK: DataStatus = DataStatus(0x35);
 
+    /// Same as [`Self::RUN_PRIMARY_VALID_OK`] but with bit 5 (`Station_Problem_Indicator`)
+    /// cleared: the station reports a problem (e.g. a channel diagnosis is pending).
+    pub const RUN_PRIMARY_VALID_PROBLEM: DataStatus = DataStatus(0x15);
+
     /// Bit 0: `State.Primary` — 1 = primary AR, 0 = backup AR.
     pub fn primary(self) -> bool {
         self.0 & 0x01 != 0

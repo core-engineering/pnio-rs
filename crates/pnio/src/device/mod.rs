@@ -87,6 +87,11 @@ pub struct Device<E: EthTransport, R: RpcTransport> {
     /// Counters updated by the RT thread, readable via [`Device::rt_stats`] whether
     /// or not a runner is currently alive.
     stats: Arc<RtStats>,
+    /// Station problem indicator, shared with the RT thread via [`RtConfig`]: `true`
+    /// clears bit 5 (`Station_Problem_Indicator`) of the data status on every produced
+    /// frame. Read via [`Device::problem_indicator`]; driven by diagnosis bookkeeping
+    /// (Task 8).
+    problem: Arc<AtomicBool>,
     /// The currently running RT thread, if any (Linux-only: the runner itself is
     /// only ever built on Linux).
     #[cfg(target_os = "linux")]
@@ -108,6 +113,7 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             on_state_change: None,
             image: Arc::new(IoImage::empty()),
             stats: Arc::new(RtStats::default()),
+            problem: Arc::new(AtomicBool::new(false)),
             #[cfg(target_os = "linux")]
             runner: None,
             #[cfg(target_os = "linux")]
@@ -137,6 +143,13 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
     /// The RT thread's counters. Readable (and all-zero) even with no runner alive.
     pub fn rt_stats(&self) -> Arc<RtStats> {
         self.stats.clone()
+    }
+
+    /// Current station problem indicator: `true` means the produced frames carry
+    /// [`DataStatus::RUN_PRIMARY_VALID_PROBLEM`](crate::rt::DataStatus::RUN_PRIMARY_VALID_PROBLEM)
+    /// instead of the steady-state value.
+    pub fn problem_indicator(&self) -> bool {
+        self.problem.load(Ordering::Relaxed)
     }
 
     /// A clone of the current AR's negotiated parameters, if one is established.
@@ -300,6 +313,7 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             layout,
             image: self.image.clone(),
             stats: self.stats.clone(),
+            problem_indicator: self.problem.clone(),
             cpu_pin: rt.cpu_pin,
             rt_priority: rt.rt_priority,
             lock_memory: rt.lock_memory,

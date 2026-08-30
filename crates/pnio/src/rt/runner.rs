@@ -58,6 +58,9 @@ pub struct RtConfig {
     pub image: Arc<IoImage>,
     /// Counters, shared with the engine and readable from any thread.
     pub stats: Arc<RtStats>,
+    /// Station problem indicator, shared with the acyclic side: `true` clears bit 5
+    /// (`Station_Problem_Indicator`) of the data status on every produced frame.
+    pub problem_indicator: Arc<AtomicBool>,
     /// Pin the RT thread to this CPU, if set.
     pub cpu_pin: Option<usize>,
     /// Run the RT thread at this `SCHED_FIFO` priority, if set.
@@ -323,6 +326,7 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
         layout,
         image,
         stats,
+        problem_indicator,
         cpu_pin,
         rt_priority,
         lock_memory,
@@ -355,7 +359,13 @@ fn run_loop<T: EthTransport>(cfg: RtConfig, transport: T, timer: OwnedFd, shared
     let period = layout.input_cr.period();
     let mut snapshot = vec![0u8; layout.input_cr.data_length];
     let mut rx_buf = [0u8; MAX_FRAME_LEN];
-    let mut engine = RtEngine::new(layout, our_mac, cpu_mac, Arc::clone(&stats));
+    let mut engine = RtEngine::new(
+        layout,
+        our_mac,
+        cpu_mac,
+        Arc::clone(&stats),
+        Arc::clone(&problem_indicator),
+    );
 
     let socket_fd = transport.raw_fd();
     let mut fds = [timer.as_raw_fd(), shared.wake_fd.as_raw_fd(), 0];
@@ -760,6 +770,7 @@ mod tests {
             layout,
             image,
             stats,
+            problem_indicator: Arc::new(AtomicBool::new(false)),
             cpu_pin: None,
             rt_priority: None,
             lock_memory: false,
