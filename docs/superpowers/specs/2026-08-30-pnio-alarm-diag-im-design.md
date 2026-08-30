@@ -52,7 +52,7 @@ Out (recorded in `FOLLOWUPS.md` at close-out):
 
 All multi-byte fields big-endian. Alarm frames are Ethernet `0x8892` behind an 802.1Q tag: **High** = FrameID `0xFC01`, VLAN priority 6 (`TCI 0xC000`); **Low** = FrameID `0xFE01`, priority 5 (`TCI 0xA000`) — the tag headers the CPU sends in `AlarmCRBlockReq` (`AlarmCRTagHeaderHigh 0xC000`, `Low 0xA000`). Diagnosis alarms go on **Low**; ERR-RTA on the priority of the AR's last used channel (p-net and the CPU both used Low; we always use Low for ERR-RTA).
 
-### 4.1 RTA-PDU header (10 bytes after the FrameID)
+### 4.1 RTA-PDU header (12 bytes after the FrameID)
 
 | Offset | Field | Notes |
 |---|---|---|
