@@ -1078,6 +1078,12 @@ the empty table at the end.
    `sample_config`, or the config `typed_bringup` starts with). Confirm in the capture that
    `0xAFF0` answers OK on the DAP, on **both** interface subslots (`0/0x8000` and `0/0x8001` —
    §4.4 of the spec notes TIA reads both), and on each module subslot.
+   Also **confirm what TIA does with `IM_Supported` on the interface submodule, and record it**:
+   we answer `0x000E` there because p-net does (golden `im0_read_res_if`), but TIA's own reaction
+   to a non-DAP submodule claiming I&M1-3 is untested — does it offer the *Identification &
+   Maintenance* tab on the interface submodule too, and does a Write to `0xAFF1` on `0/0x8000`
+   behave? Note the answer in the results table; it decides whether the "same mask everywhere"
+   ruling stands or has to become DAP-only after all.
 4. **Device stop.** SIGINT `typed_bringup` mid-run (no `--diag` needed for this check). In the
    capture, confirm an ERR-RTA frame (`FrameID 0xFE01`) leaves the device before the socket
    closes; in TIA, the diagnostic buffer logs "IO device failure" (or equivalent CPU wording) with

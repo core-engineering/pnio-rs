@@ -291,13 +291,62 @@ and I&M0-3 (`docs/superpowers/specs/2026-08-30-pnio-alarm-diag-im-design.md`):
   over from the §6h robustness campaign, "Our own DCP responder was not exercised"); Plan 5 adds
   no new coverage here.
 - **`alarm_stats()` is per AR**: `IoDevice::alarm_stats()`'s counters (`sent`/`acked`/`retries`/
-  `unexpected_rx`/`send_failures`/`rx_err_rta`) mirror the *current* alarm channel and restart at
+  `unexpected_rx`/`send_failures`/`ack_timeouts`/`rx_err_rta`) mirror the *current* alarm channel and restart at
   0 on every reconnect (a fresh AR opens a fresh channel); only `alarm_rx_no_channel()` is
   cumulative for the process's lifetime. Accumulate across reconnects if a metrics consumer needs
   a running total.
 - **`gen_gsdml`'s `info_text` vs the in-crate golden `meta()`**: fixed in this same close-out
   (see the golden-catalogue identity fix below) — noted here because it was found while writing
   this plan's docs, not because anything remains open.
+- **Per-record Write status is not reported.** `cm::write::build_write_res`
+  (`crates/pnio/src/cm/write.rs`) hard-codes each record's `status` field to `0`. A malformed I&M
+  write is validated (`records::write_im_record` returns `write_invalid_parameter()`) and logged
+  at `warn`, but the controller is told OK. Carry the per-record status into the response once
+  the standard's exact per-record semantics are confirmed (see the IEC cross-check above).
+- **`read_record` ignores `api` and `record_data_length`.** `crates/pnio/src/cm/records.rs`
+  dispatches on `(slot, subslot, index)` only: a Read on a foreign API, or one whose
+  `record_data_length` is smaller than the 60-byte I&M0 record, is answered as if it asked for
+  API 0 with room to spare. The capture only ever shows API 0 and `0x8000` bytes.
+- **`PnioStatus::read_wrong_ar()` / `write_invalid_parameter()` codes are conventions.**
+  `0xDE 81 3D 03` and `0xDF 81 B0 02` (`crates/pnio/src/cm/status.rs`) were chosen to match what
+  the dissector names, not verified against IEC 61158-6-10; no capture contains either (p-net was
+  never asked a foreign-AR Read nor a bad Write). Fold into the IEC cross-check.
+- **No test for an unwritable `im_store` on persist.** Spec §8 says a write failure logs at
+  `error` and the Write is still answered OK, and `ImStore::persist` implements it, but nothing
+  exercises the failing branch (read-only directory, full disk). Likewise there is **no test for
+  the sequence wraps**: `AlarmSpecifier.sequence` at `0x7FF` and the RTA `SendSeqNum` at `0x7FFF`
+  are implemented (`crates/pnio/src/alarm/channel.rs`) and never reached by any test.
+- **`AlarmChannel::err_rta` takes `&mut self` needlessly**: it only reads `cfg`/`last_sent_seq`/
+  `last_rx_seq` and builds a frame. `&self` would let a caller build the abort frame while
+  holding a shared borrow; the signature is the only reason it cannot.
+- **`Diagnosis.direction` is a placeholder on the API path.** `IoDevice::raise_diagnosis` takes a
+  `Diagnosis` whose `direction` the caller fills in, then `DiagStore` overwrites it from the
+  device model's submodule (`crates/pnio/src/diag.rs`) — the field is derived, never an input.
+  Consider dropping it from the constructor/API type so callers cannot believe they set it.
+- **`ImStore`'s temp file is PID-only and leaks on a failed rename.** `.im-{pid}.tmp`
+  (`crates/pnio/src/im.rs`) collides if two devices in one process share a store path, and a
+  failed `rename` leaves the temp file behind (no `remove_file` on the error path).
+- **`Cm` holds a second `DeviceModel` clone.** `Cm::new` keeps `model.clone()` alongside the one
+  it hands `Ar::new` (`crates/pnio/src/cm/mod.rs`), so every AR carries two copies of the slot
+  table. An `Rc`/`Arc`, or reading the model back through `self.ar`, would remove the duplicate.
+- **`device/mod.rs` is ~1350 lines** and now carries the socket loop, the alarm plumbing, the
+  diagnosis queue drain and the ERR-RTA abort paths. Split the alarm/diagnosis half out before it
+  grows again.
+- **`SwRevision` has no `Display`.** `{prefix}{functional}.{bug_fix}.{internal}` is formatted by
+  hand in `gsdml::module_identity_xml` and in the docs/tests; one `impl Display` would make the
+  format single-sourced.
+- **Spec §2 "Out" items missing from the list above**, recorded here for completeness:
+  **AR/API-level diagnosis** (only channel diagnosis is produced), **`MaintenanceStatus` alarm
+  items** (the maintenance-required/-demanded qualifiers are neither encoded nor claimed), and
+  **controller-initiated alarms other than Alarm-Ack** (a CPU sends none to an IO-Device, so any
+  other DATA from it is counted `UnexpectedRx` and dropped).
+- **Design note — the `AwaitAlarmAck` timeout no longer aborts the AR** (ruled at final review,
+  spec §5.2/§8): once the transport ACK confirms delivery, a missing content-level Alarm-Ack for
+  `10 x rta_timeout` drops the alarm, counts `AlarmStats::ack_timeouts` and leaves the AR up,
+  where the first implementation resent the DATA and eventually aborted. Rationale: a CPU in STOP,
+  or one whose application is simply slow, must not cost us the AR. **Verify at HIL with the CPU
+  in STOP** (§6i): confirm the device stays connected, the counter moves, and the CPU picks the
+  diagnosis up again on the next Alarm-Ack it does send (or via the replay on reconnect).
 - **ERR-RTA for aborts before `Data`** (`AbortReason::ActivityTimeout`/`AppReadyFailed`) is
   impossible by construction, not a gap: `device::open_alarm_channel` only creates the alarm
   channel on a `Data` notify (`crates/pnio/src/device/mod.rs`), so `err_rta_code2` can compute a

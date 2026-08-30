@@ -2,7 +2,7 @@
 
 ## Provenance
 
-Captured on 2026-08-30 during a p-net v0.2.0 `pn_dev` handshake with a CPU 1515-2 PN (firmware V2.9.4) running TIA V21. Capture file: `captures/plan5-20260830/plan5-alarm.pcapng`, decoded with Wireshark 4.6.x using the `pn_io`/`pn_rt` dissectors. Ethernet MAC addresses: CPU `8c:f3:19:cd:19:f8`, p-net device `ec:1c:5d:61:e7:3c`. Test bench configuration: DGS-1008P switch in line; device on X1 at 32 ms (Plan 7bis baseline); I&M records read/write on DAP and interface.
+Captured on 2026-08-30 during a p-net v0.2.0 `pn_dev` handshake with a CPU 1515-2 PN (firmware V2.9.4) running TIA V21. Capture file: `captures/plan5-20260830/plan5-alarm.pcapng`, decoded with Wireshark 4.6.x using the `pn_io`/`pn_rt` dissectors. Ethernet MAC addresses: p-net device `8c:f3:19:cd:19:f8`, CPU `ec:1c:5d:61:e7:3c` (the catalogue's directions are the authority: every `CPU -> p-net` frame below has `8c:f3:…` as its Ethernet destination). Test bench configuration: DGS-1008P switch in line; device on X1 at 32 ms (Plan 7bis baseline); I&M records read/write on DAP and interface.
 
 ## Inventory
 

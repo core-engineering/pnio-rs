@@ -244,7 +244,7 @@ TIA already knows) needs no GSDML declaration, and this device never issues a pr
   (`{prefix}{functional}.{bug_fix}.{internal}`, e.g. `V0.1.0`) — the same [`Im0`](../crates/pnio/src/im.rs)
   `DeviceConfigBuilder::im0` passes to `setup()`. There is **no per-module `OrderNumber` suffix**:
   the device answers one identity on `0xAFF0` (the same record on every submodule, see
-  [I&M0 on every submodule](../docs/alarm-golden-frames.md)), so a `…-M1`/`…-M2` order number in the
+  [I&M0 on every submodule](alarm-golden-frames.md)), so a `…-M1`/`…-M2` order number in the
   GSDML would be an identity TIA displays and the wire never confirms. These GSDML values are what
   TIA shows in the module properties; **they must equal what the device actually answers on I&M0
   reads**, which is why both are sourced from the one `Im0` value rather than a separately-typed

@@ -117,7 +117,7 @@ impl PnioStatus {
 
     /// PNIORW: write problem, invalid parameter — a Write record on an I&M1-3 index
     /// (`0xAFF1..=0xAFF3`) whose shape [`crate::im::ImStore::write`] rejects, or whose
-    /// `(slot, subslot)` is not the writable one (the DAP). `Code = 0xDF` (the Write
+    /// `(slot, subslot)` is absent from the device model. `Code = 0xDF` (the Write
     /// family byte, as in `write_wrong_ar`/`write_index_unsupported`), `Code1 = 0xB0`
     /// (the same index/parameter family byte as `write_index_unsupported`), `Code2 =
     /// 0x02` ("invalid parameter", distinct from `write_index_unsupported`'s "invalid
