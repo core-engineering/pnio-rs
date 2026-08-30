@@ -592,4 +592,63 @@ mod tests {
         );
         assert!(!dev.rt_running());
     }
+
+    /// Always fails `send`, so the RT thread's very first tick reports
+    /// `RtEvent::SocketError` and exits, through the real event path — same
+    /// mechanism as `watchdog_event_aborts_the_ar`, but for the socket-failure
+    /// branch of `drain_rt_events` rather than the consumer-watchdog one.
+    struct FailingTransport;
+
+    impl EthTransport for FailingTransport {
+        fn send(&self, _frame: &[u8]) -> Result<(), TransportError> {
+            Err(TransportError::Io(std::io::Error::other("boom")))
+        }
+        fn recv_into(
+            &self,
+            _buf: &mut [u8],
+            _timeout: Option<Duration>,
+        ) -> Result<Option<usize>, TransportError> {
+            Ok(None)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_error_event_aborts_the_ar_with_rt_socket() {
+        let eth = MockTransport::new();
+        let rpc = MockRpcTransport::new();
+        let cpu = "172.16.2.100:54766".parse().unwrap();
+        let cpu_cm = "172.16.2.100:34964".parse().unwrap();
+        rpc.push_rx(golden("connect_req")[RPC_OFF..].to_vec(), cpu);
+        rpc.push_rx(golden("prmend_req")[RPC_OFF..].to_vec(), cpu);
+        rpc.push_rx(golden("appready_res")[RPC_OFF..].to_vec(), cpu_cm);
+        let mut s = setup();
+        s.rt = Some(RtOptions {
+            iface: "mock".into(),
+            cpu_pin: None,
+            rt_priority: None,
+            lock_memory: false,
+        });
+        let mut dev = Device::new(s, eth, rpc);
+        dev.with_runner_factory(|cfg| RtRunner::spawn_with_transport(cfg, FailingTransport));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        dev.on_state_change(move |st, why| s2.lock().unwrap().push((st, why)));
+
+        dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.state(), ArState::Data);
+        assert!(dev.rt_running());
+
+        // Give the RT thread a chance to take its first tick against the always-
+        // failing transport and push `SocketError` before the next `step` drains it.
+        std::thread::sleep(Duration::from_millis(60));
+        dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
+
+        assert_eq!(dev.state(), ArState::Idle);
+        assert_eq!(
+            seen.lock().unwrap().last(),
+            Some(&(ArState::Idle, Some(AbortReason::RtSocket)))
+        );
+        assert!(!dev.rt_running());
+    }
 }

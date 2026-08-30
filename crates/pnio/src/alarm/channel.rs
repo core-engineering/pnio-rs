@@ -633,4 +633,112 @@ mod tests {
         assert_eq!(ch.on_frame(&[0u8; 10], t0), vec![AlarmAction::UnexpectedRx]);
         assert_eq!(ch.stats().unexpected_rx, 2);
     }
+
+    #[test]
+    fn await_alarm_ack_timeout_resends_data_and_requires_a_fresh_transport_ack() {
+        let t0 = Instant::now();
+        let mut ch = AlarmChannel::new(cfg());
+        let out = ch.enqueue(process_req(1), t0).unwrap();
+        let first_frame = sends(&out)[0].clone();
+        assert_eq!(first_frame, golden_alarm("alarm_process_notif"));
+
+        let out = ch.on_frame(&golden_alarm("alarm_ack_rta_high_cpu"), t0);
+        assert!(out.is_empty(), "transport ack produces nothing to send");
+        assert_eq!(ch.in_flight(), Some(1));
+
+        // Timeout while AwaitAlarmAck (3 = cfg().rta_retries): each resend is
+        // byte-identical to the original DATA, and the CPU must re-ack it at the
+        // transport level again before the next timeout — a fresh AwaitAlarmAck,
+        // not a no-op.
+        let mut t = t0;
+        for i in 1..=3u64 {
+            t += Duration::from_millis(101);
+            let out = ch.on_tick(t);
+            assert_eq!(
+                sends(&out),
+                vec![first_frame.clone()],
+                "resend {i} must replay the original DATA byte-for-byte"
+            );
+            assert_eq!(ch.stats().retries, i);
+            assert_eq!(ch.in_flight(), Some(1));
+
+            let ack_out = ch.on_frame(&golden_alarm("alarm_ack_rta_high_cpu"), t);
+            assert!(
+                ack_out.is_empty(),
+                "resend {i}'s transport ack must be accepted (nothing to send)"
+            );
+            assert_eq!(ch.in_flight(), Some(1));
+        }
+
+        // A fourth timeout, past `rta_retries`, aborts instead of resending again.
+        t += Duration::from_millis(101);
+        let out = ch.on_tick(t);
+        assert_eq!(
+            out,
+            vec![AlarmAction::Abort(crate::cm::AbortReason::AlarmSendFailed)]
+        );
+        assert_eq!(ch.stats().retries, 3);
+        assert_eq!(ch.stats().send_failures, 1);
+        assert_eq!(ch.in_flight(), None);
+    }
+
+    #[test]
+    fn transport_ack_while_idle_is_counted_and_produces_nothing() {
+        let t0 = Instant::now();
+        let mut ch = AlarmChannel::new(cfg());
+        assert_eq!(ch.in_flight(), None);
+        let out = ch.on_frame(&golden_alarm("alarm_ack_rta_high_cpu"), t0);
+        assert!(out.is_empty());
+        assert_eq!(ch.stats().unexpected_rx, 1);
+    }
+
+    #[test]
+    fn mismatched_alarm_ack_while_awaiting_is_unexpected_but_still_transport_acked() {
+        let t0 = Instant::now();
+        let mut ch = AlarmChannel::new(cfg());
+        ch.enqueue(process_req(1), t0).unwrap();
+        ch.on_frame(&golden_alarm("alarm_ack_rta_high_cpu"), t0);
+        assert_eq!(ch.in_flight(), Some(1));
+
+        // alarm_diag_ack_cpu carries a Diagnosis AlarmAck; the in-flight alarm is
+        // Process, so it cannot satisfy AwaitAlarmAck — but it is still a new,
+        // valid DATA that must be ack'd at the transport level.
+        let out = ch.on_frame(&golden_alarm("alarm_diag_ack_cpu"), t0);
+        assert!(
+            out.iter().any(|a| matches!(a, AlarmAction::Send(_))),
+            "the ACK-RTA is still sent: {out:?}"
+        );
+        assert!(out.contains(&AlarmAction::UnexpectedRx));
+        assert!(!out.iter().any(|a| matches!(a, AlarmAction::Acked { .. })));
+        assert_eq!(
+            ch.in_flight(),
+            Some(1),
+            "AwaitAlarmAck must not be disturbed"
+        );
+    }
+
+    #[test]
+    fn notification_from_the_controller_is_transport_acked_but_unexpected() {
+        let t0 = Instant::now();
+        let mut ch = AlarmChannel::new(cfg());
+        ch.enqueue(process_req(1), t0).unwrap();
+        ch.on_frame(&golden_alarm("alarm_ack_rta_high_cpu"), t0);
+        assert_eq!(ch.in_flight(), Some(1));
+
+        // alarm_process_notif is captured device(DEV) -> CPU; swap src/dst so it
+        // looks like the controller sending *us* a Notification instead.
+        let mut f = golden_alarm("alarm_process_notif");
+        let (dst, src) = (f[0..6].to_vec(), f[6..12].to_vec());
+        f[0..6].copy_from_slice(&src);
+        f[6..12].copy_from_slice(&dst);
+        assert_eq!(&f[0..6], &DEV.0[..], "dst is now our own MAC");
+        assert_eq!(&f[6..12], &CPU.0[..], "src is now the controller's MAC");
+        let out = ch.on_frame(&f, t0);
+        assert!(
+            out.iter().any(|a| matches!(a, AlarmAction::Send(_))),
+            "the ACK-RTA is still sent: {out:?}"
+        );
+        assert!(out.contains(&AlarmAction::UnexpectedRx));
+        assert_eq!(ch.in_flight(), Some(1));
+    }
 }
