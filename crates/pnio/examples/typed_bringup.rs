@@ -102,19 +102,6 @@ fn parse_diag_spec(s: &str) -> Result<DiagSpec, String> {
     })
 }
 
-/// Every name `ChannelError::from_name` accepts, for the `--diag` usage/error message.
-const DIAG_ERROR_NAMES: &[&str] = &[
-    "short-circuit",
-    "undervoltage",
-    "overvoltage",
-    "overload",
-    "overtemperature",
-    "line-break",
-    "upper-limit",
-    "lower-limit",
-    "error",
-];
-
 /// Same builder as `gen_gsdml`'s `sample_config` (inline copy — see the module doc: each
 /// bring-up example stays standalone).
 fn sample_config(station: &str) -> DeviceConfig {
@@ -205,7 +192,7 @@ fn main() {
         .map(|s| {
             parse_diag_spec(s).unwrap_or_else(|e| {
                 eprintln!("--diag {e}");
-                eprintln!("accepted error names: {}", DIAG_ERROR_NAMES.join(", "));
+                eprintln!("accepted error names: {}", ChannelError::names().join(", "));
                 std::process::exit(2);
             })
         })

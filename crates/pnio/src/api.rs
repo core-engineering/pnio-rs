@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn stop_sends_err_rta() {
-        use crate::alarm::{parse_frame, RtaBody};
+        use crate::alarm::{is_alarm_frame, parse_frame, RtaBody};
         use crate::cm::PnioStatus;
 
         let (dev, eth) = started();
@@ -1252,8 +1252,17 @@ mod tests {
 
         dev.stop().unwrap();
 
+        // The RT thread shares this mock's `tx` buffer with the acyclic loop, so a
+        // cyclic frame can land on the wire after the ERR-RTA (Device::shutdown
+        // sends it before `dispatch` stops the runner) — the last *alarm* frame is
+        // the ERR-RTA, not necessarily the last frame overall. Same filtering as
+        // `device::tests::shutdown_sends_err_rta_ar_removed`.
         let sent = eth.sent();
-        let last = sent.last().expect("stop must send something on the wire");
+        let last = sent
+            .iter()
+            .rev()
+            .find(|f| is_alarm_frame(f))
+            .expect("stop must send an ERR-RTA on the wire");
         let pdu = parse_frame(last).expect("ERR-RTA must parse as an RTA PDU");
         assert_eq!(
             pdu.body,

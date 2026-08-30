@@ -47,19 +47,29 @@ impl ChannelError {
         }
     }
 
+    /// Every name [`ChannelError::from_name`] accepts, in the same order as
+    /// [`ChannelError::from_code`]'s codes (1..=9) — the single source of truth for
+    /// CLI help/error text that needs to list them (e.g. `typed_bringup`'s `--diag`).
+    pub const fn names() -> &'static [&'static str] {
+        &[
+            "short-circuit",
+            "undervoltage",
+            "overvoltage",
+            "overload",
+            "overtemperature",
+            "line-break",
+            "upper-limit",
+            "lower-limit",
+            "error",
+        ]
+    }
+
+    /// Inverse of `names()[error.code() as usize - 1] == name`: looks `s` up in
+    /// [`ChannelError::names`] and resolves it through [`ChannelError::from_code`],
+    /// so the two never drift apart.
     pub fn from_name(s: &str) -> Option<ChannelError> {
-        match s {
-            "short-circuit" => Some(ChannelError::ShortCircuit),
-            "undervoltage" => Some(ChannelError::Undervoltage),
-            "overvoltage" => Some(ChannelError::Overvoltage),
-            "overload" => Some(ChannelError::Overload),
-            "overtemperature" => Some(ChannelError::Overtemperature),
-            "line-break" => Some(ChannelError::LineBreak),
-            "upper-limit" => Some(ChannelError::UpperLimitExceeded),
-            "lower-limit" => Some(ChannelError::LowerLimitExceeded),
-            "error" => Some(ChannelError::Error),
-            _ => None,
-        }
+        let idx = Self::names().iter().position(|&n| n == s)?;
+        Self::from_code(idx as u16 + 1)
     }
 }
 
@@ -286,6 +296,13 @@ mod tests {
             severity: s,
             direction: Direction::Input,
         }
+    }
+
+    #[test]
+    fn every_name_round_trips_through_from_name() {
+        assert!(ChannelError::names()
+            .iter()
+            .all(|&n| ChannelError::from_name(n).is_some()));
     }
     #[allow(clippy::clone_on_copy)] // brief's test helper, kept verbatim
     fn chan(n: &AlarmNotification) -> ChannelDiagnosis {
