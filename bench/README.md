@@ -198,3 +198,23 @@ Before step 3 of `campaign.sh` (the first `rt_bringup` run):
   whole campaign — cyclictest and `rt_bringup`, idle and load — at a shorter, 120 s
   duration; not a bare `rt_bringup --duration 120` call), done by hand first as a
   non-regression check at the old update time.
+
+## Robustness campaign tools (docs/bench-pnet-device.md §6h)
+
+- `bcast_storm.py` — unprivileged broadcast storm: UDP datagrams to the subnet broadcast
+  address, 1514-byte frames paced to a wire bit rate (`--mbit`), catch-up burst capped at 2 ms.
+  A switch floods every one to the controller's port.
+  `taskset -c 0 nice -n 10 python3 bcast_storm.py --bind 172.16.2.10 --target 172.16.2.255 --mbit 80 --seconds 240`
+- `dcp_storm.py` — raw DCP Identify-All (or `--station <name>`) requests at `--rate` per
+  second. Needs `cap_net_raw`: `cp "$(readlink -f /usr/bin/python3)" ~/bench/python3-raw &&
+  sudo setcap cap_net_raw+eip ~/bench/python3-raw`, then
+  `./python3-raw dcp_storm.py --iface eno2 --rate 5000 --seconds 240`. A storm sent from the
+  device's own interface only reaches the device's sockets as `PACKET_OUTGOING` — it loads the
+  controller and the switch, not our responders (use a second host for that).
+- `parse_rt.py` — `python3 parse_rt.py <capture> [gap_seconds]`: counts RT FrameIDs from the raw
+  Ethernet bytes (pcap or pcapng, any snaplen ≥ 20) and lists inter-frame gaps above the
+  threshold for `0x8000`/`0x8001`, per direction — the PN dissector gives up on truncated
+  frames, this does not.
+- `examples/latency_probe` (crate example) is the edge-side probe; the PLC-side sources
+  (`BenchData`, `LatencyEcho`, `Preemptor`, `pnioDev` tags) live in the `test-program`
+  deliverable, not here.

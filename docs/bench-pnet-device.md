@@ -868,6 +868,154 @@ the reason `reused`/`deferred` stay at the 1 ms level.
   is necessary but not sufficient to get a shorter cycle — the CPU's physical port matters too.
   On X1 the same device, binary and GSDML ran at 500 µs (0 missed ticks over 596 899 cycles).
 
+## 6h. HIL — robustness campaign at 500 µs (2026-08-29/30)
+
+After §6g, a campaign designed not to prove the cycle again but to see what breaks it: an
+application-level latency loop through a cyclic OB, PLC CPU load in three flavours, a link
+loss, a 12 h 51 soak, two unmanaged switches in line, broadcast storms and a DCP storm. CPU X1
+port (100 Mbit, send clock 500 µs), same edge and L2-pair profile as §6g. Raw numbers, logs
+and captures: `captures/robustness-20260829/` (git-ignored, `notes.md` is the ledger).
+
+### Setup
+
+- **Edge side:** `examples/latency_probe` (this campaign's tool, merged with it). Every
+  `--period-us 500` iteration it publishes a free-running `u32` counter as the bit pattern of
+  slot 1 `REAL 0` and reads slot 3 `REAL 0` (the echo) and `REAL 1` (the OB's own counter) from
+  one consistent snapshot. Two histograms, in probe cycles: **`echo_age`** — our counter minus
+  the echoed one, i.e. the complete edge → IO → OB pickup → IO → edge loop — and
+  **`ob_period`** — iterations between two changes of the OB counter. Anomaly counters: echo
+  frozen > 50 ms (`stalls`), echo going backwards, OB counter advancing by ≥ 2 between two
+  sightings (`ob_jumps`, an OB output the wire never carried). Same command line throughout:
+
+  ```bash
+  ./latency_probe --iface eno2 --ip 172.16.2.10 --rt-priority 80 --cpu 3 --app-cpus 0-1 \
+    --lock-memory --period-us 500 --duration <N> --stats-every <S> > logs/<name>.log
+  ```
+
+- **PLC side** (sources in the `test-program` deliverable, `plc-code/PLC_BENCH`, not in this
+  repo): global DB `BenchData`; cyclic OB `LatencyEcho` (**5000 µs, priority 8**, process image
+  partition **PIP 1** assigned on the device's input and output modules) doing
+  `devOut_Echo := devIn_Counter; ob30Count += 1; devOut_Ob30 := ob30Count` then an optional
+  `FOR` load loop (`load30Iter`, ≈ 12 µs per iteration, SQRT/SIN in SCL); cyclic OB
+  `Preemptor` (**1000 µs, priority 15**, `load31Iter` loop only); OB1 with a `loadIter` loop and
+  a slow self-check. Tag table `pnioDev` mirrors the 16 `REAL` + 32 `BOOL` per direction of the
+  §6g GSDML. The PIP assignment lives on the module I/O addresses, not on the OB — see Lessons.
+
+- **Load generators** (`bench/`): `bcast_storm.py` — unprivileged UDP datagrams to the subnet
+  broadcast address (each is an Ethernet `ff:ff:ff:ff:ff:ff` frame the switch floods to the
+  CPU's port), 1514-byte frames paced to a wire bit rate, catch-up burst capped at 2 ms;
+  `dcp_storm.py` — raw DCP Identify-All requests at a paced rate (needs `cap_net_raw`, run
+  through a `python3` copy carrying it). Both sent from the edge's `eno2`, through the switch.
+  `parse_rt.py` — RT FrameID gap finder on raw pcap/pcapng bytes (the PN dissector gives up on
+  truncated snaplens).
+
+### Runs
+
+| # | Run | Condition | Duration | `echo_age` p50 / p99 / p99.99 / max (ms) | `ob_period` max (ms) | stalls / jumps | Device watchdog / missed ticks |
+|---|---|---|---|---|---|---|---|
+| 1 | Baseline | direct cable, all loads 0 | 518 s (1 035 810 samples) | 3.00 / 5.00 / 5.50 / 5.50 | 5.00 | 0 / 0 | 0 / 0 |
+| 2 | OB1 load ramp | `loadIter` 1000 → 8000 (OB1 cycle 11.7 → 94.5 ms) | ~10 min | 3.00 / 5.00 / 5.50 / 5.50 | 5.00 | 0 / 0 | 0 / 0 |
+| 3 | OB30 self-load | `load30Iter` 0 → 200 (OB exec ≈ 2.3 ms) | 396 s | p50 3 → 4, max 5.50 → **7.50** | 5.50 | 0 / 0 | 0 / 0 |
+| 4 | OB31 priority steal | `load31Iter` 0 → 60 (≈ 24 → 72 % of CPU time at prio 15) | 362 s | 3.00 / 5.00 / 5.50 / 5.50 | 5.50 | 0 / 0 | 0 / 0 |
+| 5 | Link loss | X1 cable pulled ≈ 13 s | 300 s | — | — | 0 after recovery / 1 | 1 (the loss) / 0 |
+| 6 | **Soak** | direct, loads 0 | **46 266 s** (79 655 343 samples) | **3.00 / 5.00 / 5.00 / 5.50** | **5.00** | **0 / 0** | **0 / 0** |
+| 7 | GS105 quiet | Netgear GS105 in line | 300 s | 3.00 / 5.00 / 5.00 / 5.50 | 5.00 | 0 / 0 | 0 / 0 |
+| 8 | GS105 + broadcast 10 Mbit/s | 813 pps | 300 s | 3.00 / 5.00 / 5.00 / 5.50 | 5.00 | 0 / 0 | 0 / 0 |
+| 9 | GS105 + broadcast 40 Mbit/s | 3250 pps | 300 s | 3.00 / 5.00 / 5.50 / 6.00 | 5.00 | 0 / 0 | 0 / 0 |
+| 10 | **GS105 + broadcast 80 Mbit/s** | 6502 pps, two runs | 2 × 300 s | 3.00 / 5.00 / 5.5-8.0 / **18-19** | 18-19 | 0 / 4 | **3 then 4 AR aborts** / 0 |
+| 11 | DGS-1008P + broadcast 40 Mbit/s | D-Link DGS-1008P in line | 300 s | 3.00 / 5.00 / 5.50 / 5.50 | 5.00 | 0 / 1 | 0 / 0 |
+| 12 | **DGS-1008P + broadcast 80 Mbit/s** | 6502 pps | 300 s | **3.00 / 5.00 / 5.50 / 5.50** | 5.00 | 0 / 1 | **0** / 0 |
+| 13 | DCP Identify-All 1000/s | DGS-1008P | 300 s | 3.00 / 5.00 / 5.00 / 5.50 | 5.00 | 0 / 0 | 0 / 0 |
+| 14 | DCP Identify-All 5000/s | DGS-1008P | 300 s | 3.00 / 5.00 / 5.50 / 5.50 | 5.00 | 0 / 0 | 0 / 0 |
+
+Device-side stats over the soak (run 6): `tx=92 530 954 rx_accepted=92 531 099`,
+`rx_ignored/dropped/invalid/reordered=0`, `max_tick_lateness` 36.6 µs, `max_cycle_work`
+117.9 µs, `max_rx_interval` 588 µs. Across all 14 runs the device itself never dropped,
+ignored or reordered a frame and never missed a tick; the only watchdog expirations are the
+link loss and the seven GS105 aborts, all initiated on the wire, not by the stack.
+
+### What the loop measures
+
+`echo_age` is dominated by the OB period, not by transport: the OB samples the input image
+every 5 ms, so a counter written just after a pickup waits up to 5 ms; add one 500 µs cycle each
+way and the hard bound is 5.5 ms, the median 3 ms. The transport itself is the §6g figure
+(`rx_interval` max ≈ 0.6 ms). The 12 h 51 soak never exceeded that bound (p99.99 = 5.00 ms,
+max = 5.50 ms over 79.7 M samples, `ob_period` = 5.00 ms at every percentile including max).
+
+### PLC CPU load (runs 2-4)
+
+OB1 load up to a 94.5 ms cycle (OB80 trips at 150 ms) has **zero** effect on either the 5 ms OB
+or the 500 µs exchange — the PN interface and cyclic OBs run above OB1. Loading the echo OB
+itself shifts the loop by exactly its execution time (`max` 5.5 → 7.5 ms at ≈ 2.3 ms of load:
+the echo is written at OB start but the output image ships at OB end), which is the relation
+one would design for. A higher-priority 1 ms OB stealing up to ≈ 72 % of the CPU does **not**
+move the loop at 0.5 ms resolution: `LatencyEcho` is µs-light, so being preempted costs it
+nothing visible. Only the echo OB's own work moves the loop.
+
+### Link loss (run 5)
+
+Cable pulled ≈ 13 s (15.07 s of wire silence). The device aborted on its RT watchdog (AR
+`Data → Idle`) and sat in `Idle`. Once the link came back: CPU DCP Identify at t₀, our
+`Ident Ok` **+84 µs**, `Connect` request +2.9 ms, response +3.2 ms, first cyclic CPU → device
+frame at **t₀ + 7.4 ms**, probe `Fresh` again, `stalls=0` afterwards, one `ob_jump` (the OB
+kept counting through the outage — expected). Recovery is bounded by the CPU's re-probe, not by
+the stack. The same probe also flags a CPU in STOP as `freshness=Stopped` while the AR stays in
+`Data` (seen when the loads were reset with the CPU stopped).
+
+### Switches and broadcast storms (runs 7-12)
+
+Both unmanaged gigabit switches are transparent at rest (run 7 = baseline). Under broadcast
+load the two behave differently, and the capture says why. At **80 Mbit/s through the GS105**
+the AR aborted 3 then 4 times in 240 s (recovering in ≈ 1.5 s each time, the CPU's DCP re-probe
+delay). `storm80-rt.pcapng` (RT frames only, `parse_rt.py`): the CPU's frames reached the edge
+every 500 µs up to the very last one; **the CPU stopped first**, we kept sending for
+1.7-2.0 ms (watchdog + processing), then the CPU sent an `ERR-RTA-PDU` (FrameID `0xFE01`):
+`ErrorCode 0xCF / ErrorDecode 0x81 / ErrorCode1 253 RTA_ERR_CLS_PROTOCOL / ErrorCode2 5 "AR
+consumer DHT/WDT expired"`. The CPU's diagnostic buffer logs the same event as "IO device
+failure – Watchdog time expired" (coding `81 81 FD 05`). So the CPU did not receive our frames
+within its 3 × 500 µs watchdog even though they left the edge 0.48-0.52 ms apart: they queued
+behind broadcasts in the switch's egress queue toward the **100 Mbit X1 port**. At 80 Mbit/s
+that port is ρ ≈ 0.8 busy — mean queue ≈ 4 × 121 µs frames, rare tails > 1.5 ms — while at
+40 Mbit/s (ρ = 0.4) the tail never reaches the watchdog: 0 events in run 9, consistent. Both
+directions carry the RT VLAN tag with priority 6 (`TCI 0xC000`, verified in the capture), so
+the GS105 simply does not enforce 802.1p on them. The **DGS-1008P does**: at 80 Mbit/s it is
+indistinguishable from the baseline (run 12), the RT frames overtake the storm. The stack
+itself was never the bottleneck: 0 dropped/ignored frames, 0 missed ticks, tick lateness max
+276 µs and cycle work max 408 µs under the 80 Mbit/s storm (the `send` path shares the NIC
+queue with the storm generator), well inside the 500 µs budget.
+
+### DCP storm (runs 13-14)
+
+Identify-All at 1000/s and 5000/s from the edge, DGS-1008P in line: the RT exchange is
+untouched (0 watchdog, `echo_age` max 5.50 ms, 0 `ob_jumps`); tick lateness max rose from
+≈ 60 µs to 319 µs at 5000/s because `eno2`'s interrupt vectors sit on the RT core and now
+carry 5000 pps of requests plus the CPU's responses — still 0 missed ticks. The CPU answered
+239 979 / 239 979 requests at 1000/s and 1 199 820 / 1 199 822 at 5000/s. **Our own DCP
+responder was not exercised:** a storm emitted on `eno2` reaches our sockets only as
+`PACKET_OUTGOING`, which `recv_into` discards by design; we answered exactly the one genuine
+Identify the CPU sent. Our acyclic socket did ingest the CPU's 1.2 M Identify responses without
+effect. Loading our responder on HIL needs a second host on the segment — open follow-up.
+
+### Lessons
+
+- **The application loop is bounded by the OB period, not the transport.** For an edge ↔ PLC
+  loop the number that matters is OB period + 2 cycles (5.5 ms here); shortening the cycle
+  below the OB period buys freshness, not latency.
+- **A cyclic OB's PIP assignment lives on the module I/O addresses, not on the OB.** A TIA
+  source re-import can silently drop it (echo dead, OB counter still running); re-attach it on
+  the module (`I/O addresses → Organization block / Process image`). Likewise OB events lost on
+  source import must be re-attached, and OBs written as SCL sources cannot carry `VAR_TEMP` —
+  loop indexes go in a DB.
+- **An unmanaged switch is only transparent if it honours 802.1p.** With a 100 Mbit port in the
+  path, non-RT load above ≈ 50 % of that port turns queueing tails into controller watchdog
+  aborts unless the switch prioritises the RT frames (DGS-1008P yes, GS105 no). Use a
+  PROFINET-conformant / strict-802.1p switch when RT shares a slow port with anything else.
+- **Attribute an abort from the wire before touching code.** "RT consumer watchdog expired" on
+  our side looked like our bug; the capture showed the CPU stopped first and its RTA said why.
+  Truncated captures (`-s 96`) break the PN dissector — parse the FrameID from raw bytes.
+- **A storm sent from the device's own interface does not load the device's receivers.** Any
+  test of *our* acyclic responders needs a second host.
+
 ## 7. Next steps
 Plan 3 (`cm`/AR), Plan 4 (`rt`, cyclic exchange), Plan 7 (1 ms determinism) and **Plan 7bis
 (L2-pair isolation) are all done**. `examples/rt_bringup` holds a 1 ms PROFINET update time
@@ -887,6 +1035,12 @@ without changing the CPU layout.
 `REAL`/`BOOL` round trips verified in the watch table. The 500 µs bonus was then met on the
 CPU's X1 port (X2 is RT-only, fixed at 1 ms): 5 minutes at 500 µs, `PASS`, p99.99 lateness
 27 µs — no code, edge or GSDML change, only the cable and the CPU's send clock.
+
+**The robustness campaign (§6h) is done**: 12 h 51 soak at 500 µs with 0 anomalies over 79.7 M
+application samples, PLC CPU load and a link loss without effect on the stack, and the one
+failure mode found — controller watchdog aborts under an 80 Mbit/s broadcast storm through a
+switch that does not honour 802.1p on a 100 Mbit port — attributed on the wire to the switch,
+not to the stack. Open from it: loading our DCP responder needs a second host on the segment.
 
 Next is **Plan 5 (alarms + I&M/diagnosis)** — ERR-RTA on device stop, `ProblemIndicator`/
 diagnosis reporting, minimal `Read`/`ReadImplicit` beyond the PNIORW refusal. The V2.31+ GSDML
