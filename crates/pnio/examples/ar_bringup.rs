@@ -6,6 +6,7 @@ use pnio::cm::model::DeviceModel;
 use pnio::dcp::{DcpConfig, DeviceProperties};
 use pnio::device::{Device, DeviceSetup};
 use pnio::eth::{AfPacketTransport, MacAddr};
+use pnio::im::Im0;
 use pnio::rpc::{UdpRpcTransport, Uuid, PNIO_UDP_PORT};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -86,6 +87,8 @@ fn main() {
             Uuid(b)
         },
         rt: None,
+        im0: Im0::default(),
+        im_store: None,
     };
     let eth = AfPacketTransport::open(&a.iface).expect("AF_PACKET (need cap_net_raw)");
     let rpc = UdpRpcTransport::bind(std::net::SocketAddr::from(([0, 0, 0, 0], PNIO_UDP_PORT)))

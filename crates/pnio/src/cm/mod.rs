@@ -7,6 +7,7 @@ pub mod block;
 pub mod connect;
 pub mod control;
 pub mod model;
+pub mod records;
 pub mod status;
 pub mod write;
 
@@ -21,9 +22,11 @@ pub use block::{
 pub use connect::{build_connect_res, validate, ArParams, ConnectReq, IocrParams};
 pub use control::{app_ready_req, cmd, prm_end_done, release_done, ControlBlock};
 pub use model::{DeviceModel, SlotModel, SubmoduleModel};
+pub use records::{build_read_res, read_record, write_im_record, ReadReq, RecordCtx};
 pub use status::{ConnectBlock, PnioStatus};
 pub use write::{build_write_res, Record, WriteReq, INDEX_MULTIPLE_WRITE};
 
+use crate::im::{Im0, ImStore, INDEX_IM1, INDEX_IM3};
 use crate::rpc::{
     Drep, NdrRequest, NdrResponse, Opnum, PacketType, RpcError, RpcHeader, Uuid, FLAG1_IDEMPOTENT,
     FLAG1_NO_FACK, PNIO_CONTROLLER_INTERFACE, PNIO_DEVICE_INTERFACE, PNIO_UDP_PORT,
@@ -115,6 +118,13 @@ fn respond(status: PnioStatus) -> Vec<Action> {
     }]
 }
 
+fn respond_ok(blocks: Vec<u8>) -> Vec<Action> {
+    vec![Action::Respond {
+        status: PnioStatus::OK,
+        blocks,
+    }]
+}
+
 /// RPC datagram <-> AR glue: parses the DCE-RPC/NDR/PNIO envelope of an incoming UDP
 /// datagram, feeds the pure [`Ar`] state machine the resulting [`Event`], and wraps its
 /// [`Action`]s back into complete RPC PDUs — byte-exact against the golden p-net <-> CPU
@@ -123,6 +133,15 @@ fn respond(status: PnioStatus) -> Vec<Action> {
 /// number / controller address used for our outgoing ApplicationReady calls.
 pub struct Cm {
     ar: Ar,
+    /// Own copy of the device model (`Ar` holds one too, for Connect validation):
+    /// needed here to serve I&M reads/writes without a model accessor on `Ar`.
+    model: DeviceModel,
+    /// Device identity answered by I&M0 reads; `Im0::default()` until [`Cm::set_im`]
+    /// is called.
+    im0: Im0,
+    /// The writable I&M1-3 records; blank, unpersisted, until [`Cm::set_im`] is
+    /// called.
+    im: ImStore,
     /// Activity UUID used for calls we place to the controller (ApplicationReady).
     activity_seed: Uuid,
     /// Seq num to assign to the *next new* outgoing call to the controller.
@@ -140,7 +159,10 @@ pub struct Cm {
 impl Cm {
     pub fn new(model: DeviceModel, activity_seed: Uuid) -> Cm {
         Cm {
+            model: model.clone(),
             ar: Ar::new(model),
+            im0: Im0::default(),
+            im: ImStore::new(),
             activity_seed,
             call_seq: 0,
             current_call_seq: None,
@@ -159,6 +181,20 @@ impl Cm {
 
     pub fn next_deadline(&self) -> Option<Instant> {
         self.ar.next_deadline()
+    }
+
+    /// Replace the device identity answered by I&M0 reads and the writable I&M1-3
+    /// store (e.g. once loaded from config/a backing file at startup). Until called,
+    /// `Cm` answers with `Im0::default()` and blank I&M1-3 records.
+    pub fn set_im(&mut self, im0: Im0, store: ImStore) {
+        self.im0 = im0;
+        self.im = store;
+    }
+
+    /// The current I&M1-3 store (e.g. so the application can read back tag
+    /// function/location after a controller Write).
+    pub fn im_store(&self) -> &ImStore {
+        &self.im
     }
 
     /// Parse one incoming UDP datagram and drive the AR machine, returning the PDUs to
@@ -254,7 +290,35 @@ impl Cm {
                 actions
             }
             Some(Opnum::Write) => match WriteReq::parse(blocks) {
-                Ok(req) => self.ar.on(Event::WriteReq(req), now),
+                Ok(req) => {
+                    // Kept so the I&M1-3 records can be inspected below: `Event::
+                    // WriteReq` consumes `req`, but only the AR machine gets to
+                    // decide whether the Write is accepted at all (foreign ar_uuid,
+                    // wrong state, record cap).
+                    let records = req.records.clone();
+                    let actions = self.ar.on(Event::WriteReq(req), now);
+                    let accepted = actions
+                        .iter()
+                        .any(|a| matches!(a, Action::Respond { status, .. } if status.is_ok()));
+                    if accepted {
+                        for r in &records {
+                            if (INDEX_IM1..=INDEX_IM3).contains(&r.index) {
+                                let status = write_im_record(r, &self.model, &mut self.im);
+                                if !status.is_ok() {
+                                    log::warn!(
+                                        "I&M write rejected: index {:#06x} slot {} \
+                                         subslot {} status {:#010x}",
+                                        r.index,
+                                        r.slot,
+                                        r.subslot,
+                                        status.to_u32()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    actions
+                }
                 Err(e) => respond(error_status(&e, PnioStatus::write_index_unsupported())),
             },
             Some(Opnum::Control) => match ControlBlock::parse(blocks) {
@@ -266,13 +330,21 @@ impl Cm {
                 Ok(cb) => self.ar.on(Event::ReleaseReq(cb), now),
                 Err(e) => respond(error_status(&e, PnioStatus::control_wrong_state())),
             },
-            // Read/ReadImplicit are deliberately out of scope, but answered with the
-            // PNIORW "invalid index" status rather than `service_unsupported` so the
-            // CPU's `0xfbff` connection-monitoring probe decodes sensibly in a trace
-            // instead of looking like a Connect-block error.
-            Some(Opnum::Read) | Some(Opnum::ReadImplicit) => {
-                respond(PnioStatus::read_index_unsupported())
-            }
+            // `Read` requires the request's `ar_uuid` to match the established AR
+            // (or an established AR to exist at all); `ReadImplicit` skips that
+            // check — it's meant to be usable before/without an AR (e.g. the CPU's
+            // periodic I&M probes). Both fall back to the PNIORW "invalid index"
+            // status for an index/(slot, subslot) we don't serve, rather than
+            // `service_unsupported`, so an unrecognized probe decodes sensibly in a
+            // trace instead of looking like a Connect-block error.
+            Some(Opnum::Read) => match ReadReq::parse(blocks) {
+                Ok(req) => self.handle_read(&req, true),
+                Err(e) => respond(error_status(&e, PnioStatus::read_index_unsupported())),
+            },
+            Some(Opnum::ReadImplicit) => match ReadReq::parse(blocks) {
+                Ok(req) => self.handle_read(&req, false),
+                Err(e) => respond(error_status(&e, PnioStatus::read_index_unsupported())),
+            },
             None => respond(PnioStatus::service_unsupported()),
         };
 
@@ -392,6 +464,29 @@ impl Cm {
         pdu
     }
 
+    /// Serve a Read or ReadImplicit request: `check_ar` gates the AR-uuid check
+    /// (`Read` requires it to match the established AR; `ReadImplicit` skips it).
+    fn handle_read(&self, req: &ReadReq, check_ar: bool) -> Vec<Action> {
+        if check_ar {
+            let matches_ar = match self.ar.context() {
+                Some(ctx) => ctx.params.ar_uuid == req.ar_uuid,
+                None => false,
+            };
+            if !matches_ar {
+                return respond(PnioStatus::read_wrong_ar());
+            }
+        }
+        let ctx = RecordCtx {
+            model: &self.model,
+            im0: &self.im0,
+            im: &self.im,
+        };
+        match read_record(req, &ctx) {
+            Some(data) => respond_ok(build_read_res(req, &data)),
+            None => respond(PnioStatus::read_index_unsupported()),
+        }
+    }
+
     fn cache_lookup(&self, key: &(Uuid, u32)) -> Option<Vec<u8>> {
         self.cache
             .iter()
@@ -449,10 +544,29 @@ mod tests {
     use super::*;
     use crate::cm::model::DeviceModel;
     use crate::eth::MacAddr;
+    use crate::im::SwRevision;
     use crate::rpc::Uuid;
-    use crate::testutil::{golden, RPC_OFF};
+    use crate::testutil::{golden, golden_alarm, RPC_OFF};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Instant;
+
+    /// Replace every 16-byte window of `bytes` matching `old`'s wire encoding
+    /// (PNIO blocks are always big-endian, regardless of the surrounding RPC
+    /// `drep`) with `new`'s.
+    fn retag_ar_uuid(mut bytes: Vec<u8>, old: Uuid, new: Uuid) -> Vec<u8> {
+        let mut old_b = Vec::new();
+        old.write(&mut old_b, Drep::BIG);
+        let mut new_b = Vec::new();
+        new.write(&mut new_b, Drep::BIG);
+        let mut i = 0;
+        while i + 16 <= bytes.len() {
+            if bytes[i..i + 16] == old_b[..] {
+                bytes[i..i + 16].copy_from_slice(&new_b);
+            }
+            i += 1;
+        }
+        bytes
+    }
 
     const MAC: MacAddr = MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]);
     fn cpu() -> SocketAddr {
@@ -684,5 +798,125 @@ mod tests {
             cm.tick(now + crate::cm::ar::APP_READY_TIMEOUT + std::time::Duration::from_millis(1));
         assert_eq!(o.send[0].bytes, pdu("appready_req"));
         assert_eq!(o.send[0].to, cpu_cm());
+    }
+
+    // -----------------------------------------------------------------------
+    // Read/ReadImplicit (I&M), against the separate p-net alarm/I&M capture
+    // (`docs/alarm-golden-frames.md`, captured 2026-08-30 — a different session
+    // than the cm-golden capture above, hence its own `ar_uuid`).
+    // -----------------------------------------------------------------------
+
+    fn pnet_im0() -> Im0 {
+        Im0 {
+            order_id: "12345 Abcdefghijk".into(),
+            serial_number: "007".into(),
+            hardware_revision: 3,
+            software_revision: SwRevision {
+                prefix: 'V',
+                functional: 0,
+                bug_fix: 2,
+                internal: 0,
+            },
+            revision_counter: 0,
+            profile_id: 0x1234,
+            profile_specific_type: 0x5678,
+        }
+    }
+
+    /// Brings an AR up to `Data` and re-tags it with the alarm capture's `ar_uuid`.
+    ///
+    /// The AR established from the cm-golden capture carries `ar_uuid` e5e1aecc-...;
+    /// the alarm capture's Read requests carry ef796d60-... (a different p-net
+    /// session). Re-tagging the request PDUs aligns the two so the Read is answered
+    /// rather than refused as foreign. Only the PNIO blocks' own `ar_uuid` fields
+    /// (ARBlockReq, each Write record, PrmEnd's ControlBlock) carry this value — the
+    /// RPC header's object/interface/activity UUIDs are unrelated and untouched, and
+    /// `appready_res` carries no `ar_uuid` at all.
+    fn cm_in_data_with_the_alarm_capture_ar(now: Instant) -> Cm {
+        let mut cm = cm();
+        let old = Uuid::parse_str("e5e1aecc-b133-4b4d-b187-cc68b0211ed2").unwrap();
+        let new = Uuid::parse_str("ef796d60-ef2b-9946-b39e-8531f5b7f966").unwrap();
+        let retag = |name: &str| retag_ar_uuid(pdu(name), old, new);
+
+        cm.handle_datagram(&retag("connect_req"), cpu(), now)
+            .unwrap();
+        cm.handle_datagram(&retag("write_req"), cpu(), now).unwrap();
+        let o = cm
+            .handle_datagram(&retag("prmend_req"), cpu(), now)
+            .unwrap();
+        assert_eq!(o.send[1].to, cpu_cm());
+        let o = cm
+            .handle_datagram(&pdu("appready_res"), cpu_cm(), now)
+            .unwrap();
+        assert_eq!(o.notify, vec![(ArState::Data, None)]);
+        assert_eq!(cm.state(), ArState::Data);
+        cm.set_im(pnet_im0(), crate::im::ImStore::new());
+        cm
+    }
+
+    #[test]
+    fn read_response_matches_the_pnet_im0_golden_byte_exact() {
+        let now = Instant::now();
+        let mut cm = cm_in_data_with_the_alarm_capture_ar(now);
+        let o = cm
+            .handle_datagram(&golden_alarm("im0_read_req")[RPC_OFF..], cpu(), now)
+            .unwrap();
+        assert_eq!(o.send.len(), 1);
+        assert_eq!(o.send[0].bytes, golden_alarm("im0_read_res")[RPC_OFF..]);
+        assert_eq!(o.send[0].to, cpu());
+    }
+
+    /// The capture reads I&M0 on the interface submodule (slot 0, subslot 0x8000)
+    /// too, and p-net answers it with the very same record — `IM_Supported = 0x000E`
+    /// included, not a zeroed mask.
+    #[test]
+    fn read_response_on_the_interface_submodule_matches_the_golden_byte_exact() {
+        let now = Instant::now();
+        let mut cm = cm_in_data_with_the_alarm_capture_ar(now);
+        let o = cm
+            .handle_datagram(&golden_alarm("im0_read_req_if")[RPC_OFF..], cpu(), now)
+            .unwrap();
+        assert_eq!(o.send.len(), 1);
+        assert_eq!(o.send[0].bytes, golden_alarm("im0_read_res_if")[RPC_OFF..]);
+        assert_eq!(o.send[0].to, cpu());
+    }
+
+    #[test]
+    fn read_with_a_foreign_ar_uuid_is_refused() {
+        let mut cm = cm();
+        let now = Instant::now();
+        cm.handle_datagram(&pdu("connect_req"), cpu(), now).unwrap();
+        cm.handle_datagram(&pdu("write_req"), cpu(), now).unwrap();
+        cm.handle_datagram(&pdu("prmend_req"), cpu(), now).unwrap();
+        cm.handle_datagram(&pdu("appready_res"), cpu_cm(), now)
+            .unwrap();
+        assert_eq!(cm.state(), ArState::Data);
+
+        // Unpatched: the alarm capture's `ar_uuid` (ef796d60-...) is genuinely
+        // foreign to the AR just established (e5e1aecc-...).
+        let o = cm
+            .handle_datagram(&golden_alarm("im0_read_req")[RPC_OFF..], cpu(), now)
+            .unwrap();
+        let (n, blocks) =
+            crate::rpc::NdrResponse::parse(&o.send[0].bytes[80..], crate::rpc::Drep::BIG).unwrap();
+        assert_eq!(PnioStatus(n.status), PnioStatus::read_wrong_ar());
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn read_implicit_answers_ok_from_idle_without_an_ar() {
+        let mut cm = cm();
+        assert_eq!(cm.state(), ArState::Idle);
+        let mut req = golden_alarm("im0_read_req")[RPC_OFF..].to_vec();
+        req[68] = 5; // opnum: Read (2) -> ReadImplicit (5), LE low byte
+        let o = cm.handle_datagram(&req, cpu(), Instant::now()).unwrap();
+        assert_eq!(o.send.len(), 1);
+        let h = crate::rpc::RpcHeader::parse(&o.send[0].bytes).unwrap();
+        assert_eq!(h.opnum, 5);
+        let (n, blocks) =
+            crate::rpc::NdrResponse::parse(&o.send[0].bytes[80..], crate::rpc::Drep::BIG).unwrap();
+        assert!(PnioStatus(n.status).is_ok());
+        assert!(!blocks.is_empty());
+        assert_eq!(cm.state(), ArState::Idle);
     }
 }

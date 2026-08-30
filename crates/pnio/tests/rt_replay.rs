@@ -7,10 +7,12 @@ use pnio::cm::{ArState, DeviceModel};
 use pnio::dcp::{DcpConfig, DeviceProperties};
 use pnio::device::{Device, DeviceSetup};
 use pnio::eth::{MacAddr, MockTransport};
+use pnio::im::Im0;
 use pnio::rpc::{MockRpcTransport, Uuid};
 use pnio::rt::{
     Freshness, IoImage, Layout, RtEngine, RtStats, RxVerdict, Validity, WatchdogState, IOXS_GOOD,
 };
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,6 +40,8 @@ fn setup() -> DeviceSetup {
         model: DeviceModel::pnet_sample(DEV),
         activity_seed: Uuid::parse_str("14af198a-1234-1056-8079-8cf319cd19f8").unwrap(),
         rt: None,
+        im0: Im0::default(),
+        im_store: None,
     }
 }
 
@@ -59,7 +63,13 @@ fn cyclic_round_trip_over_the_bench_frames() {
     let layout = Layout::from_ar(&params, &DeviceModel::pnet_sample(DEV)).unwrap();
     let image = Arc::new(IoImage::new(&layout));
     let stats = Arc::new(RtStats::default());
-    let mut engine = RtEngine::new(layout, DEV, CPU, stats.clone());
+    let mut engine = RtEngine::new(
+        layout,
+        DEV,
+        CPU,
+        stats.clone(),
+        Arc::new(AtomicBool::new(false)),
+    );
 
     // Application mirrors QB0 -> IB0 and echoes the Echo module, like rt_bringup does.
     let t0 = Instant::now();

@@ -1,6 +1,7 @@
 # Spec — Plan 5: `alarm` + `diag` + I&M records (alarm channel, application diagnosis, identification)
 
-Date: 2026-08-30. Status: approved in brainstorm, not implemented.
+Date: 2026-08-30. Status: implemented on `feat/alarm-diag-im` (2026-08-30), HIL pending — see
+`docs/bench-pnet-device.md` §6i.
 Parent: [`2026-06-25-profinet-rt-device-design.md`](2026-06-25-profinet-rt-device-design.md) §5.1 (`alarm`, `im` modules), §5.2 (thread model: alarms and I&M on the acyclic thread), §6.4 (supervision: alarm reporting).
 Builds on Plans 3, 4, 6, 7: `cm` already parses `AlarmCRBlockReq` and answers `AlarmCRBlockRes`; the acyclic `AF_PACKET` socket already receives FrameIDs `0xFC00..=0xFFFF` (alarm frames included, currently dropped); `Read`/`ReadImplicit` are refused with PNIORW "invalid index"; `rt::engine` emits data status `0x35`; `DeviceConfig` renders the GSDML; `IoDevice` is the facade.
 Ground truth: `captures/plan5-20260830/plan5-alarm.pcapng` (git-ignored, 2026-08-30) — p-net `pn_dev` v0.2.0 against the 1515-2 PN: process alarm, standard and USI channel diagnosis appears/update/disappears, device-initiated ERR-RTA, controller ERR-RTA (download and reply), I&M0 reads on DAP/interface/modules. Decoded with Wireshark's `pn_io`/`pn_rt` dissectors (the clean-room oracle, as for Plans 2-4).
@@ -87,7 +88,7 @@ Read request: `IODReadReqHeader` (BlockType `0x0009`, length 60, version 1.0): `
 **I&M0** (BlockType `0x0020`, length 56, version 1.0 — 60 bytes total): `VendorID` u16, `OrderID` 20 ASCII (space-padded), `IM_Serial_Number` 16 ASCII, `IM_Hardware_Revision` u16, `IM_Software_Revision` 4 (`prefix` ASCII `V`/`R`/`P`/`U`/`T`, `functional_enhancement` u8, `bug_fix` u8, `internal_change` u8), `IM_Revision_Counter` u16, `IM_Profile_ID` u16, `IM_Profile_Specific_Type` u16, `IM_Version` u8.u8 (`1.1`), `IM_Supported` u16 bitmask (bit 1 I&M1, bit 2 I&M2, bit 3 I&M3 → `0x000E` on the DAP, `0x0000` on the other submodules).
 **I&M1** (`0x0021`, length 56): `IM_Tag_Function` 32 ASCII + `IM_Tag_Location` 22 ASCII. **I&M2** (`0x0022`, 18): `IM_Date` 16 ASCII (`YYYY-MM-DD HH:MM`). **I&M3** (`0x0023`, 56): `IM_Descriptor` 54 ASCII. Space-padded; a Write with a wrong block length/version is refused with PNIORW "invalid parameter".
 
-Which submodule answers: `0xAFF0` on **every** submodule (TIA reads DAP `0/1`, interface `0/0x8001`, each module `n/1`) with the same content; `0xAFF1..3` only on the DAP `0/1` (`IM_Supported` says so elsewhere), others → "invalid index".
+Which submodule answers: `0xAFF0` on **every** submodule the device model knows (TIA reads DAP `0/1`, interface `0/0x8000` and `0/0x8001`, each module `n/1`) with the same content — `IM_Supported = 0x000E` included. The capture settles this: `im0_read_res_if` (interface subslot `0/0x8000`) carries the same mask as the DAP answer, so there is no "supported only on the DAP" distinction to encode. `0xAFF1..3` follow: one device-wide store, readable and writable on **every** known submodule; a `(slot, subslot)` absent from the model → "invalid index".
 
 ### 4.5 Negotiated AlarmCR (CPU 1515-2 PN, TIA V21)
 
@@ -131,7 +132,11 @@ impl AlarmChannel {
 }
 ```
 
-Sender: `Idle` —`enqueue`→ `SentData { req, attempt, deadline }` —ACK-RTA(ack_seq == send_seq)→ `AwaitAlarmAck { req }` —DATA Alarm-Ack(same type/slot/subslot)→ emit our ACK-RTA + `Acked` → next queued or `Idle`. `on_tick` past `deadline`: resend (attempt+1) until `rta_retries` exhausted → `Abort(AlarmSendFailed)` (the device then sends ERR-RTA code2 3). Receiver: any DATA → ACK-RTA (dedup: a DATA with `send_seq` == last accepted is re-acked, not re-processed); DATA that is not an Alarm-Ack for the in-flight alarm → `UnexpectedRx` (counted, acked, ignored); ERR-RTA → `Abort(ControllerErrRta(status))`; NACK → treated as unexpected. Sequence counters per §4.1; `AlarmSpecifier.sequence` per AR.
+Sender: `Idle` —`enqueue`→ `SentData { req, attempt, deadline }` —ACK-RTA(ack_seq == send_seq)→ `AwaitAlarmAck { req }` —DATA Alarm-Ack(same type/slot/subslot)→ emit our ACK-RTA + `Acked` → next queued or `Idle`. An Alarm-Ack matching the in-flight alarm is also accepted straight out of `SentData`: it may overtake the transport ACK, and its arrival proves delivery.
+
+**Timeouts differ by state** (revised at Plan 5 close-out; the two states had the same policy in the first draft):
+- `SentData` past `deadline = now + rta_timeout`: the peer never confirmed delivery — resend the identical DATA (attempt+1) until `rta_retries` is exhausted → `Abort(AlarmSendFailed)` (the device then sends ERR-RTA code2 3).
+- `AwaitAlarmAck` past `deadline = now + 10 × rta_timeout` (1 s at the bench's `RTATimeoutFactor 1`): the transport already confirmed delivery, so a resend would only duplicate the alarm and an abort would take the AR down over a slow controller application. Log at `warn`, count `AlarmStats::ack_timeouts`, **drop** the alarm, go `Idle`, continue the queue. No `Abort`, the AR stays up. Receiver: any DATA → ACK-RTA (dedup: a DATA with `send_seq` == last accepted is re-acked, not re-processed); DATA that is not an Alarm-Ack for the in-flight alarm → `UnexpectedRx` (counted, acked, ignored); ERR-RTA → `Abort(ControllerErrRta(status))`; NACK → treated as unexpected. Sequence counters per §4.1; `AlarmSpecifier.sequence` per AR.
 
 ### 5.3 `diag`
 
@@ -216,18 +221,19 @@ DAP `VirtualSubmoduleItem`: `Writeable_IM_Records="1 2 3"`; `<ModuleInfo>` of th
 
 ## 7. Tests
 
-- Unit: `alarm::rta` round trips on every golden; header/sequence tables; `AlarmSpecifier` and `ChannelProperties` bit packing; `channel` state machine (happy path, retry, exhaustion → abort, duplicate DATA re-acked, unexpected DATA, ERR-RTA in, TooLong); `diag` (raise/update/clear, flags after change, replay, problem indicator per severity); `im` (encode I&M0 == golden body with p-net's identity, write validation, file round trip, missing/short file); `cm::records` (Read/ReadImplicit/Write responses byte-exact vs goldens); `rt` data status bit.
+- Unit: `alarm::rta` round trips on every golden; header/sequence tables; `AlarmSpecifier` and `ChannelProperties` bit packing; `channel` state machine (happy path, Alarm-Ack overtaking the transport ACK, retry, exhaustion → abort, `AwaitAlarmAck` timeout drops the alarm without aborting, duplicate DATA re-acked, unexpected DATA, ERR-RTA in, TooLong); `diag` (raise/update/clear, flags after change, replay, problem indicator per severity); `im` (encode I&M0 == golden body with p-net's identity, write validation, file round trip, missing/short file); `cm::records` (Read/ReadImplicit/Write responses byte-exact vs goldens); `rt` data status bit.
 - Integration: `tests/alarm_replay.rs` — p-net Connect goldens bring the mock device to `Data`, then: raise → the device emits `alarm_diag_notif.hex` bytes (modulo sequence/idents pinned to p-net's), feed `alarm_ack_rta_low_cpu.hex` + `alarm_diag_ack_cpu.hex` → device emits `alarm_ack_rta_low_dev.hex`; clear → disappears frame; feed `alarm_err_rta_cpu.hex` → AR `Idle`, `last_abort == ControllerErrRta`; stop → `alarm_err_rta_dev.hex` shape; Read `0xAFF0` request golden → response golden.
 - `capture_replay`/tshark validation extended to the new device-emitted frames.
 
 ## 8. Errors and edge cases
 
 - Alarm data > `max_alarm_data_length` (200 ours / 256 CPU's — we bound by the CPU's value) → `AlarmError::TooLong` at `enqueue`; never on the wire.
-- No ACK-RTA / no Alarm-Ack within `rta_timeout` × (`rta_retries`+1) → ERR-RTA code2 3 + abort `AlarmSendFailed`; diagnoses replayed after the CPU reconnects.
+- No ACK-RTA within `rta_timeout` × (`rta_retries`+1) → ERR-RTA code2 3 + abort `AlarmSendFailed`; diagnoses replayed after the CPU reconnects.
+- Transport ACK received but no Alarm-Ack within `10 × rta_timeout` → `warn` + `AlarmStats::ack_timeouts` + the alarm is dropped; **no** ERR-RTA and **no** abort, the AR stays up and the queue continues. The controller keeps whatever it learned from the notification it did acknowledge at the transport level.
 - ACK-RTA with an unexpected `ack_seq` → ignored (counted); DATA with a repeated `send_seq` → re-ACK only.
 - ERR-RTA while `Idle` → dropped. Alarm frames from a MAC ≠ AR initiator → dropped, counted.
 - `raise`/`clear` while `Idle` → store only; `raise` of an unknown slot → `ApiError::UnknownSlot`; `clear` of an absent diagnosis → `Ok(())`, no alarm.
-- I&M Write on a non-DAP submodule / unknown index → PNIORW "invalid index"; bad block length/version → "invalid parameter"; non-ASCII → accepted as bytes (the CPU never sends any), stored verbatim.
+- I&M Write on a `(slot, subslot)` absent from the device model / unknown index → PNIORW "invalid index"; bad block length/version → "invalid parameter"; non-ASCII → accepted as bytes (the CPU never sends any), stored verbatim.
 - `im_store` path unwritable → logged once per failure, in-memory value kept, Write answered OK.
 - Poll interval change must not alter DCP/RPC behaviour: only the sleep bound changes.
 

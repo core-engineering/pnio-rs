@@ -92,6 +92,16 @@ pub struct ArParams {
     pub output_cr: IocrParams,
     pub alarm_ref_remote: u16,
     pub max_alarm_data_length: u16,
+    /// `AlarmCRBlockReq.MaxAlarmDataLength` as the CPU asked for it (256 on the
+    /// bench) — `max_alarm_data_length` above is our own value (from the model),
+    /// which is what we actually answer in `AlarmCRBlockRes`.
+    pub max_alarm_data_length_remote: u16,
+    pub rta_timeout_factor: u16,
+    pub rta_retries: u16,
+    /// Our own local alarm reference, always 0 — what `AlarmCRBlockRes` answers.
+    pub alarm_ref_local: u16,
+    pub alarm_tag_high: u16,
+    pub alarm_tag_low: u16,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -276,6 +286,12 @@ pub fn validate(req: &ConnectReq, model: &DeviceModel) -> Result<ArParams, PnioS
         output_cr,
         alarm_ref_remote: req.alarm_cr.local_alarm_reference,
         max_alarm_data_length: model.max_alarm_data_length,
+        max_alarm_data_length_remote: req.alarm_cr.max_alarm_data_length,
+        rta_timeout_factor: req.alarm_cr.rta_timeout_factor,
+        rta_retries: req.alarm_cr.rta_retries,
+        alarm_ref_local: 0,
+        alarm_tag_high: req.alarm_cr.tag_header_high,
+        alarm_tag_low: req.alarm_cr.tag_header_low,
     })
 }
 

@@ -6,6 +6,7 @@ use crate::data::FieldType;
 use crate::dcp::{DcpConfig, DeviceProperties};
 use crate::device::{DeviceSetup, RtOptions};
 use crate::eth::MacAddr;
+use crate::im::{Im0, ImError};
 use crate::rpc::Uuid;
 use thiserror::Error;
 
@@ -79,6 +80,8 @@ pub enum ConfigError {
         bytes: u32,
         max: u16,
     },
+    #[error("invalid I&M0 identity: {0}")]
+    Im(#[from] ImError),
 }
 
 /// Lay out `fields` per the declaration-order rule: `Bool`s pack 8 per byte
@@ -146,6 +149,7 @@ pub struct DeviceConfig {
     min_device_interval: u16,
     submodules: Vec<SubmoduleSpec>,
     derived: Vec<Derived>, // parallel to `submodules`
+    im0: Im0,
 }
 
 /// Accumulates a device declaration (station name, identity, interval, submodules)
@@ -160,6 +164,10 @@ pub struct DeviceConfigBuilder {
     device_id: u16,
     min_device_interval: u16,
     submodules: Vec<SubmoduleSpec>,
+    /// `None` until [`DeviceConfigBuilder::im0`] is called: `build()` then derives
+    /// `order_id` from `station_type` (spec §5.4) instead of taking
+    /// [`Im0::default`]'s placeholder.
+    im0: Option<Im0>,
 }
 
 impl DeviceConfig {
@@ -171,6 +179,7 @@ impl DeviceConfig {
             device_id: 0x0001,
             min_device_interval: 32,
             submodules: Vec::new(),
+            im0: None,
         }
     }
 
@@ -191,6 +200,9 @@ impl DeviceConfig {
     }
     pub fn submodules(&self) -> &[SubmoduleSpec] {
         &self.submodules
+    }
+    pub fn im0(&self) -> &Im0 {
+        &self.im0
     }
 
     fn index_of(&self, slot: Slot) -> Option<usize> {
@@ -298,7 +310,16 @@ impl DeviceConfig {
     }
 
     /// Everything `device::Device::new` needs.
+    ///
+    /// `im0.serial_number` is filled from `mac`'s last three octets
+    /// (`PNIO-<XXYYZZ>`) when the config leaves it blank, so a device configured
+    /// without an explicit serial still answers I&M0 with something MAC-derived
+    /// rather than an empty field.
     pub fn setup(&self, mac: MacAddr, ip: [u8; 4], rt: Option<RtOptions>) -> DeviceSetup {
+        let mut im0 = self.im0.clone();
+        if im0.serial_number.is_empty() {
+            im0.serial_number = format!("PNIO-{:02X}{:02X}{:02X}", mac.0[3], mac.0[4], mac.0[5]);
+        }
         DeviceSetup {
             dcp: DcpConfig {
                 mac,
@@ -307,6 +328,8 @@ impl DeviceConfig {
             model: self.model(mac),
             activity_seed: Self::activity_seed(mac),
             rt,
+            im0,
+            im_store: None,
         }
     }
 }
@@ -327,6 +350,18 @@ impl DeviceConfigBuilder {
     /// declares in the GSDML.
     pub fn min_device_interval(mut self, v: u16) -> Self {
         self.min_device_interval = v;
+        self
+    }
+    /// I&M0 device identity: order number, serial, hardware/software revision.
+    /// Validated by [`ImError`] on `build()`.
+    ///
+    /// Left unset, `build()` takes [`Im0::default`] but replaces its placeholder
+    /// `order_id` with [`DeviceConfigBuilder::station_type`] truncated to 20 ASCII
+    /// bytes (spec §5.4), so a device that declares only its type still reports that
+    /// type as its I&M0 `OrderID` and in the GSDML's `ModuleInfo`. [`Im0::default`]
+    /// itself is unchanged for callers who build an `Im0` directly.
+    pub fn im0(mut self, im0: Im0) -> Self {
+        self.im0 = Some(im0);
         self
     }
     /// Device → controller data in `slot` (the controller's inputs).
@@ -369,6 +404,11 @@ impl DeviceConfigBuilder {
         if self.vendor_id == 0 {
             return Err(ConfigError::BadIdentity);
         }
+        let im0 = self.im0.unwrap_or_else(|| Im0 {
+            order_id: order_id_from_station_type(&self.station_type),
+            ..Im0::default()
+        });
+        im0.validate()?;
         if self.submodules.is_empty() {
             return Err(ConfigError::NoSubmodule);
         }
@@ -403,8 +443,19 @@ impl DeviceConfigBuilder {
             min_device_interval: self.min_device_interval,
             submodules,
             derived,
+            im0,
         })
     }
+}
+
+/// The I&M0 `OrderID` a device gets when the builder was given no [`Im0`]: its
+/// `station_type`, kept to ASCII (the record's charset) and to the field's 20 bytes.
+fn order_id_from_station_type(station_type: &str) -> String {
+    station_type
+        .chars()
+        .filter(char::is_ascii)
+        .take(20)
+        .collect()
 }
 
 /// `layout` plus the size guard (computed in `u32` so an oversized declaration is
@@ -802,6 +853,83 @@ mod tests {
         assert_eq!(s.model, cfg.model(mac));
         assert_eq!(s.activity_seed.0[10..], mac.0);
         assert!(s.rt.is_none());
+    }
+
+    #[test]
+    fn builder_accepts_im0_and_rejects_bad_ones() {
+        use crate::im::ImError;
+        let e = DeviceConfig::builder("a")
+            .input(Slot(1), &[Bool])
+            .im0(Im0 {
+                order_id: "x".repeat(21),
+                ..Im0::default()
+            })
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            e,
+            ConfigError::Im(ImError::TooLong {
+                field: "order_id",
+                max: 20
+            })
+        );
+
+        let custom = Im0 {
+            order_id: "test order".into(),
+            ..Im0::default()
+        };
+        let cfg = DeviceConfig::builder("a")
+            .input(Slot(1), &[Bool])
+            .im0(custom.clone())
+            .build()
+            .unwrap();
+        assert_eq!(cfg.im0(), &custom);
+
+        // Default serial number is derived from the MAC when left blank.
+        let mac = crate::eth::MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]);
+        let s = sample().setup(mac, [172, 16, 2, 10], None);
+        assert_eq!(s.im0.serial_number, "PNIO-CD19F8");
+    }
+
+    #[test]
+    fn default_im0_takes_its_order_id_from_the_station_type() {
+        let cfg = DeviceConfig::builder("a")
+            .station_type("Foo")
+            .input(Slot(1), &[Bool])
+            .build()
+            .unwrap();
+        assert_eq!(cfg.im0().order_id, "Foo");
+        // Everything else stays `Im0::default()`.
+        assert_eq!(
+            cfg.im0(),
+            &Im0 {
+                order_id: "Foo".into(),
+                ..Im0::default()
+            }
+        );
+
+        // Longer than the 20-byte OrderID field: truncated, not a build error.
+        let cfg = DeviceConfig::builder("a")
+            .station_type("a station type far longer than twenty bytes")
+            .input(Slot(1), &[Bool])
+            .build()
+            .unwrap();
+        assert_eq!(cfg.im0().order_id, "a station type far l");
+
+        // An explicit `im0` still wins, whatever the station type.
+        let cfg = DeviceConfig::builder("a")
+            .station_type("Foo")
+            .input(Slot(1), &[Bool])
+            .im0(Im0 {
+                order_id: "Bar".into(),
+                ..Im0::default()
+            })
+            .build()
+            .unwrap();
+        assert_eq!(cfg.im0().order_id, "Bar");
+
+        // `Im0::default()` itself is untouched for direct users.
+        assert_eq!(Im0::default().order_id, "pnio device");
     }
 
     #[test]

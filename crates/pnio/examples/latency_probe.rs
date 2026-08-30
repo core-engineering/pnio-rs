@@ -116,6 +116,7 @@ fn main() {
                 lock_memory: a.lock_memory,
             }),
             app_cpus,
+            im_store: None,
         },
     )
     .expect("start (need cap_net_raw/cap_net_admin/cap_sys_nice/cap_ipc_lock)");

@@ -12,7 +12,6 @@ pub struct GsdmlMeta {
     pub vendor_name: String,
     pub product_family: String,
     pub info_text: String,
-    pub order_number: String,
     /// (year, month, day) — the GSDML release date, also the file-name suffix.
     pub date: (u16, u8, u8),
 }
@@ -84,6 +83,31 @@ fn data_type(ty: FieldType) -> &'static str {
     }
 }
 
+/// The three `ModuleInfo` identity elements every module carries — the DAP and each
+/// `ModuleItem` alike: the very same `OrderID`, hardware revision and software
+/// revision the device answers in its I&M0 record, so the GSDML TIA reads and the
+/// wire identity it later checks can never drift (Plan 6 rule, spec §4.4).
+///
+/// Rendered at `ModuleInfo`'s child indentation, without a trailing newline.
+fn module_identity_xml(cfg: &DeviceConfig) -> String {
+    let im0 = cfg.im0();
+    format!(
+        concat!(
+            r#"            <OrderNumber Value="{order}"/>"#,
+            "\n",
+            r#"            <HardwareRelease Value="{hw}"/>"#,
+            "\n",
+            r#"            <SoftwareRelease Value="{prefix}{func}.{bug}.{internal}"/>"#,
+        ),
+        order = escape(&im0.order_id),
+        hw = im0.hardware_revision,
+        prefix = im0.software_revision.prefix,
+        func = im0.software_revision.functional,
+        bug = im0.software_revision.bug_fix,
+        internal = im0.software_revision.internal,
+    )
+}
+
 /// Render the GSDML document for `cfg`.
 ///
 /// Deviations from a plain textbook template, both made to match
@@ -129,6 +153,7 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
     } else {
         "32".to_string()
     };
+    let identity = module_identity_xml(cfg);
     let _ = write!(
         x,
         r#"<?xml version="1.0" encoding="utf-8"?>
@@ -160,9 +185,7 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
             <Name TextId="T_DAP_Name"/>
             <InfoText TextId="T_DAP_Info"/>
             <VendorName Value="{vendor}"/>
-            <OrderNumber Value="{order}"/>
-            <HardwareRelease Value="1.0"/>
-            <SoftwareRelease Value="V0.0.0"/>
+{identity}
           </ModuleInfo>
           <IOConfigData MaxInputLength="{max_in}" MaxOutputLength="{max_out}" MaxDataLength="{max_data}"/>
           <UseableModules>
@@ -174,7 +197,7 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
         n_slots = n_slots,
         mdi = cfg.min_device_interval(),
         station = escape(cfg.station_name()),
-        order = escape(&meta.order_number),
+        identity = identity,
         max_in = max_in,
         max_out = max_out,
         max_data = max_data
@@ -190,7 +213,7 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
         x,
         r#"          </UseableModules>
           <VirtualSubmoduleList>
-            <VirtualSubmoduleItem ID="DAP1_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
+            <VirtualSubmoduleItem ID="DAP1_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false" Writeable_IM_Records="1 2 3">
               <IOData/>
               <ModuleInfo>
                 <Name TextId="T_DAP_Name"/>
@@ -233,14 +256,14 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
           <ModuleInfo>
             <Name TextId="M{n}_Name"/>
             <InfoText TextId="M{n}_Info"/>
-            <OrderNumber Value="{order}-M{n}"/>
+{identity}
           </ModuleInfo>
           <VirtualSubmoduleList>
             <VirtualSubmoduleItem ID="M{n}_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
               <IOData>
 "#,
             ident = 0x100u32 + n as u32,
-            order = escape(&meta.order_number)
+            identity = identity
         );
         texts.push((format!("M{n}_Name"), escape(&s.name)));
         texts.push((
@@ -346,6 +369,10 @@ mod tests {
             .input(Slot(2), &[Bool; 32])
             .output(Slot(3), &[Real; 16])
             .output(Slot(4), &[Bool; 32])
+            .im0(crate::im::Im0 {
+                order_id: "PNIO-SAMPLE".into(),
+                ..crate::im::Im0::default()
+            })
             .build()
             .unwrap()
     }
@@ -355,7 +382,6 @@ mod tests {
             vendor_name: "Core Engineering".into(),
             product_family: "pnio".into(),
             info_text: "pnio sample device: 16 REAL + 32 BOOL per direction".into(),
-            order_number: "PNIO-SAMPLE".into(),
             date: (2026, 8, 29),
         }
     }
@@ -493,6 +519,40 @@ mod tests {
         }
         let timing = find("TimingProperties")[0];
         assert_eq!(timing.attribute("SendClock"), Some("32"));
+        let dap_sm = find("VirtualSubmoduleItem")[0];
+        assert_eq!(dap_sm.attribute("ID"), Some("DAP1_SM"));
+        assert_eq!(dap_sm.attribute("Writeable_IM_Records"), Some("1 2 3"));
+        // Every ModuleInfo — the DAP's and each module's — carries the *same* wire
+        // identity as the I&M0 record: no per-module OrderNumber suffix, so what TIA
+        // reads from the GSDML is what the device answers on 0xAFF0.
+        let infos: Vec<_> = find("ModuleInfo")
+            .into_iter()
+            .filter(|n| {
+                n.parent().is_some_and(|p| {
+                    p.has_tag_name("DeviceAccessPointItem") || p.has_tag_name("ModuleItem")
+                })
+            })
+            .collect();
+        assert_eq!(
+            infos.len(),
+            5,
+            "1 DAP + 4 modules (a VirtualSubmoduleItem's own ModuleInfo carries names only)"
+        );
+        for info in &infos {
+            let value = |tag: &str| {
+                info.children()
+                    .find(|c| c.has_tag_name(tag))
+                    .unwrap_or_else(|| panic!("{tag} missing from a ModuleInfo"))
+                    .attribute("Value")
+                    .map(str::to_string)
+            };
+            assert_eq!(value("OrderNumber"), Some(cfg.im0().order_id.clone()));
+            assert_eq!(
+                value("HardwareRelease"),
+                Some(cfg.im0().hardware_revision.to_string())
+            );
+            assert_eq!(value("SoftwareRelease"), Some("V0.1.0".to_string()));
+        }
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod ty {
     pub const ALARM_CR_BLOCK_REQ: u16 = 0x0103;
     pub const EXPECTED_SUBMODULE_BLOCK_REQ: u16 = 0x0104;
     pub const IOD_WRITE_REQ_HEADER: u16 = 0x0008;
+    pub const IOD_READ_REQ_HEADER: u16 = 0x0009;
     pub const IOD_CONTROL_REQ_PRM_END: u16 = 0x0110;
     pub const IOX_BLOCK_REQ_APP_READY: u16 = 0x0112;
     pub const RELEASE_BLOCK_REQ: u16 = 0x0114;
@@ -21,6 +22,7 @@ pub mod ty {
     pub const ALARM_CR_BLOCK_RES: u16 = 0x8103;
     pub const AR_SERVER_BLOCK_RES: u16 = 0x8106;
     pub const IOD_WRITE_RES_HEADER: u16 = 0x8008;
+    pub const IOD_READ_RES_HEADER: u16 = 0x8009;
     pub const IOD_CONTROL_RES_PRM_END: u16 = 0x8110;
     pub const IOX_BLOCK_RES_APP_READY: u16 = 0x8112;
     pub const RELEASE_BLOCK_RES: u16 = 0x8114;

@@ -37,6 +37,12 @@ pub fn golden_rt(name: &str) -> Vec<u8> {
     parse_hex(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
 }
 
+/// Load `testdata/alarm/<name>.hex` (2026-08-30 p-net alarm/I&M capture) relative to the crate root.
+pub fn golden_alarm(name: &str) -> Vec<u8> {
+    let path = format!("{}/testdata/alarm/{name}.hex", env!("CARGO_MANIFEST_DIR"));
+    parse_hex(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
+}
+
 /// Offset of the first PNIO block inside a Connect request PDU (RPC header 80 + NDR 20).
 ///
 /// Duplicated from `src/testutil.rs` because integration tests cannot see

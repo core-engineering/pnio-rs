@@ -5,7 +5,7 @@
 //! [`RtEngine::on_frame`] consumes the controller's frame; [`RtEngine::check_watchdog`]
 //! tracks the consumer watchdog. Stats are atomics shared with the rest of the stack.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -142,6 +142,10 @@ pub struct RtEngine {
     our_mac: MacAddr,
     cpu_mac: MacAddr,
     stats: Arc<RtStats>,
+    /// Station problem indicator: `true` clears bit 5 of the data status
+    /// (`Station_Problem_Indicator`) on every produced frame. Shared with the acyclic
+    /// side; read (never written) on the RT path.
+    problem: Arc<AtomicBool>,
 
     /// Preallocated TX frame buffer, sized for `frame_len(input_cr.data_length)`.
     tx: Vec<u8>,
@@ -168,7 +172,15 @@ pub struct RtEngine {
 impl RtEngine {
     /// Build the engine for `layout`, ready to run. `our_mac` is the source address
     /// we stamp on frames we produce; `cpu_mac` is the only source `on_frame` accepts.
-    pub fn new(layout: Layout, our_mac: MacAddr, cpu_mac: MacAddr, stats: Arc<RtStats>) -> Self {
+    /// `problem` is read every tick to pick the data status (see
+    /// [`DataStatus::RUN_PRIMARY_VALID_PROBLEM`]).
+    pub fn new(
+        layout: Layout,
+        our_mac: MacAddr,
+        cpu_mac: MacAddr,
+        stats: Arc<RtStats>,
+        problem: Arc<AtomicBool>,
+    ) -> Self {
         let tx = vec![0u8; frame_len(layout.input_cr.data_length)];
         let tx_csdu = vec![0u8; layout.input_cr.data_length];
         let rx_csdu = vec![0u8; layout.output_cr.data_length];
@@ -183,6 +195,7 @@ impl RtEngine {
             our_mac,
             cpu_mac,
             stats,
+            problem,
             tx,
             tx_csdu,
             rx_csdu,
@@ -203,7 +216,9 @@ impl RtEngine {
     /// controller's outputs: GOOD for every plugged submodule; independent of the
     /// received IOPS (the S7-1500 sends IOPS BAD until the device acknowledges
     /// consumption — mirroring would deadlock). Advances the cycle counter by
-    /// `cycle_step * expirations` before writing it. Allocation-free: writes into the
+    /// `cycle_step * expirations` before writing it. Data status is
+    /// [`DataStatus::RUN_PRIMARY_VALID_PROBLEM`] while `problem` is set, otherwise
+    /// [`DataStatus::RUN_PRIMARY_VALID_OK`]. Allocation-free: writes into the
     /// preallocated `self.tx` and returns a slice of it.
     pub fn on_tick(&mut self, expirations: u32, inputs: &[u8]) -> &[u8] {
         let cr = &self.layout.input_cr;
@@ -221,11 +236,16 @@ impl RtEngine {
             .cycle_counter
             .wrapping_add(cr.cycle_step.wrapping_mul(expirations as u16));
 
+        let data_status = if self.problem.load(Ordering::Relaxed) {
+            DataStatus::RUN_PRIMARY_VALID_PROBLEM
+        } else {
+            DataStatus::RUN_PRIMARY_VALID_OK
+        };
         let rt = RtFrame {
             frame_id: cr.frame_id,
             csdu: &self.tx_csdu,
             cycle_counter: self.cycle_counter,
-            data_status: DataStatus::RUN_PRIMARY_VALID_OK,
+            data_status,
             transfer_status: 0,
         };
         let n = rt
@@ -400,6 +420,7 @@ mod tests {
     use crate::rt::frame::RtFrame;
     use crate::rt::layout::Layout;
     use crate::testutil::{golden, golden_rt, RT_CSDU_OFF};
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -415,6 +436,7 @@ mod tests {
             DEV,
             CPU,
             Arc::new(RtStats::default()),
+            Arc::new(AtomicBool::new(false)),
         )
     }
 
@@ -444,6 +466,28 @@ mod tests {
         assert_eq!(out[62], 0x35); // we emit Run|Primary|Valid|Ok, p-net 0x36
         assert_eq!(out[63], 0);
         assert_eq!(e.stats_snapshot().tx, 1);
+    }
+
+    #[test]
+    fn problem_indicator_clears_bit_5_of_the_data_status() {
+        let model = DeviceModel::pnet_sample(DEV);
+        let req = ConnectReq::parse(&golden("connect_req")[142..]).unwrap();
+        let params = validate(&req, &model).unwrap();
+        let problem = Arc::new(AtomicBool::new(false));
+        let mut e = RtEngine::new(
+            Layout::from_ar(&params, &model).unwrap(),
+            DEV,
+            CPU,
+            Arc::new(RtStats::default()),
+            problem.clone(),
+        );
+        let inputs = vec![0u8; 40];
+
+        assert_eq!(e.on_tick(1, &inputs)[62], 0x35);
+        problem.store(true, Ordering::Relaxed);
+        assert_eq!(e.on_tick(1, &inputs)[62], 0x15);
+        problem.store(false, Ordering::Relaxed);
+        assert_eq!(e.on_tick(1, &inputs)[62], 0x35);
     }
 
     #[test]

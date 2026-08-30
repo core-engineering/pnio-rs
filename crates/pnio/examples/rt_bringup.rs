@@ -8,6 +8,7 @@ use pnio::cm::model::DeviceModel;
 use pnio::dcp::{DcpConfig, DeviceProperties};
 use pnio::device::{Device, DeviceSetup, RtOptions};
 use pnio::eth::{AfPacketTransport, MacAddr};
+use pnio::im::Im0;
 use pnio::rpc::{UdpRpcTransport, Uuid, PNIO_UDP_PORT};
 use pnio::rt::{ImageError, IoImage};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -168,6 +169,8 @@ fn main() {
             rt_priority: a.rt_priority,
             lock_memory: a.lock_memory,
         }),
+        im0: Im0::default(),
+        im_store: None,
     };
     let eth = AfPacketTransport::open(&a.iface).expect("AF_PACKET (need cap_net_raw)");
     eth.attach_filter(&pnio::eth::bpf::acyclic_filter())

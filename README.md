@@ -36,7 +36,9 @@ S7‑1500 (1515‑2 PN).
 | AR establishment (DCE/RPC, state machine) | `cm` | ✅ AR reaches DATA on a real S7-1500 (HIL 2026-08-28) |
 | Acyclic device loop + bring-up example | `device` | ✅ |
 | RT cyclic exchange (PPM/CPM, IOPS/IOCS, watchdog, `SCHED_FIFO` thread) | `rt` | ✅ 1 ms held on PREEMPT_RT (edge Atom E3940). **L2-pair profile (default, Plan 7bis, HIL 2026-08-28)**: under load p99.99 13 µs / max 22.4 µs, idle p99.99 20 µs / max 22.7 µs, 0 missed ticks / 0 watchdog expirations over 1.2 M cycles (600078 + 597969). Single-core profile (Plan 7, HIL 2026-08-28), under load on CPUs 0-2: p99.99 147-203 µs / max ≤ 284 µs — see `docs/bench-pnet-device.md` §6e/§6f |
-| Alarms + I&M | `alarm`/`im` | ⏳ |
+| Alarm channel (RTA codec, sender/receiver state machine, ERR-RTA) | `alarm` | ✅ byte-exact vs a p-net capture (notification → ACK-RTA → Alarm-Ack → ACK-RTA, both-ways ERR-RTA) — see `docs/alarm-golden-frames.md` |
+| Channel diagnosis (raise/clear, `ProblemIndicator`, replay on reconnect) | `diag` | ✅ |
+| I&M0-3 records (identity from `config`, I&M1-3 writable + file-persisted) | `im`/`cm::records` | ✅ |
 | Typed device configuration (builder, layout rule, DCP/model derivation) | `config` | ✅ |
 | Generated GSDML (V2.4, matches `config` by construction — see `docs/gsdml.md`) | `gsdml` | ✅ HIL with our own GSDML on the S7-1500, 2026-08-29: import accepted by TIA V21 (device-view addresses = computed), 10 min at 1 ms, L2-pair profile, tick lateness p99.99 29 µs / max 61.1 µs, 0 missed ticks over 599 737 cycles — see `docs/bench-pnet-device.md` §6g |
 | Typed device facade (`IoDevice`, typed reads/writes, per-slot snapshots) | `api` | ✅ HIL with our own GSDML on the S7-1500, 2026-08-29: typed `REAL`/`BOOL` round trip verified in the watch table, same 10-minute 1 ms run as `gsdml` above — see `docs/bench-pnet-device.md` §6g; 500 µs held for 5 min on the CPU's X1 port (0 missed ticks over 596 899 cycles, p99.99 lateness 27 µs) |
@@ -101,6 +103,32 @@ if let Ok(out) = dev.outputs(Slot(3)) {
 }
 ```
 
+Raise or clear a channel diagnosis, and persist the writable I&M1-3 records across restarts:
+
+```rust
+use pnio::diag::{ChannelError, Severity};
+
+dev.raise_diagnosis(Slot(1), 0, ChannelError::LineBreak, Severity::Fault)?;
+// ... the CPU's diagnostic buffer/OB82 see it, ProblemIndicator is set in the data status
+dev.clear_diagnosis(Slot(1), 0, ChannelError::LineBreak)?;
+```
+
+```rust
+let dev = IoDevice::start(cfg, StartOptions {
+    im_store: Some("/var/lib/pnio/im.bin".into()),
+    ..opts
+})?;
+```
+
+`raise_diagnosis`/`clear_diagnosis` queue the change for the acyclic loop to send as an
+`AlarmNotification` (Diagnosis/DiagnosisDisappears) and set/clear the `ProblemIndicator` bit the
+RT thread reports in the cyclic data status (`0x15`/`0x35`); an active diagnosis is announced
+again after an AR loss. `im_store` is the backing file for I&M1-3 (tag function/location, install
+date, descriptor) as written by TIA's *I&M* tab — without it they stay in memory only, blank at
+startup. `IoDevice::alarm_stats()`'s counters mirror the current alarm channel and restart at 0 on
+every reconnect (a fresh AR opens a fresh channel); `alarm_rx_no_channel()` is the one
+cumulative-for-the-process exception.
+
 `cargo run --example gen_gsdml` renders the matching GSDML for the sample declaration above and
 prints the resulting controller address map; see [`docs/gsdml.md`](docs/gsdml.md) for the layout
 rule, the TIA import steps and the XSD validation recipe.
@@ -130,9 +158,12 @@ included.
 ## Roadmap
 
 `cm` (AR) ✅ → `rt` (cyclic exchange) ✅ → determinism (1 ms, `PREEMPT_RT`) ✅ → Plan 7bis
-(L2-pair isolation) ✅ → `config`/GSDML/typed API (Plan 6) ✅ → **next: `alarm`/`im`
-(Plan 5)**. `PACKET_MMAP`/busy-poll stays deferred, only needed if a future campaign under the
-original CPU-0-2 load layout still needs the p99.99 budget. Details in the plans above.
+(L2-pair isolation) ✅ → `config`/GSDML/typed API (Plan 6) ✅ → `alarm`/`diag`/`im` (Plan 5) ✅
+implemented (branch `feat/alarm-diag-im`), HIL pending — see `docs/bench-pnet-device.md` §6i →
+**next: the V2.31+ GSDML profile (`LLDP_NoD_Supported`, `PTP_BoundarySupported`/
+`DCP_BoundarySupported`, `ResetToFactoryModes`, `CertificationInfo`) and process alarms**.
+`PACKET_MMAP`/busy-poll stays deferred, only needed if a future campaign under the original
+CPU-0-2 load layout still needs the p99.99 budget. Details in the plans above.
 
 ## License
 
