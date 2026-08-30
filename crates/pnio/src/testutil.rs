@@ -44,6 +44,12 @@ pub fn golden_rt(name: &str) -> Vec<u8> {
     parse_hex(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
 }
 
+/// Load `testdata/alarm/<name>.hex` (2026-08-30 p-net alarm/I&M capture) relative to the crate root.
+pub fn golden_alarm(name: &str) -> Vec<u8> {
+    let path = format!("{}/testdata/alarm/{name}.hex", env!("CARGO_MANIFEST_DIR"));
+    parse_hex(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
+}
+
 /// Offset of the first PNIO block inside a Connect request PDU (RPC header 80 + NDR 20).
 pub const SYNTH_BLOCKS_OFF: usize = crate::rpc::RpcHeader::LEN + crate::rpc::NdrRequest::LEN;
 
@@ -280,6 +286,45 @@ mod tests {
             assert_eq!(f.len(), 64, "{name}");
             assert_eq!(&f[12..16], &[0x81, 0x00, 0xc0, 0x00], "{name} VLAN tag");
             assert_eq!(&f[16..18], &[0x88, 0x92], "{name} ethertype");
+        }
+    }
+
+    #[test]
+    fn every_alarm_golden_is_a_tagged_profinet_frame_or_rpc() {
+        for name in [
+            "alarm_process_notif",
+            "alarm_ack_rta_high_cpu",
+            "alarm_ack_high_cpu",
+            "alarm_ack_rta_high_dev",
+            "alarm_diag_notif",
+            "alarm_ack_rta_low_cpu",
+            "alarm_diag_ack_cpu",
+            "alarm_ack_rta_low_dev",
+            "alarm_diag_update_appears",
+            "alarm_diag_update_others_remain",
+            "alarm_diag_usi_disappears",
+            "alarm_diag_std_remove",
+            "alarm_err_rta_dev",
+            "alarm_err_rta_cpu",
+            "alarm_err_rta_cpu_removed",
+            "alarm_err_rta_dev_removed_reply",
+        ] {
+            let f = golden_alarm(name);
+            assert_eq!(&f[12..14], &[0x81, 0x00], "{name}: VLAN tag");
+            assert_eq!(&f[16..18], &[0x88, 0x92], "{name}: EtherType");
+            assert!(
+                matches!(f[18..20], [0xfc, 0x01] | [0xfe, 0x01]),
+                "{name}: FrameID"
+            );
+        }
+        for name in [
+            "im0_read_req",
+            "im0_read_res",
+            "im0_read_req_if",
+            "im0_read_res_if",
+        ] {
+            let f = golden_alarm(name);
+            assert_eq!(&f[12..14], &[0x08, 0x00], "{name}: IPv4");
         }
     }
 
