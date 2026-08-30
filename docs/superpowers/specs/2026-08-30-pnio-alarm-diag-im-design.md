@@ -1,6 +1,7 @@
 # Spec — Plan 5: `alarm` + `diag` + I&M records (alarm channel, application diagnosis, identification)
 
-Date: 2026-08-30. Status: approved in brainstorm, not implemented.
+Date: 2026-08-30. Status: implemented on `feat/alarm-diag-im` (2026-08-30), HIL pending — see
+`docs/bench-pnet-device.md` §6i.
 Parent: [`2026-06-25-profinet-rt-device-design.md`](2026-06-25-profinet-rt-device-design.md) §5.1 (`alarm`, `im` modules), §5.2 (thread model: alarms and I&M on the acyclic thread), §6.4 (supervision: alarm reporting).
 Builds on Plans 3, 4, 6, 7: `cm` already parses `AlarmCRBlockReq` and answers `AlarmCRBlockRes`; the acyclic `AF_PACKET` socket already receives FrameIDs `0xFC00..=0xFFFF` (alarm frames included, currently dropped); `Read`/`ReadImplicit` are refused with PNIORW "invalid index"; `rt::engine` emits data status `0x35`; `DeviceConfig` renders the GSDML; `IoDevice` is the facade.
 Ground truth: `captures/plan5-20260830/plan5-alarm.pcapng` (git-ignored, 2026-08-30) — p-net `pn_dev` v0.2.0 against the 1515-2 PN: process alarm, standard and USI channel diagnosis appears/update/disappears, device-initiated ERR-RTA, controller ERR-RTA (download and reply), I&M0 reads on DAP/interface/modules. Decoded with Wireshark's `pn_io`/`pn_rt` dissectors (the clean-room oracle, as for Plans 2-4).
@@ -87,7 +88,7 @@ Read request: `IODReadReqHeader` (BlockType `0x0009`, length 60, version 1.0): `
 **I&M0** (BlockType `0x0020`, length 56, version 1.0 — 60 bytes total): `VendorID` u16, `OrderID` 20 ASCII (space-padded), `IM_Serial_Number` 16 ASCII, `IM_Hardware_Revision` u16, `IM_Software_Revision` 4 (`prefix` ASCII `V`/`R`/`P`/`U`/`T`, `functional_enhancement` u8, `bug_fix` u8, `internal_change` u8), `IM_Revision_Counter` u16, `IM_Profile_ID` u16, `IM_Profile_Specific_Type` u16, `IM_Version` u8.u8 (`1.1`), `IM_Supported` u16 bitmask (bit 1 I&M1, bit 2 I&M2, bit 3 I&M3 → `0x000E` on the DAP, `0x0000` on the other submodules).
 **I&M1** (`0x0021`, length 56): `IM_Tag_Function` 32 ASCII + `IM_Tag_Location` 22 ASCII. **I&M2** (`0x0022`, 18): `IM_Date` 16 ASCII (`YYYY-MM-DD HH:MM`). **I&M3** (`0x0023`, 56): `IM_Descriptor` 54 ASCII. Space-padded; a Write with a wrong block length/version is refused with PNIORW "invalid parameter".
 
-Which submodule answers: `0xAFF0` on **every** submodule (TIA reads DAP `0/1`, interface `0/0x8001`, each module `n/1`) with the same content; `0xAFF1..3` only on the DAP `0/1` (`IM_Supported` says so elsewhere), others → "invalid index".
+Which submodule answers: `0xAFF0` on **every** submodule (TIA reads DAP `0/1`, interface `0/0x8001`, each module `n/1`) with the same content; `0xAFF1..3` only on the DAP `0/1` (`IM_Supported` says so elsewhere), others → "invalid index". The capture shows TIA reading `0xAFF0` on **both** interface subslots, `0/0x8000` and `0/0x8001`, not just `0/0x8001`.
 
 ### 4.5 Negotiated AlarmCR (CPU 1515-2 PN, TIA V21)
 

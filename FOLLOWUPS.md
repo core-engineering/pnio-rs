@@ -72,13 +72,18 @@ Non-blocking findings for Plan 1, to be integrated into the briefs of the releva
 Open points recorded from the AR-establishment HIL run (`docs/bench-pnet-device.md` §6c,
 `hil-facts.md`), to be picked up by the plans noted:
 
-- **Minimal `Read`/`ReadImplicit` support** (index `0xfbff` "RPC connection monitoring
-  trigger", plus I&M/diagnosis reads) — currently refused with a generic PNIORW "invalid
-  index"; the CPU accepts that as keep-alive today, but real diagnostics need real reads.
-  Plan 5.
-- **Alarm channel (ERR-RTA / ACK-RTA, frame IDs `0xfe01`/`0xfc01`)** not implemented — an
-  aborted AR is currently only noticed indirectly via the controller's reconnect sequence
-  (now handled), not via the alarm channel itself. Plan 5.
+- ✅ **RESOLVED (Plan 5, 2026-08-30)** — **Minimal `Read`/`ReadImplicit` support**: `cm::records`
+  now serves `0xAFF0` (I&M0) on every submodule the model knows and `0xAFF1..=0xAFF3` (I&M1-3) on
+  the DAP, byte-exact against the capture goldens (`docs/alarm-golden-frames.md`). Index `0xfbff`
+  ("RPC connection monitoring trigger") and every other record index still answer PNIORW "invalid
+  index" (`PnioStatus::read_index_unsupported`) — only the I&M range moved; see the diagnosis
+  record reads item below.
+- ✅ **RESOLVED (Plan 5, 2026-08-30)** — **Alarm channel (ERR-RTA / ACK-RTA, frame IDs
+  `0xfe01`/`0xfc01`)**: `alarm::rta` (codec) + `alarm::channel` (sender/receiver state machine)
+  reproduce the captured handshake byte-for-byte (notification → ACK-RTA → Alarm-Ack → ACK-RTA,
+  retries/timeouts from the negotiated `AlarmCR`, ERR-RTA both ways); `device` routes
+  `0xFC01`/`0xFE01` frames to it and sends ERR-RTA on every device-side abort and on `stop()`. An
+  aborted AR is now announced on the wire, not just inferred from the next reconnect.
 - **`PnioStatus` constants** to re-verify against the purchased IEC 61158-6-10 once
   available (current values inferred from captures and p-net's public headers).
 - **RPC fragmentation** (multi-fragment DCE-RPC requests/responses) — out of scope for Plan 3,
@@ -127,10 +132,13 @@ Open points recorded from the cyclic-exchange HIL run (`docs/bench-pnet-device.m
   bottleneck.
 - **`PACKET_AUXDATA`** (RX VLAN priority) — not needed to operate; revisit only if a consumer
   needs the received VLAN priority.
-- **ERR-RTA on device stop / `ProblemIndicator` / diagnosis reporting** — not implemented; an
-  aborted AR or a stop condition is not currently signalled to the controller via the alarm
-  channel. Plan 5. `AbortReason::RtSocket` should be added instead of reusing `RtWatchdog` for
-  socket-level errors.
+- ✅ **RESOLVED (Plan 5, 2026-08-30)** — **ERR-RTA on device stop / `ProblemIndicator` /
+  diagnosis reporting**: `IoDevice::stop()` and every device-side abort now send ERR-RTA on the
+  alarm channel; `diag::DiagStore` drives a shared `AtomicBool` the RT thread reads for the
+  `ProblemIndicator` bit in the cyclic data status; `raise_diagnosis`/`clear_diagnosis` on
+  `IoDevice` reach the wire as `AlarmNotification`s and are replayed on the next `Data`.
+  `AbortReason::RtSocket` (`crates/pnio/src/cm/ar.rs`) is now its own variant, used by
+  `device::mod` for socket-level failures instead of reusing `RtWatchdog`.
 - **`RtStats` cumulative across ARs**; `RtHandle::join` detaches the thread on a timeout
   (leaves a stale-runner window); `Validity.cycle` counts runner ticks, not the PROFINET cycle
   counter — revisit if a consumer needs the wire cycle counter specifically.
@@ -255,3 +263,43 @@ facade (`docs/gsdml.md`, `docs/bench-pnet-device.md` §6g):
   and recorded a clean TIA diagnostic buffer; the Plan 6 HIL run (`plan6-stoprun2`,
   `docs/bench-pnet-device.md` §6g) confirmed the AR/freshness behavior but the diagnostic buffer
   itself was not checked/recorded. Re-check it on the next STOP→RUN run with our own GSDML.
+
+## From Plan 5 (`alarm` / `diag` / `im`)
+
+Recorded at close-out (spec §2 "Out") while implementing the alarm channel, channel diagnosis
+and I&M0-3 (`docs/superpowers/specs/2026-08-30-pnio-alarm-diag-im-design.md`):
+
+- **Process alarms** (`AlarmType 0x0002`, `MayIssueProcessAlarm`, OB40): the `alarm::rta` codec
+  parses/builds the generic `AlarmNotification` block regardless of `AlarmType`, but there is no
+  `IoDevice` API to raise one and no GSDML `MayIssueProcessAlarm` claim.
+- **Manufacturer-specific diagnosis codes** (`0x0100..`) and `ChannelDiagList` texts;
+  `ExtChannelDiagnosis` (USI `0x8002`, `alarm::rta::ExtChannelDiagnosis`) is parse-only today —
+  the codec decodes it but `diag::DiagStore` only ever builds the plain `ChannelDiagnosis` (USI
+  `0x8000`); qualified channel diagnosis (`0x8003`) is not implemented either.
+- **Plug/pull/return-of-submodule alarms and `ModuleDiffBlock`** are not produced — carried over
+  from the Plan 3 follow-up on `ModuleDiffBlock`, still open.
+- **Diagnosis record reads** (`0x800A..0x800C`, `0xF80C`, `0xE00x`) still answer PNIORW "invalid
+  index": TIA's *Channel diagnostics* page issued none in the Plan 5 capture (the CPU keeps the
+  state it learned from alarms), so only `0xAFF0..=0xAFF3` moved off "invalid index".
+- **I&M4/5** (`IM5_Supported`), **`I&M0FilterData`** (`0xF840`) and **`RealIdentificationData`**
+  (`0xF841`) are not implemented; `im::Im0`/`ImStore` cover I&M0-3 only.
+- **IEC 61158-6-10 cross-check**: the `PnioStatus`/RTA constants this plan pinned (ERR-RTA
+  `ErrorCode`/`ErrorDecode`/`ErrorCode1`/`ErrorCode2` values, RTA-PDU `PDUType`/`AddFlags`
+  encoding) are inferred from the 2026-08-30 p-net capture and Wireshark's dissector, same as
+  Plan 3's `PnioStatus` follow-up — re-verify against the purchased standard once available.
+- **Loading our own DCP responder under a storm** needs a second host on the segment (carried
+  over from the §6h robustness campaign, "Our own DCP responder was not exercised"); Plan 5 adds
+  no new coverage here.
+- **`alarm_stats()` is per AR**: `IoDevice::alarm_stats()`'s counters (`sent`/`acked`/`retries`/
+  `unexpected_rx`/`send_failures`/`rx_err_rta`) mirror the *current* alarm channel and restart at
+  0 on every reconnect (a fresh AR opens a fresh channel); only `alarm_rx_no_channel()` is
+  cumulative for the process's lifetime. Accumulate across reconnects if a metrics consumer needs
+  a running total.
+- **`gen_gsdml`'s `info_text` vs the in-crate golden `meta()`**: fixed in this same close-out
+  (see the golden-catalogue identity fix below) — noted here because it was found while writing
+  this plan's docs, not because anything remains open.
+- **ERR-RTA for aborts before `Data`** (`AbortReason::ActivityTimeout`/`AppReadyFailed`) is
+  impossible by construction, not a gap: `device::open_alarm_channel` only creates the alarm
+  channel on a `Data` notify (`crates/pnio/src/device/mod.rs`), so `err_rta_code2` can compute a
+  code for these reasons but `abort_with_err_rta_in`'s `self.alarm.as_mut()` guard is `None` at
+  that point and no frame is sent — there is no channel yet to send it on.

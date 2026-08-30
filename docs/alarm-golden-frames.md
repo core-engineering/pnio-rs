@@ -82,7 +82,7 @@ ERR-RTA is always sent on the Low priority channel (`FrameID 0xFE01`, VLAN prior
 
 ### I&M0 record (index `0xAFF0`, 60 bytes)
 
-BlockType `0x0020`, length 56 + 4 header = 60. Layout: `VendorID` (2B), `OrderID` (20B ASCII), `IM_Serial_Number` (16B ASCII), `IM_Hardware_Revision` (2B), `IM_Software_Revision` (4B: prefix char + `functional_enhancement`/`bug_fix`/`internal_change`), `IM_Revision_Counter` (2B), `IM_Profile_ID` (2B), `IM_Profile_Specific_Type` (2B), `IM_Version` (1B.1B = `1.1`), `IM_Supported` (2B bitmask: bit 1=I&M1, bit 2=I&M2, bit 3=I&M3). Captured p-net identity in `im0_read_res.hex`: VendorID `0x0493`, OrderID `12345 Abcdefghijk` (space-padded to 20), 16-byte serial, hardware rev 1, software `V0.2.0`, revision counter 0, profile ID 0, version `1.1`, supported mask `0x000E` (bits 1–3 set, all three writable records).
+BlockType `0x0020`, length 56 + 4 header = 60. Layout: `VendorID` (2B), `OrderID` (20B ASCII), `IM_Serial_Number` (16B ASCII), `IM_Hardware_Revision` (2B), `IM_Software_Revision` (4B: prefix char + `functional_enhancement`/`bug_fix`/`internal_change`), `IM_Revision_Counter` (2B), `IM_Profile_ID` (2B), `IM_Profile_Specific_Type` (2B), `IM_Version` (1B.1B = `1.1`), `IM_Supported` (2B bitmask: bit 1=I&M1, bit 2=I&M2, bit 3=I&M3). Captured p-net identity in `im0_read_res.hex`: VendorID `0x0493`, OrderID `12345 Abcdefghijk` (space-padded to 20), serial `007` (16-byte field), hardware rev 3, software `V0.2.0`, revision counter 0, profile ID `0x1234`, profile-specific type `0x5678`, version `1.1`, supported mask `0x000E` (bits 1–3 set, all three writable records).
 
 ### Negotiated AlarmCR (CPU 1515-2 PN, TIA V21)
 
