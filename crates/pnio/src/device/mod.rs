@@ -354,7 +354,7 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
                 }
                 RtEvent::SocketError(s) => {
                     log::error!("RT socket error, aborting the AR: {s}");
-                    let out = self.cm.abort(AbortReason::RtWatchdog, now);
+                    let out = self.cm.abort(AbortReason::RtSocket, now);
                     self.dispatch(out, report)?;
                 }
                 RtEvent::SchedWarning(s) => log::warn!("RT scheduling warning: {s}"),

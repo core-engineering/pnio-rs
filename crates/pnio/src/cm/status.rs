@@ -105,6 +105,22 @@ impl PnioStatus {
     pub fn read_index_unsupported() -> PnioStatus {
         PnioStatus::new(0xDE, 0x80, 0xB0, 0x00)
     }
+
+    /// `CF 81 FD xx`: RTA error, PNIO, RTA_ERR_CLS_PROTOCOL, `code2` per spec §4.3.
+    pub fn rta_abort(code2: u8) -> PnioStatus {
+        PnioStatus::new(0xCF, 0x81, 0xFD, code2)
+    }
+
+    /// RTA_ERR_ABORT: device HmiTimeout (DHT) expired.
+    pub const RTA_ABORT_DHT_EXPIRED: u8 = 1;
+    /// RTA_ERR_ABORT: an alarm send failed.
+    pub const RTA_ABORT_ALARM_SEND_FAILED: u8 = 3;
+    /// RTA_ERR_ABORT: device HmiTimeout watchdog expired.
+    pub const RTA_ABORT_DHT_WDT_EXPIRED: u8 = 5;
+    /// RTA_ERR_ABORT: alarm indication returned an error.
+    pub const RTA_ABORT_ALARM_IND_ERR: u8 = 11;
+    /// RTA_ERR_ABORT: the AR was removed.
+    pub const RTA_ABORT_AR_REMOVED: u8 = 17;
 }
 
 #[cfg(test)]

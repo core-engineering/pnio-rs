@@ -64,6 +64,14 @@ pub enum AbortReason {
     RtWatchdog,
     /// Any other externally-triggered abort (e.g. link down), free-form reason.
     External(&'static str),
+    /// The controller sent an ERR-RTA on the alarm channel.
+    ControllerErrRta(PnioStatus),
+    /// An alarm we sent was never acknowledged within `rta_retries` resends.
+    AlarmSendFailed,
+    /// The RT thread's socket failed (was reported as `RtWatchdog` before Plan 5).
+    RtSocket,
+    /// The application stopped the device (`IoDevice::stop`).
+    Shutdown,
 }
 
 /// An input to the AR state machine. Carries the already-parsed request so `Ar`
