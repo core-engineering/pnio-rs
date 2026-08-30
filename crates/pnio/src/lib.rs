@@ -36,6 +36,7 @@
 //! assert!(resp.is_some());
 //! ```
 
+pub mod alarm;
 #[cfg(target_os = "linux")]
 pub mod api;
 pub mod capture;
