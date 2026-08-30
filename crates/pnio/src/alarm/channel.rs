@@ -338,13 +338,20 @@ impl AlarmChannel {
         )];
         match data {
             RtaData::Ack(a) => {
-                let matches_in_flight = matches!(&self.state, State::AwaitAlarmAck { req, .. }
-                    if req.notification.alarm_type == a.alarm_type
-                        && req.notification.slot == a.slot
-                        && req.notification.subslot == a.subslot);
+                // `SentData` counts as well as `AwaitAlarmAck`: an Alarm-Ack can
+                // overtake the transport ACK of the DATA it answers (different
+                // frames, and the CPU may coalesce them). Its arrival proves the
+                // DATA was delivered, so it implicitly acknowledges the transport.
+                let matches_in_flight = matches!(
+                    &self.state,
+                    State::SentData { req, .. } | State::AwaitAlarmAck { req, .. }
+                        if req.notification.alarm_type == a.alarm_type
+                            && req.notification.slot == a.slot
+                            && req.notification.subslot == a.subslot
+                );
                 if matches_in_flight {
                     let old = std::mem::replace(&mut self.state, State::Idle);
-                    if let State::AwaitAlarmAck { req, .. } = old {
+                    if let State::SentData { req, .. } | State::AwaitAlarmAck { req, .. } = old {
                         self.stats.acked += 1;
                         actions.push(AlarmAction::Acked {
                             id: req.id,
@@ -563,6 +570,29 @@ mod tests {
         assert_eq!(ch.stats().retries, 3);
         assert_eq!(ch.stats().send_failures, 1);
         assert_eq!(ch.in_flight(), None);
+    }
+
+    #[test]
+    fn alarm_ack_overtaking_the_transport_ack_is_accepted() {
+        let t0 = Instant::now();
+        let mut ch = AlarmChannel::new(cfg());
+        ch.enqueue(process_req(7), t0).unwrap();
+        assert_eq!(ch.in_flight(), Some(7));
+
+        // No `alarm_ack_rta_high_cpu` first: the content-level Alarm-Ack arrives
+        // while we are still in SentData. It proves the DATA was delivered, so it
+        // implicitly acknowledges the transport.
+        let out = ch.on_frame(&golden_alarm("alarm_ack_high_cpu"), t0);
+        assert_eq!(sends(&out), vec![golden_alarm("alarm_ack_rta_high_dev")]);
+        assert!(out.contains(&AlarmAction::Acked {
+            id: 7,
+            status: PnioStatus::OK
+        }));
+        assert_eq!(ch.in_flight(), None);
+        assert_eq!(ch.queued(), 0);
+        assert_eq!(ch.stats().acked, 1);
+        assert_eq!(ch.stats().unexpected_rx, 0);
+        assert_eq!(ch.next_deadline(), None);
     }
 
     #[test]
