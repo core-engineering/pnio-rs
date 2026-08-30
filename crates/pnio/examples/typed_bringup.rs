@@ -321,6 +321,22 @@ fn main() {
             log::warn!("--diag slot {:?}: clearing on shutdown: {e}", d.slot);
         }
     }
+    // `clear_diagnosis` only queues the command: the acyclic thread picks it up on
+    // its next step, emits the "disappears" alarm and only then drops the diagnosis
+    // from the active list. Stopping right away would race that, and the CPU would
+    // keep a stale diagnosis. Wait (up to 1 s) for the store to drain.
+    if !diags.is_empty() {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !dev.diagnoses().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !dev.diagnoses().is_empty() {
+            log::warn!(
+                "--diag: {} diagnosis/es still active 1 s after clearing; stopping anyway",
+                dev.diagnoses().len()
+            );
+        }
+    }
     let alarm_stats = dev.alarm_stats();
     let alarm_rx_no_channel = dev.alarm_rx_no_channel();
 
