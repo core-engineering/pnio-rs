@@ -602,6 +602,7 @@ impl IoDevice {
             retries: self.diag.retries.load(Ordering::Relaxed),
             unexpected_rx: self.diag.unexpected_rx.load(Ordering::Relaxed),
             send_failures: self.diag.send_failures.load(Ordering::Relaxed),
+            ack_timeouts: self.diag.ack_timeouts.load(Ordering::Relaxed),
             rx_err_rta: self.diag.rx_err_rta.load(Ordering::Relaxed),
         }
     }

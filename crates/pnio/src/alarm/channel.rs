@@ -18,6 +18,13 @@ use thiserror::Error;
 /// `block_length` counts (spec §5.2.5.2 / `docs/alarm-golden-frames.md`).
 const NOTIFICATION_FIXED_LEN: usize = 24;
 
+/// How much longer than `rta_timeout` we wait for the controller's *content-level*
+/// Alarm-Ack once its transport ACK has confirmed delivery (spec §5.2). The DATA is
+/// on the CPU's side by then, so resending it would achieve nothing and aborting the
+/// AR would punish a merely slow application; we wait a generous multiple and then
+/// drop the alarm, keeping the AR up.
+const ALARM_ACK_TIMEOUT_FACTOR: u32 = 10;
+
 /// Static configuration for one alarm channel (one priority): the AR's alarm
 /// references, retry policy, negotiated data-length limit, and the two peers' MACs.
 #[derive(Debug, Clone)]
@@ -83,6 +90,9 @@ pub struct AlarmStats {
     pub unexpected_rx: u64,
     /// Times an in-flight alarm exhausted its retries without being acknowledged.
     pub send_failures: u64,
+    /// Times a delivered alarm (transport-ACKed) was dropped because the controller
+    /// never sent its content-level Alarm-Ack in time. The AR is *not* aborted.
+    pub ack_timeouts: u64,
     /// ERR-RTA frames received from the controller.
     pub rx_err_rta: u64,
 }
@@ -101,11 +111,10 @@ enum State {
         deadline: Instant,
     },
     /// Got the transport ACK; waiting for the peer's DATA carrying the content-level
-    /// AlarmAck block.
+    /// AlarmAck block. `deadline` is `ALARM_ACK_TIMEOUT_FACTOR * rta_timeout` away:
+    /// on expiry the alarm is dropped, not resent and not fatal to the AR.
     AwaitAlarmAck {
         req: AlarmReq,
-        seq: u16,
-        frame: Vec<u8>,
         deadline: Instant,
     },
 }
@@ -196,18 +205,30 @@ impl AlarmChannel {
         }
     }
 
-    /// Called by the caller when `now >= next_deadline()`: resends the in-flight DATA
-    /// (up to `rta_retries` times) or aborts.
+    /// Called by the caller when `now >= next_deadline()`. In `SentData` (no transport
+    /// ACK yet) resends the in-flight DATA up to `rta_retries` times, then aborts the
+    /// AR. In `AwaitAlarmAck` (delivery already confirmed) drops the alarm and moves
+    /// on to the queue — see [`ALARM_ACK_TIMEOUT_FACTOR`].
     pub fn on_tick(&mut self, now: Instant) -> Vec<AlarmAction> {
-        let deadline = match &self.state {
-            State::SentData { deadline, .. } | State::AwaitAlarmAck { deadline, .. } => {
-                Some(*deadline)
+        let awaiting_alarm_ack = match &self.state {
+            State::SentData { deadline, .. } => {
+                if now < *deadline {
+                    return vec![];
+                }
+                false
             }
-            State::Idle => None,
+            State::AwaitAlarmAck { deadline, .. } => {
+                if now < *deadline {
+                    return vec![];
+                }
+                true
+            }
+            State::Idle => return vec![],
         };
-        match deadline {
-            Some(d) if now >= d => self.retry_or_abort(now),
-            _ => vec![],
+        if awaiting_alarm_ack {
+            self.drop_unacknowledged(now)
+        } else {
+            self.retry_or_abort(now)
         }
     }
 
@@ -299,16 +320,13 @@ impl AlarmChannel {
     fn on_transport_ack(&mut self, ack_seq: u16, now: Instant) -> Vec<AlarmAction> {
         if let State::SentData { seq, .. } = &self.state {
             if ack_seq == *seq {
+                // The DATA is delivered: drop the frame we were holding for resends
+                // and wait (much longer) for the content-level Alarm-Ack instead.
                 let old = std::mem::replace(&mut self.state, State::Idle);
-                if let State::SentData {
-                    req, seq, frame, ..
-                } = old
-                {
+                if let State::SentData { req, .. } = old {
                     self.state = State::AwaitAlarmAck {
                         req,
-                        seq,
-                        frame,
-                        deadline: now + self.cfg.rta_timeout,
+                        deadline: now + self.cfg.rta_timeout * ALARM_ACK_TIMEOUT_FACTOR,
                     };
                 }
                 return vec![];
@@ -379,8 +397,8 @@ impl AlarmChannel {
         vec![AlarmAction::Abort(AbortReason::ControllerErrRta(status))]
     }
 
-    /// Past-deadline handling for both `SentData` and `AwaitAlarmAck`: resend the
-    /// exact same DATA frame (up to `rta_retries` times), or abort.
+    /// `SentData` past its deadline: the peer never acknowledged the transport, so
+    /// resend the exact same DATA frame (up to `rta_retries` times), then abort.
     fn retry_or_abort(&mut self, now: Instant) -> Vec<AlarmAction> {
         if self.attempt < self.cfg.rta_retries {
             self.attempt += 1;
@@ -388,11 +406,10 @@ impl AlarmChannel {
             let (req, seq, frame) = match std::mem::replace(&mut self.state, State::Idle) {
                 State::SentData {
                     req, seq, frame, ..
-                }
-                | State::AwaitAlarmAck {
-                    req, seq, frame, ..
                 } => (req, seq, frame),
-                State::Idle => unreachable!("on_tick only reaches here with a deadline pending"),
+                State::Idle | State::AwaitAlarmAck { .. } => {
+                    unreachable!("on_tick only routes an expired SentData here")
+                }
             };
             let out = vec![AlarmAction::Send(frame.clone())];
             self.state = State::SentData {
@@ -408,6 +425,28 @@ impl AlarmChannel {
             self.queue.clear();
             vec![AlarmAction::Abort(AbortReason::AlarmSendFailed)]
         }
+    }
+
+    /// `AwaitAlarmAck` past its (long) deadline: the DATA *was* delivered — the peer
+    /// ACKed it at the transport level — so resending it would only duplicate it, and
+    /// aborting the AR would take the device down over a slow controller application.
+    /// Drop the alarm, log, count it, and let the queue continue. The controller keeps
+    /// whatever it already learned from the notification.
+    fn drop_unacknowledged(&mut self, now: Instant) -> Vec<AlarmAction> {
+        let State::AwaitAlarmAck { req, .. } = std::mem::replace(&mut self.state, State::Idle)
+        else {
+            unreachable!("on_tick only routes an expired AwaitAlarmAck here")
+        };
+        self.stats.ack_timeouts += 1;
+        log::warn!(
+            "alarm id {} ({:?} on slot {} subslot {}) was delivered but the controller sent no Alarm-Ack within {:?}: dropping it, the AR stays up",
+            req.id,
+            req.notification.alarm_type,
+            req.notification.slot,
+            req.notification.subslot,
+            self.cfg.rta_timeout * ALARM_ACK_TIMEOUT_FACTOR,
+        );
+        self.send_next(now)
     }
 
     fn build_ack_rta(&self, priority: Priority, received_seq: u16) -> Vec<u8> {
@@ -665,51 +704,46 @@ mod tests {
     }
 
     #[test]
-    fn await_alarm_ack_timeout_resends_data_and_requires_a_fresh_transport_ack() {
+    fn await_alarm_ack_timeout_drops_the_alarm_and_keeps_the_ar() {
         let t0 = Instant::now();
         let mut ch = AlarmChannel::new(cfg());
         let out = ch.enqueue(process_req(1), t0).unwrap();
-        let first_frame = sends(&out)[0].clone();
-        assert_eq!(first_frame, golden_alarm("alarm_process_notif"));
+        assert_eq!(sends(&out), vec![golden_alarm("alarm_process_notif")]);
+        // A second alarm queued behind it, to prove the queue continues.
+        assert!(sends(&ch.enqueue(process_req(2), t0).unwrap()).is_empty());
 
         let out = ch.on_frame(&golden_alarm("alarm_ack_rta_high_cpu"), t0);
         assert!(out.is_empty(), "transport ack produces nothing to send");
         assert_eq!(ch.in_flight(), Some(1));
 
-        // Timeout while AwaitAlarmAck (3 = cfg().rta_retries): each resend is
-        // byte-identical to the original DATA, and the CPU must re-ack it at the
-        // transport level again before the next timeout — a fresh AwaitAlarmAck,
-        // not a no-op.
-        let mut t = t0;
-        for i in 1..=3u64 {
-            t += Duration::from_millis(101);
-            let out = ch.on_tick(t);
-            assert_eq!(
-                sends(&out),
-                vec![first_frame.clone()],
-                "resend {i} must replay the original DATA byte-for-byte"
-            );
-            assert_eq!(ch.stats().retries, i);
-            assert_eq!(ch.in_flight(), Some(1));
-
-            let ack_out = ch.on_frame(&golden_alarm("alarm_ack_rta_high_cpu"), t);
-            assert!(
-                ack_out.is_empty(),
-                "resend {i}'s transport ack must be accepted (nothing to send)"
-            );
-            assert_eq!(ch.in_flight(), Some(1));
-        }
-
-        // A fourth timeout, past `rta_retries`, aborts instead of resending again.
-        t += Duration::from_millis(101);
-        let out = ch.on_tick(t);
-        assert_eq!(
-            out,
-            vec![AlarmAction::Abort(crate::cm::AbortReason::AlarmSendFailed)]
+        // The transport ACK confirmed delivery, so the AwaitAlarmAck deadline is
+        // ALARM_ACK_TIMEOUT_FACTOR (10) x rta_timeout away, not one rta_timeout:
+        // a plain rta_timeout tick must do nothing at all.
+        let t = t0 + Duration::from_millis(101);
+        assert!(
+            ch.on_tick(t).is_empty(),
+            "one rta_timeout is not the deadline"
         );
-        assert_eq!(ch.stats().retries, 3);
-        assert_eq!(ch.stats().send_failures, 1);
-        assert_eq!(ch.in_flight(), None);
+        assert_eq!(ch.in_flight(), Some(1));
+        assert_eq!(ch.stats().retries, 0);
+
+        // Past 10 x rta_timeout the alarm is dropped — no resend, no Abort — and the
+        // next queued alarm goes out.
+        let t = t0 + Duration::from_millis(1001);
+        let out = ch.on_tick(t);
+        assert!(
+            !out.iter().any(|a| matches!(a, AlarmAction::Abort(_))),
+            "a slow controller application must not take the AR down: {out:?}"
+        );
+        let s = sends(&out);
+        assert_eq!(s.len(), 1, "exactly the next queued alarm: {out:?}");
+        let next = parse_frame(&s[0]).unwrap();
+        assert_eq!(next.header.send_seq, 0x0000, "a fresh DATA, not a resend");
+        assert_eq!(ch.in_flight(), Some(2));
+        assert_eq!(ch.queued(), 0);
+        assert_eq!(ch.stats().ack_timeouts, 1);
+        assert_eq!(ch.stats().retries, 0);
+        assert_eq!(ch.stats().send_failures, 0);
     }
 
     #[test]

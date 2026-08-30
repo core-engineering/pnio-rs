@@ -93,6 +93,7 @@ pub struct DiagShared {
     pub retries: AtomicU64,
     pub unexpected_rx: AtomicU64,
     pub send_failures: AtomicU64,
+    pub ack_timeouts: AtomicU64,
     pub rx_err_rta: AtomicU64,
     pub rx_no_channel: AtomicU64,
 }
@@ -509,6 +510,7 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         d.retries.store(s.retries, Ordering::Relaxed);
         d.unexpected_rx.store(s.unexpected_rx, Ordering::Relaxed);
         d.send_failures.store(s.send_failures, Ordering::Relaxed);
+        d.ack_timeouts.store(s.ack_timeouts, Ordering::Relaxed);
         d.rx_err_rta.store(s.rx_err_rta, Ordering::Relaxed);
     }
 
