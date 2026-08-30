@@ -12,7 +12,7 @@ The device tells the controller what is wrong and who it is: an application rais
 **Success criteria**
 1. `alarm`: RTA-PDU codec and a sender/receiver state machine that reproduces the captured handshake byte-for-byte (goldens) — notification → ACK-RTA → Alarm-Ack → ACK-RTA — with retries/timeouts from the negotiated `AlarmCR`, and ERR-RTA both ways.
 2. `diag`: `raise_diagnosis`/`clear_diagnosis` on `IoDevice` produce `Diagnosis`/`Diagnosis disappears` alarms (USI `0x8000`, standard `ChannelErrorType`), set/clear the `ProblemIndicator` bit in the RT data status, survive an AR loss (replayed on the next `Data`).
-3. Records: `Read`/`ReadImplicit` of `0xAFF0..=0xAFF3` and `Write` of `0xAFF1..=0xAFF3`, I&M1-3 persisted to an optional JSON file.
+3. Records: `Read`/`ReadImplicit` of `0xAFF0..=0xAFF3` and `Write` of `0xAFF1..=0xAFF3`, I&M1-3 persisted to an optional file.
 4. GSDML: `Writeable_IM_Records="1 2 3"` and `ModuleInfo` from the same `Im0` data as the wire record; still `PNIO_Version="V2.3"`.
 5. HIL (§8): the six acceptance checks pass with our GSDML and `pnio-dev` restored in TIA, including a 10-minute 1 ms run with an active diagnosis and zero missed ticks.
 6. Everything existing stays green: `ar_replay`/`rt_replay`/`typed_replay`, the p-net profile, `typed_bringup`, `latency_probe`.
@@ -23,7 +23,7 @@ In:
 - `alarm` (new): `rta.rs` (RTA-PDU header, `AlarmNotification{High,Low}`, `AlarmAck{High,Low}`, `AlarmSpecifier`, `ChannelDiagnosis` payload, ERR-RTA status), `channel.rs` (sender/receiver state machine, pure, `on_frame`/`on_tick`/`enqueue` → actions).
 - `diag` (new): `ChannelError`, `Severity`, `Diagnosis`, `DiagStore` (raise/clear → alarm requests, `problem_indicator()`, replay list).
 - `cm`: `ArParams` gains the AlarmCR parameters (`rta_timeout_factor`, `rta_retries`, `alarm_ref_local/remote`, `max_alarm_data_length`, tag headers); `records.rs` handles `Read`/`ReadImplicit`/`Write` for I&M; new `PnioStatus` constants (RTA abort codes); new `AbortReason` variants.
-- `im` (new, small): `Im0` (config), `ImStore` (I&M1-3 in memory + optional JSON file).
+- `im` (new, small): `Im0` (config), `ImStore` (I&M1-3 in memory + optional file).
 - `device`: routes `0xFC01`/`0xFE01` frames to `alarm::channel`, sends its frames on the acyclic socket (VLAN-tagged), drives its timer from the existing tick, drains the application's diag queue, sends ERR-RTA on stop and on internal aborts, replays diagnoses on `Data`.
 - `rt`: `ProblemIndicator` bit from a shared `AtomicBool`.
 - `config`/`gsdml`/`api`: `Im0` in the builder, GSDML attributes, `IoDevice` diag API and `StartOptions::im_store`.
@@ -42,7 +42,7 @@ Out (recorded in `FOLLOWUPS.md` at close-out):
 
 1. **Approach 1**: the alarm channel lives on the acyclic thread next to `cm`, driven by the existing `Device` loop and tick; the RT thread only reads one atomic. No third thread, no RT-side sending.
 2. **Standard channel diagnosis only** (`ChannelErrorType 0x0001..=0x0009`), USI `0x8000`, one alarm in flight, FIFO behind it.
-3. **I&M0 from `DeviceConfig`** (builder `.im0(..)`), rendered in the GSDML `ModuleInfo` too — one source, no drift (Plan 6 rule). **I&M1-3 writable**, persisted to `StartOptions::im_store: Option<PathBuf>` (JSON); without a path they are volatile, documented.
+3. **I&M0 from `DeviceConfig`** (builder `.im0(..)`), rendered in the GSDML `ModuleInfo` too — one source, no drift (Plan 6 rule). **I&M1-3 writable**, persisted to `StartOptions::im_store: Option<PathBuf>` (raw record bodies, no dependency); without a path they are volatile, documented.
 4. **ERR-RTA on every device-side abort**: `stop()` (`AR removed`, code2 `17`), RT watchdog (`AR consumer DHT/WDT expired`, code2 `5`), alarm send failure (`AR alarm-send.cnf(-)`, code2 `3`), socket failure (code2 `17`).
 5. **Controller ERR-RTA aborts the AR** immediately (`AbortReason::ControllerErrRta(PnioStatus)`) — replaces the "notice it at the next Connect" inference of Plan 3, which stays as a fallback.
 6. **`PNIO_Version` stays `"V2.3"`**; `MayIssueProcessAlarm` stays `false`.
@@ -163,7 +163,7 @@ impl ImStore { pub fn load(path: Option<PathBuf>) -> ImStore; pub fn write(&mut 
 pub fn encode_im0(vendor_id: u16, im0: &Im0, supported: u16) -> Vec<u8>;  // 60 bytes with block header
 ```
 
-Builder: `DeviceConfigBuilder::im0(Im0)`; defaults when absent: `order_id = station_type` (truncated to 20), `serial_number = "PNIO-" + last 3 MAC octets in hex` (computed at `setup()`, since the MAC is only known there), `hardware_revision 1`, `software_revision V0.1.0` (crate version), `revision_counter 0`, `profile_id 0`, `profile_specific_type 0`. Validation in `build()`: ASCII only, length limits. JSON file: `{ "im1": {"tag_function": "…", "tag_location": "…"}, "im2": {"date": "…"}, "im3": {"descriptor": "…"} }`, written atomically (write temp + rename) on every accepted Write; unreadable/absent file at start → empty strings + `log::warn!`; write failure → `log::error!`, Write still answered OK (a local disk problem is not the controller's).
+Builder: `DeviceConfigBuilder::im0(Im0)`; defaults when absent: `order_id = station_type` (truncated to 20), `serial_number = "PNIO-" + last 3 MAC octets in hex` (computed at `setup()`, since the MAC is only known there), `hardware_revision 1`, `software_revision V0.1.0` (crate version), `revision_counter 0`, `profile_id 0`, `profile_specific_type 0`. Validation in `build()`: ASCII only, length limits. File format: the three record bodies back to back, exactly as on the wire — I&M1 (54 bytes) + I&M2 (16) + I&M3 (54) = 124 bytes, no header; any other length → treated as absent (`log::warn!`). Written atomically (temp file + rename) on every accepted Write; unreadable/absent file at start → empty strings + `log::warn!`; write failure → `log::error!`, Write still answered OK (a local disk problem is not the controller's).
 
 ### 5.5 `cm` changes
 
@@ -216,7 +216,7 @@ DAP `VirtualSubmoduleItem`: `Writeable_IM_Records="1 2 3"`; `<ModuleInfo>` of th
 
 ## 7. Tests
 
-- Unit: `alarm::rta` round trips on every golden; header/sequence tables; `AlarmSpecifier` and `ChannelProperties` bit packing; `channel` state machine (happy path, retry, exhaustion → abort, duplicate DATA re-acked, unexpected DATA, ERR-RTA in, TooLong); `diag` (raise/update/clear, flags after change, replay, problem indicator per severity); `im` (encode I&M0 == golden body with p-net's identity, write validation, JSON round trip, missing file); `cm::records` (Read/ReadImplicit/Write responses byte-exact vs goldens); `rt` data status bit.
+- Unit: `alarm::rta` round trips on every golden; header/sequence tables; `AlarmSpecifier` and `ChannelProperties` bit packing; `channel` state machine (happy path, retry, exhaustion → abort, duplicate DATA re-acked, unexpected DATA, ERR-RTA in, TooLong); `diag` (raise/update/clear, flags after change, replay, problem indicator per severity); `im` (encode I&M0 == golden body with p-net's identity, write validation, file round trip, missing/short file); `cm::records` (Read/ReadImplicit/Write responses byte-exact vs goldens); `rt` data status bit.
 - Integration: `tests/alarm_replay.rs` — p-net Connect goldens bring the mock device to `Data`, then: raise → the device emits `alarm_diag_notif.hex` bytes (modulo sequence/idents pinned to p-net's), feed `alarm_ack_rta_low_cpu.hex` + `alarm_diag_ack_cpu.hex` → device emits `alarm_ack_rta_low_dev.hex`; clear → disappears frame; feed `alarm_err_rta_cpu.hex` → AR `Idle`, `last_abort == ControllerErrRta`; stop → `alarm_err_rta_dev.hex` shape; Read `0xAFF0` request golden → response golden.
 - `capture_replay`/tshark validation extended to the new device-emitted frames.
 
@@ -237,7 +237,7 @@ DAP `VirtualSubmoduleItem`: `Writeable_IM_Records="1 2 3"`; `<ModuleInfo>` of th
 
 ## 10. Dependencies
 
-None new at runtime (`serde`/`serde_json` for the I&M file — check they are not already dev-dependencies; if adding, keep them optional behind a default-on `im-store` feature so `no-file` embeddings stay lean). `roxmltree` stays dev-only.
+None: the I&M file is raw record bytes (`std::fs` only). `roxmltree` stays dev-only.
 
 ## 11. Roles
 
