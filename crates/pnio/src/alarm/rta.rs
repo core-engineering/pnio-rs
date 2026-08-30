@@ -786,6 +786,20 @@ mod tests {
             (removed.header.send_seq, removed.header.ack_seq),
             (0xFFFE, 0xFFFE)
         );
+        let removed_reply = parse_frame(&golden_alarm("alarm_err_rta_dev_removed_reply")).unwrap();
+        assert_eq!(removed_reply.priority, Priority::Low);
+        assert_eq!(
+            removed_reply.body,
+            RtaBody::Err(PnioStatus::new(0xCF, 0x81, 0xFD, 0x11))
+        );
+        assert_eq!(
+            (removed_reply.header.send_seq, removed_reply.header.ack_seq),
+            (0xFFFF, 0xFFFE)
+        );
+        assert_eq!(
+            build_frame(CPU, DEV, &removed_reply),
+            golden_alarm("alarm_err_rta_dev_removed_reply")
+        );
     }
 
     #[test]
