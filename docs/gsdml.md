@@ -36,9 +36,10 @@ One `DeviceAccessPointItem` ("DAP1") plus one `ModuleItem` per declared slot:
 - **Texts**: every `TextId` referenced anywhere (`InfoText`, module names/info, one text per
   scalar `DataItem`, one per `Bool`-group `DataItem`, one per `BitDataItem`) is defined in
   `ExternalTextList/PrimaryLanguage`. Text fields are XML-escaped (`& < > " '`).
-- **I&M identity**: the DAP's `ModuleInfo/OrderNumber`, `HardwareRelease` and
-  `SoftwareRelease` come from `cfg.im0()` (`DeviceConfigBuilder::im0`), not a separate
-  `GsdmlMeta` field — see [I&M and alarms](#im-and-alarms).
+- **I&M identity**: every `ModuleInfo/OrderNumber`, `HardwareRelease` and
+  `SoftwareRelease` — the DAP's and each `ModuleItem`'s, identical values — come from
+  `cfg.im0()` (`DeviceConfigBuilder::im0`), not a separate `GsdmlMeta` field — see
+  [I&M and alarms](#im-and-alarms).
 
 Nothing else is emitted: no alarms, no `IsochroneMode`, no parameter records — see
 [What is not declared yet](#what-is-not-declared-yet).
@@ -237,14 +238,18 @@ TIA already knows) needs no GSDML declaration, and this device never issues a pr
   device as part of a normal download (`INDEX_IM1..=INDEX_IM3`, `crate::im::ImStore::write`).
   I&M0 is never in this list: it is read-only, computed on demand by
   [`im::encode_im0`](../crates/pnio/src/im.rs) from `DeviceSetup::im0`, not stored or writable.
-- **`ModuleInfo`'s `OrderNumber`/`HardwareRelease`/`SoftwareRelease`** (DAP and every module) are
-  derived from `cfg.im0()` — `order_id`, `hardware_revision` and `software_revision`
+- **`ModuleInfo`'s `OrderNumber`/`HardwareRelease`/`SoftwareRelease`** are rendered by the one
+  `gsdml::module_identity_xml` helper into the DAP's `ModuleInfo` *and* every `ModuleItem`'s, with
+  the very same values: `cfg.im0()`'s `order_id`, `hardware_revision` and `software_revision`
   (`{prefix}{functional}.{bug_fix}.{internal}`, e.g. `V0.1.0`) — the same [`Im0`](../crates/pnio/src/im.rs)
-  `DeviceConfigBuilder::im0` passes to `setup()`. These GSDML values are what TIA displays in the
-  module properties; **they must equal what the device actually answers on I&M0 reads**, which is
-  why both are sourced from the one `Im0` value rather than a separately-typed `GsdmlMeta` field —
-  a mismatch would show up as TIA displaying one order number/revision while the device reports
-  another over the wire.
+  `DeviceConfigBuilder::im0` passes to `setup()`. There is **no per-module `OrderNumber` suffix**:
+  the device answers one identity on `0xAFF0` (the same record on every submodule, see
+  [I&M0 on every submodule](../docs/alarm-golden-frames.md)), so a `…-M1`/`…-M2` order number in the
+  GSDML would be an identity TIA displays and the wire never confirms. These GSDML values are what
+  TIA shows in the module properties; **they must equal what the device actually answers on I&M0
+  reads**, which is why both are sourced from the one `Im0` value rather than a separately-typed
+  `GsdmlMeta` field — a mismatch would show up as TIA displaying one order number/revision while
+  the device reports another over the wire.
 - **`PNIO_Version` stays `"V2.3"`** (see [Validation](#validation)): the I&M/`Writeable_IM_Records`
   declaration above does not require `V2.31+`, only the LLDP/PTP-DCP-boundary/ResetToFactory
   claims do.

@@ -66,7 +66,9 @@
           <ModuleInfo>
             <Name TextId="M1_Name"/>
             <InfoText TextId="M1_Info"/>
-            <OrderNumber Value="PNIO-SAMPLE-M1"/>
+            <OrderNumber Value="PNIO-SAMPLE"/>
+            <HardwareRelease Value="1"/>
+            <SoftwareRelease Value="V0.1.0"/>
           </ModuleInfo>
           <VirtualSubmoduleList>
             <VirtualSubmoduleItem ID="M1_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
@@ -101,7 +103,9 @@
           <ModuleInfo>
             <Name TextId="M2_Name"/>
             <InfoText TextId="M2_Info"/>
-            <OrderNumber Value="PNIO-SAMPLE-M2"/>
+            <OrderNumber Value="PNIO-SAMPLE"/>
+            <HardwareRelease Value="1"/>
+            <SoftwareRelease Value="V0.1.0"/>
           </ModuleInfo>
           <VirtualSubmoduleList>
             <VirtualSubmoduleItem ID="M2_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
@@ -160,7 +164,9 @@
           <ModuleInfo>
             <Name TextId="M3_Name"/>
             <InfoText TextId="M3_Info"/>
-            <OrderNumber Value="PNIO-SAMPLE-M3"/>
+            <OrderNumber Value="PNIO-SAMPLE"/>
+            <HardwareRelease Value="1"/>
+            <SoftwareRelease Value="V0.1.0"/>
           </ModuleInfo>
           <VirtualSubmoduleList>
             <VirtualSubmoduleItem ID="M3_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
@@ -195,7 +201,9 @@
           <ModuleInfo>
             <Name TextId="M4_Name"/>
             <InfoText TextId="M4_Info"/>
-            <OrderNumber Value="PNIO-SAMPLE-M4"/>
+            <OrderNumber Value="PNIO-SAMPLE"/>
+            <HardwareRelease Value="1"/>
+            <SoftwareRelease Value="V0.1.0"/>
           </ModuleInfo>
           <VirtualSubmoduleList>
             <VirtualSubmoduleItem ID="M4_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
