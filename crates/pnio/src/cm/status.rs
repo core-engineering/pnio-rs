@@ -106,6 +106,29 @@ impl PnioStatus {
         PnioStatus::new(0xDE, 0x80, 0xB0, 0x00)
     }
 
+    /// PNIORW: read problem, state conflict — the request has no established AR, or
+    /// its `ar_uuid` does not match the established one's. Same `(Code1, Code2)` tail
+    /// as `write_wrong_ar` (`0x3d, 0x03`), mirrored for the Read direction: `Code =
+    /// 0xDE`, the same family byte `read_index_unsupported` uses. Convention as used
+    /// by open PROFINET stacks; re-verify against the standard (FOLLOWUPS).
+    pub fn read_wrong_ar() -> PnioStatus {
+        PnioStatus::new(0xDE, 0x81, 0x3d, 0x03)
+    }
+
+    /// PNIORW: write problem, invalid parameter — a Write record on an I&M1-3 index
+    /// (`0xAFF1..=0xAFF3`) whose shape [`crate::im::ImStore::write`] rejects, or whose
+    /// `(slot, subslot)` is not the writable one (the DAP). `Code = 0xDF` (the Write
+    /// family byte, as in `write_wrong_ar`/`write_index_unsupported`), `Code1 = 0xB0`
+    /// (the same index/parameter family byte as `write_index_unsupported`), `Code2 =
+    /// 0x02` ("invalid parameter", distinct from `write_index_unsupported`'s "invalid
+    /// index" `0x00`). Not currently placed on the wire (per-record Write statuses are
+    /// out of scope; the Write response keeps the AR's own OK status), used only to
+    /// log the rejection. Convention as used by open PROFINET stacks; re-verify
+    /// against the standard (FOLLOWUPS).
+    pub fn write_invalid_parameter() -> PnioStatus {
+        PnioStatus::new(0xDF, 0x81, 0xB0, 0x02)
+    }
+
     /// `CF 81 FD xx`: RTA error, PNIO, RTA_ERR_CLS_PROTOCOL, `code2` per spec §4.3.
     pub fn rta_abort(code2: u8) -> PnioStatus {
         PnioStatus::new(0xCF, 0x81, 0xFD, code2)
