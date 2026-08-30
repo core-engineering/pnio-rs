@@ -36,9 +36,12 @@ One `DeviceAccessPointItem` ("DAP1") plus one `ModuleItem` per declared slot:
 - **Texts**: every `TextId` referenced anywhere (`InfoText`, module names/info, one text per
   scalar `DataItem`, one per `Bool`-group `DataItem`, one per `BitDataItem`) is defined in
   `ExternalTextList/PrimaryLanguage`. Text fields are XML-escaped (`& < > " '`).
+- **I&M identity**: the DAP's `ModuleInfo/OrderNumber`, `HardwareRelease` and
+  `SoftwareRelease` come from `cfg.im0()` (`DeviceConfigBuilder::im0`), not a separate
+  `GsdmlMeta` field — see [I&M and alarms](#im-and-alarms).
 
-Nothing else is emitted: no alarms, no diagnosis, no I&M, no `IsochroneMode`, no parameter
-records — see [What is not declared yet](#what-is-not-declared-yet).
+Nothing else is emitted: no alarms, no `IsochroneMode`, no parameter records — see
+[What is not declared yet](#what-is-not-declared-yet).
 
 ## The layout rule
 
@@ -219,10 +222,46 @@ to the image is attempted, so a `with_inputs`/`write_*` call that succeeds on th
 but then sees the image reject it with `NoLayoutYet` keeps the value — it is published whole by
 the first call that succeeds after the AR reconnects.
 
+## I&M and alarms
+
+The device implements I&M0-3, standard channel diagnosis and RTA alarm/ack/err frames (Plan 5);
+the GSDML declares only what a controller engineering tool needs to know ahead of time — I&M0
+identity fields and that I&M1-3 are writable. It does not declare diagnosis or alarms: standard
+channel diagnosis (`ChannelDiagnosis`/`ExtChannelDiagnosis` blocks, decoded from the device model
+TIA already knows) needs no GSDML declaration, and this device never issues a process alarm, so
+`MayIssueProcessAlarm` stays `"false"` on every `VirtualSubmoduleItem`.
+
+- **`Writeable_IM_Records="1 2 3"`** on `DAP1_SM` (the DAP's `VirtualSubmoduleItem`) tells TIA
+  I&M1 (tag function/location), I&M2 (install date) and I&M3 (descriptor) are writable — TIA
+  then offers an "I&M" tab on the module and, when values are entered there, writes I&M1-3 to the
+  device as part of a normal download (`INDEX_IM1..=INDEX_IM3`, `crate::im::ImStore::write`).
+  I&M0 is never in this list: it is read-only, computed on demand by
+  [`im::encode_im0`](../crates/pnio/src/im.rs) from `DeviceSetup::im0`, not stored or writable.
+- **`ModuleInfo`'s `OrderNumber`/`HardwareRelease`/`SoftwareRelease`** (DAP and every module) are
+  derived from `cfg.im0()` — `order_id`, `hardware_revision` and `software_revision`
+  (`{prefix}{functional}.{bug_fix}.{internal}`, e.g. `V0.1.0`) — the same [`Im0`](../crates/pnio/src/im.rs)
+  `DeviceConfigBuilder::im0` passes to `setup()`. These GSDML values are what TIA displays in the
+  module properties; **they must equal what the device actually answers on I&M0 reads**, which is
+  why both are sourced from the one `Im0` value rather than a separately-typed `GsdmlMeta` field —
+  a mismatch would show up as TIA displaying one order number/revision while the device reports
+  another over the wire.
+- **`PNIO_Version` stays `"V2.3"`** (see [Validation](#validation)): the I&M/`Writeable_IM_Records`
+  declaration above does not require `V2.31+`, only the LLDP/PTP-DCP-boundary/ResetToFactory
+  claims do.
+- If a GSD with the same file name is already installed, TIA will not pick up the new
+  `Writeable_IM_Records`/`ModuleInfo` values on a plain re-import — see the **uninstall/reinstall
+  quirk** in [Importing in TIA](#importing-in-tia).
+
 ## What is not declared yet
 
-- **Alarms, diagnosis, I&M** — no alarm block, no `ProblemIndicator`/diagnosis reporting, no
-  I&M records in the GSDML; the device implements none of it yet. Plan 5.
+- **Process alarms** — this device never issues one, and no `VirtualSubmoduleItem` claims
+  `MayIssueProcessAlarm="true"`; ERR-RTA/RTA-ACK on the acyclic side (Plan 5) do not need a
+  process-alarm claim to work.
+- **`ChannelDiagList` texts** — the diagnosis store (`diag::DiagStore`) decodes standard
+  `ChannelDiagnosis`/`ExtChannelDiagnosis` error-type codes TIA already knows from the base
+  profile; no device-specific `ChannelDiagList` (custom error-type text mapping) is declared.
+- **I&M4/5** — only I&M0-3 are implemented ([`crate::im`](../crates/pnio/src/im.rs));
+  higher-numbered records are not.
 - **The V2.31+ profile** — `LLDP_NoD_Supported`, the `PTP_BoundarySupported`/
   `DCP_BoundarySupported` claims, `ResetToFactoryModes`, `CertificationInfo`: all require
   `PNIO_Version >= "V2.31"` (see [Validation](#validation)) and none are implemented by this

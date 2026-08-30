@@ -12,7 +12,6 @@ pub struct GsdmlMeta {
     pub vendor_name: String,
     pub product_family: String,
     pub info_text: String,
-    pub order_number: String,
     /// (year, month, day) — the GSDML release date, also the file-name suffix.
     pub date: (u16, u8, u8),
 }
@@ -129,6 +128,13 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
     } else {
         "32".to_string()
     };
+    let sw_release = format!(
+        "{}{}.{}.{}",
+        cfg.im0().software_revision.prefix,
+        cfg.im0().software_revision.functional,
+        cfg.im0().software_revision.bug_fix,
+        cfg.im0().software_revision.internal
+    );
     let _ = write!(
         x,
         r#"<?xml version="1.0" encoding="utf-8"?>
@@ -161,8 +167,8 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
             <InfoText TextId="T_DAP_Info"/>
             <VendorName Value="{vendor}"/>
             <OrderNumber Value="{order}"/>
-            <HardwareRelease Value="1.0"/>
-            <SoftwareRelease Value="V0.0.0"/>
+            <HardwareRelease Value="{hw}"/>
+            <SoftwareRelease Value="{sw}"/>
           </ModuleInfo>
           <IOConfigData MaxInputLength="{max_in}" MaxOutputLength="{max_out}" MaxDataLength="{max_data}"/>
           <UseableModules>
@@ -174,7 +180,9 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
         n_slots = n_slots,
         mdi = cfg.min_device_interval(),
         station = escape(cfg.station_name()),
-        order = escape(&meta.order_number),
+        order = escape(&cfg.im0().order_id),
+        hw = cfg.im0().hardware_revision,
+        sw = sw_release,
         max_in = max_in,
         max_out = max_out,
         max_data = max_data
@@ -190,7 +198,7 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
         x,
         r#"          </UseableModules>
           <VirtualSubmoduleList>
-            <VirtualSubmoduleItem ID="DAP1_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
+            <VirtualSubmoduleItem ID="DAP1_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false" Writeable_IM_Records="1 2 3">
               <IOData/>
               <ModuleInfo>
                 <Name TextId="T_DAP_Name"/>
@@ -240,7 +248,7 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
               <IOData>
 "#,
             ident = 0x100u32 + n as u32,
-            order = escape(&meta.order_number)
+            order = escape(&cfg.im0().order_id)
         );
         texts.push((format!("M{n}_Name"), escape(&s.name)));
         texts.push((
@@ -346,6 +354,10 @@ mod tests {
             .input(Slot(2), &[Bool; 32])
             .output(Slot(3), &[Real; 16])
             .output(Slot(4), &[Bool; 32])
+            .im0(crate::im::Im0 {
+                order_id: "PNIO-SAMPLE".into(),
+                ..crate::im::Im0::default()
+            })
             .build()
             .unwrap()
     }
@@ -355,7 +367,6 @@ mod tests {
             vendor_name: "Core Engineering".into(),
             product_family: "pnio".into(),
             info_text: "pnio sample device: 16 REAL + 32 BOOL per direction".into(),
-            order_number: "PNIO-SAMPLE".into(),
             date: (2026, 8, 29),
         }
     }
@@ -493,6 +504,22 @@ mod tests {
         }
         let timing = find("TimingProperties")[0];
         assert_eq!(timing.attribute("SendClock"), Some("32"));
+        let dap_sm = find("VirtualSubmoduleItem")[0];
+        assert_eq!(dap_sm.attribute("ID"), Some("DAP1_SM"));
+        assert_eq!(dap_sm.attribute("Writeable_IM_Records"), Some("1 2 3"));
+        let dap_order = find("ModuleInfo")[0]
+            .children()
+            .find(|c| c.has_tag_name("OrderNumber"))
+            .unwrap();
+        assert_eq!(
+            dap_order.attribute("Value"),
+            Some(cfg.im0().order_id.as_str())
+        );
+        let sw_release = find("ModuleInfo")[0]
+            .children()
+            .find(|c| c.has_tag_name("SoftwareRelease"))
+            .unwrap();
+        assert_eq!(sw_release.attribute("Value"), Some("V0.1.0"));
     }
 
     #[test]

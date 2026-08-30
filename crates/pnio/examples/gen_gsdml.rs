@@ -4,6 +4,7 @@ use clap::Parser;
 use pnio::config::{DeviceConfig, Direction, Slot};
 use pnio::data::FieldType::*;
 use pnio::gsdml::{file_name, render, GsdmlMeta};
+use pnio::im::Im0;
 
 #[derive(Parser)]
 struct Args {
@@ -32,6 +33,10 @@ fn sample_config(a: &Args) -> DeviceConfig {
         .input(Slot(2), &[Bool; 32])
         .output(Slot(3), &[Real; 16])
         .output(Slot(4), &[Bool; 32])
+        .im0(Im0 {
+            order_id: "PNIO-SAMPLE".into(),
+            ..Im0::default()
+        })
         .build()
         .expect("sample config is valid")
 }
@@ -44,7 +49,6 @@ fn main() {
         product_family: "pnio".into(),
         info_text: "pnio sample device: 16 REAL + 32 BOOL per direction (development identity)"
             .into(),
-        order_number: "PNIO-SAMPLE".into(),
         date: (2026, 8, 29),
     };
     let path = a.out.join(file_name(&meta));

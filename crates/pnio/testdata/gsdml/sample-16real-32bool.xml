@@ -28,8 +28,8 @@
             <InfoText TextId="T_DAP_Info"/>
             <VendorName Value="Core Engineering"/>
             <OrderNumber Value="PNIO-SAMPLE"/>
-            <HardwareRelease Value="1.0"/>
-            <SoftwareRelease Value="V0.0.0"/>
+            <HardwareRelease Value="1"/>
+            <SoftwareRelease Value="V0.1.0"/>
           </ModuleInfo>
           <IOConfigData MaxInputLength="75" MaxOutputLength="75" MaxDataLength="150"/>
           <UseableModules>
@@ -39,7 +39,7 @@
             <ModuleItemRef ModuleItemTarget="M4" AllowedInSlots="4"/>
           </UseableModules>
           <VirtualSubmoduleList>
-            <VirtualSubmoduleItem ID="DAP1_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false">
+            <VirtualSubmoduleItem ID="DAP1_SM" SubmoduleIdentNumber="0x00000001" MayIssueProcessAlarm="false" Writeable_IM_Records="1 2 3">
               <IOData/>
               <ModuleInfo>
                 <Name TextId="T_DAP_Name"/>
