@@ -102,12 +102,21 @@ pub struct DiagShared {
 /// already torn the alarm channel down on its side, so answering it would be noise
 /// (spec §5.6).
 fn err_rta_code2(reason: &AbortReason) -> Option<u8> {
+    // Exhaustive on purpose (no `_` arm): a new `AbortReason` must be given a code2
+    // here rather than silently inheriting one.
     match reason {
         AbortReason::ControllerErrRta(_) => None,
         AbortReason::RtWatchdog => Some(PnioStatus::RTA_ABORT_DHT_WDT_EXPIRED),
         AbortReason::AlarmSendFailed => Some(PnioStatus::RTA_ABORT_ALARM_SEND_FAILED),
-        // `RtSocket`, `Shutdown` and any other device-side abort: the AR is gone.
-        _ => Some(PnioStatus::RTA_ABORT_AR_REMOVED),
+        // Every other device-side abort says the same thing: this AR is gone.
+        AbortReason::RtSocket
+        | AbortReason::Shutdown
+        | AbortReason::ControllerRelease
+        | AbortReason::ControllerReconnect
+        | AbortReason::AppReadyFailed
+        | AbortReason::AppReadyRejected(_)
+        | AbortReason::ActivityTimeout
+        | AbortReason::External(_) => Some(PnioStatus::RTA_ABORT_AR_REMOVED),
     }
 }
 
@@ -172,6 +181,12 @@ pub struct Device<E: EthTransport, R: RpcTransport> {
     /// Monotonic id handed to [`AlarmReq::id`] so an `Acked` action can be traced
     /// back to the notification that produced it.
     next_alarm_id: u32,
+    /// Incremented every time an alarm channel is opened. `step` collects actions
+    /// early and applies them last, so each batch carries the epoch it was produced
+    /// under and is dropped if the channel has been replaced (or closed) in between —
+    /// otherwise a stale abort (e.g. the controller's ERR-RTA) drained in the same
+    /// `step` as its reconnect would tear down the AR that reconnect just built.
+    alarm_epoch: u64,
     /// The currently running RT thread, if any (Linux-only: the runner itself is
     /// only ever built on Linux).
     #[cfg(target_os = "linux")]
@@ -200,6 +215,7 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             diag_shared: Arc::new(DiagShared::default()),
             alarm: None,
             next_alarm_id: 0,
+            alarm_epoch: 0,
             #[cfg(target_os = "linux")]
             runner: None,
             #[cfg(target_os = "linux")]
@@ -354,15 +370,28 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         let mut report = StepReport::default();
         // Alarm actions produced anywhere in this step are collected here and applied
         // last (step 7): applying an `Abort` re-enters `dispatch`, which drops the
-        // very channel the earlier steps are still borrowing.
-        let mut actions: Vec<AlarmAction> = Vec::new();
+        // very channel the earlier steps are still borrowing. Each batch carries the
+        // channel epoch it was produced under, so stages 3-5 replacing the channel
+        // invalidate it (see `alarm_epoch`).
+        let mut pending: Vec<(u64, Vec<AlarmAction>)> = Vec::new();
 
         // (1) Ethernet: alarm frames to the channel, everything else to DCP.
         while let Some(frame) = self.eth.recv(Some(Duration::ZERO))? {
             report.eth_frames += 1;
             if crate::alarm::is_alarm_frame(&frame) {
+                // Alarm frames are unicast to us. A socket that also sees other
+                // stations' traffic must not have its counters moved by it.
+                if frame.get(..6) != Some(&self.setup.dcp.mac.0[..]) {
+                    log::trace!("alarm frame addressed to another station; dropping");
+                    continue;
+                }
                 match &mut self.alarm {
-                    Some(ch) => actions.extend(ch.on_frame(&frame, now)),
+                    Some(ch) => {
+                        let a = ch.on_frame(&frame, now);
+                        if !a.is_empty() {
+                            pending.push((self.alarm_epoch, a));
+                        }
+                    }
                     None => {
                         log::debug!("alarm frame with no alarm channel open; dropping");
                         self.diag_shared
@@ -381,7 +410,7 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         self.publish_alarm_stats();
 
         // (2) The application's diagnosis commands.
-        self.drain_diag_queue(now, &mut actions);
+        self.drain_diag_queue(now, &mut pending);
 
         // (3) RPC.
         while let Some((buf, from)) = self.rpc.recv(Some(Duration::ZERO))? {
@@ -402,12 +431,17 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
 
         // (6) RTA timers.
         if let Some(ch) = &mut self.alarm {
-            actions.extend(ch.on_tick(now));
+            let a = ch.on_tick(now);
+            if !a.is_empty() {
+                pending.push((self.alarm_epoch, a));
+            }
         }
         self.publish_alarm_stats();
 
-        // (7) Apply everything the alarm channel asked for.
-        self.apply_alarm_actions(actions, now, &mut report)?;
+        // (7) Apply everything the (still current) alarm channel asked for.
+        for (epoch, batch) in pending {
+            self.apply_alarm_actions(batch, epoch, now, &mut report)?;
+        }
 
         Ok(report)
     }
@@ -415,7 +449,7 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
     /// Drains the application's [`DiagCommand`]s into the [`DiagStore`], turning each
     /// resulting notification into a queued Low-priority alarm, then republishes the
     /// active set and the problem indicator.
-    fn drain_diag_queue(&mut self, now: Instant, actions: &mut Vec<AlarmAction>) {
+    fn drain_diag_queue(&mut self, now: Instant, pending: &mut Vec<(u64, Vec<AlarmAction>)>) {
         let cmds: Vec<DiagCommand> = self
             .diag_shared
             .queue
@@ -442,7 +476,9 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             };
             if let Some(n) = notification {
                 let a = self.queue_notification(n, now);
-                actions.extend(a);
+                if !a.is_empty() {
+                    pending.push((self.alarm_epoch, a));
+                }
             }
         }
         self.publish_diag_state();
@@ -505,15 +541,29 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         }
     }
 
-    /// Performs one batch of [`AlarmAction`]s: frames go out on the acyclic socket,
-    /// an `Abort` announces itself with an ERR-RTA and tears the AR down. Counters
-    /// come from [`AlarmChannel::stats`], mirrored once the batch is done.
+    /// Performs one batch of [`AlarmAction`]s produced under channel epoch `epoch`:
+    /// frames go out on the acyclic socket, an `Abort` announces itself with an
+    /// ERR-RTA and tears the AR down. Counters come from [`AlarmChannel::stats`],
+    /// mirrored once the batch is done.
+    ///
+    /// A batch whose channel is gone (closed, or replaced by a reconnect processed
+    /// later in the same `step`) is dropped whole: it belongs to an AR that no longer
+    /// exists. `Abort` is always the only action a batch carries, so this cannot drop
+    /// half of one.
     fn apply_alarm_actions(
         &mut self,
         actions: Vec<AlarmAction>,
+        epoch: u64,
         now: Instant,
         report: &mut StepReport,
     ) -> Result<(), DeviceError> {
+        if self.alarm.is_none() || self.alarm_epoch != epoch {
+            log::debug!(
+                "dropping {} alarm action(s) from a closed alarm channel",
+                actions.len()
+            );
+            return Ok(());
+        }
         for action in actions {
             match action {
                 AlarmAction::Send(frame) => self.eth.send(&frame)?,
@@ -556,6 +606,7 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         let Some(params) = self.cm.context().map(|c| c.params.clone()) else {
             return; // unreachable in practice: a Data notify implies a live context
         };
+        self.alarm_epoch = self.alarm_epoch.wrapping_add(1);
         self.alarm = Some(AlarmChannel::new(AlarmChannelConfig {
             local_ref: params.alarm_ref_local,
             remote_ref: params.alarm_ref_remote,
@@ -596,9 +647,10 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
                     // reconnects has forgotten every alarm we ever sent it, so the
                     // still-active diagnoses are re-announced on the fresh channel.
                     self.open_alarm_channel();
+                    let epoch = self.alarm_epoch;
                     for n in self.diag.replay() {
                         let actions = self.queue_notification(n, now);
-                        self.apply_alarm_actions(actions, now, report)?;
+                        self.apply_alarm_actions(actions, epoch, now, report)?;
                     }
                     self.publish_diag_state();
                 }
@@ -828,7 +880,11 @@ mod tests {
     /// Queues the four RPC goldens that drive the AR to `Data`. `seq_base` renumbers
     /// their DCE-RPC `seq_num` (LE, offset 64) so a second bring-up is not answered
     /// from `Cm`'s per-`(activity, seq_num)` response cache.
-    fn feed_bring_up(dev: &Device<SharedEth, MockRpcTransport>, seq_base: Option<u32>) {
+    fn feed_bring_up(
+        dev: &Device<SharedEth, MockRpcTransport>,
+        seq_base: Option<u32>,
+        session_key: Option<u16>,
+    ) {
         let cpu = "172.16.2.100:54766".parse().unwrap();
         let cpu_cm = "172.16.2.100:34964".parse().unwrap();
         for (i, name) in ["connect_req", "write_req", "prmend_req"]
@@ -838,6 +894,13 @@ mod tests {
             let mut pdu = golden(name)[RPC_OFF..].to_vec();
             if let Some(base) = seq_base {
                 pdu[64..68].copy_from_slice(&(base + i as u32).to_le_bytes());
+            }
+            // `ARBlockReq.SessionKey`: RPC header (80) + NDR (20) + block header (6)
+            // + ARType (2) + ARUUID (16). A *new* key on the same ARUUID is what makes
+            // `Ar` treat a Connect arriving in `Data` as a controller reconnect
+            // instead of an exact retransmission.
+            if let (Some(key), 0) = (session_key, i) {
+                pdu[124..126].copy_from_slice(&key.to_be_bytes());
             }
             dev.rpc().push_rx(pdu, cpu);
         }
@@ -849,7 +912,7 @@ mod tests {
     fn device_in_data() -> (Device<SharedEth, MockRpcTransport>, SharedEth) {
         let eth = SharedEth::new();
         let mut dev = Device::new(setup(), eth.clone(), MockRpcTransport::new());
-        feed_bring_up(&dev, None);
+        feed_bring_up(&dev, None, None);
         dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
         assert_eq!(dev.state(), ArState::Data);
         (dev, eth)
@@ -857,7 +920,7 @@ mod tests {
 
     /// Re-establishes the AR from `Idle` with a fresh set of RPC sequence numbers.
     fn reconnect(dev: &mut Device<SharedEth, MockRpcTransport>) {
-        feed_bring_up(dev, Some(0x100));
+        feed_bring_up(dev, Some(0x100), None);
         dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
     }
 
@@ -960,6 +1023,55 @@ mod tests {
         assert_eq!(n.alarm_type, AlarmType::Diagnosis);
         assert_eq!(n.slot, 1);
         assert!(dev.problem_indicator());
+    }
+
+    /// The controller's ERR-RTA and its reconnect can land in the same `step`: the
+    /// abort is collected at stage (1) but only applied at stage (7), by which time
+    /// stage (3) has established a *new* AR. The channel epoch must make the stale
+    /// abort a no-op instead of tearing the fresh AR down.
+    #[test]
+    fn stale_abort_does_not_tear_down_an_ar_rebuilt_in_the_same_step() {
+        let (mut dev, eth) = device_in_data();
+        eth.push_rx(cpu_alarm("alarm_err_rta_cpu_removed"));
+        feed_bring_up(&dev, Some(0x200), Some(3));
+        dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
+
+        assert_eq!(dev.state(), ArState::Data, "the reconnected AR survives");
+        assert_eq!(dev.ar_params().unwrap().session_key, 3);
+        assert!(!dev.alarm_in_flight());
+        // ... and the channel that came with it works: a raise still reaches the wire.
+        let before = eth.sent().len();
+        dev.diag_shared()
+            .queue
+            .lock()
+            .unwrap()
+            .push_back(DiagCommand::Raise(line_break()));
+        dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
+        let fresh: Vec<Vec<u8>> = eth.sent()[before..]
+            .iter()
+            .filter(|f| is_alarm_frame(f))
+            .cloned()
+            .collect();
+        assert_eq!(fresh.len(), 1);
+        assert!(matches!(
+            parse_frame(&fresh[0]).unwrap().body,
+            RtaBody::Data(RtaData::Notification(_))
+        ));
+        assert!(dev.alarm_in_flight());
+    }
+
+    #[test]
+    fn alarm_frames_addressed_to_another_station_are_ignored() {
+        let (mut dev, eth) = device_in_data();
+        let mut foreign = cpu_alarm("alarm_err_rta_cpu_removed");
+        foreign[..6].copy_from_slice(&[0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xff]);
+        eth.push_rx(foreign);
+        dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.state(), ArState::Data);
+        let shared = dev.diag_shared();
+        assert_eq!(shared.rx_no_channel.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.rx_err_rta.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.unexpected_rx.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1149,6 +1261,17 @@ mod tests {
             Some(&(ArState::Idle, Some(AbortReason::RtWatchdog)))
         );
         assert!(!dev.rt_running());
+        // ... announced on the alarm channel as "DHT watchdog expired" first.
+        let last = dev
+            .eth()
+            .sent()
+            .last()
+            .expect("an ERR-RTA was sent")
+            .clone();
+        assert_eq!(
+            parse_frame(&last).unwrap().body,
+            RtaBody::Err(PnioStatus::rta_abort(PnioStatus::RTA_ABORT_DHT_WDT_EXPIRED))
+        );
     }
 
     /// Always fails `send`, so the RT thread's very first tick reports
@@ -1208,5 +1331,16 @@ mod tests {
             Some(&(ArState::Idle, Some(AbortReason::RtSocket)))
         );
         assert!(!dev.rt_running());
+        // ... announced on the alarm channel as "AR removed" first.
+        let last = dev
+            .eth()
+            .sent()
+            .last()
+            .expect("an ERR-RTA was sent")
+            .clone();
+        assert_eq!(
+            parse_frame(&last).unwrap().body,
+            RtaBody::Err(PnioStatus::rta_abort(PnioStatus::RTA_ABORT_AR_REMOVED))
+        );
     }
 }
