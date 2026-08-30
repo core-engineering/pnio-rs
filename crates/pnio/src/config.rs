@@ -6,6 +6,7 @@ use crate::data::FieldType;
 use crate::dcp::{DcpConfig, DeviceProperties};
 use crate::device::{DeviceSetup, RtOptions};
 use crate::eth::MacAddr;
+use crate::im::Im0;
 use crate::rpc::Uuid;
 use thiserror::Error;
 
@@ -307,6 +308,8 @@ impl DeviceConfig {
             model: self.model(mac),
             activity_seed: Self::activity_seed(mac),
             rt,
+            im0: Im0::default(),
+            im_store: None,
         }
     }
 }
