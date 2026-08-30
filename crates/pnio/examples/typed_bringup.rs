@@ -13,6 +13,7 @@ use pnio::api::{ApiError, IoDevice, StartOptions};
 use pnio::config::{DeviceConfig, Slot};
 use pnio::data::FieldType::*;
 use pnio::device::RtOptions;
+use pnio::diag::{ChannelError, Severity};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -58,7 +59,61 @@ struct Args {
     /// Verdict threshold: max interval between controller frames, us
     #[arg(long, default_value_t = 1500)]
     max_rx_interval_us: u64,
+    /// Raise a channel diagnosis once the AR is up: <slot>:<channel>:<error-name>
+    /// (repeatable). Cleared before shutdown. See `ChannelError::from_name` for the
+    /// accepted error names.
+    #[arg(long = "diag")]
+    diag: Vec<String>,
+    /// Backing file for the writable I&M1-3 records (kept in memory only, blank at
+    /// startup, if unset)
+    #[arg(long = "im-store")]
+    im_store: Option<std::path::PathBuf>,
 }
+
+/// One `--diag` entry, parsed and slot-validated up front (fails fast like `--csv`).
+struct DiagSpec {
+    slot: Slot,
+    channel: u16,
+    error: ChannelError,
+}
+
+/// `<slot>:<channel>:<error-name>` -> `DiagSpec`. Errors name the bad field; the
+/// caller prints the accepted error names on an unknown one.
+fn parse_diag_spec(s: &str) -> Result<DiagSpec, String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    let [slot, channel, error] = parts[..] else {
+        return Err(format!(
+            "'{s}': expected <slot>:<channel>:<error-name>, got {} field(s)",
+            parts.len()
+        ));
+    };
+    let slot: u16 = slot
+        .parse()
+        .map_err(|_| format!("'{s}': bad slot '{slot}'"))?;
+    let channel: u16 = channel
+        .parse()
+        .map_err(|_| format!("'{s}': bad channel '{channel}'"))?;
+    let error =
+        ChannelError::from_name(error).ok_or_else(|| format!("'{s}': unknown error '{error}'"))?;
+    Ok(DiagSpec {
+        slot: Slot(slot),
+        channel,
+        error,
+    })
+}
+
+/// Every name `ChannelError::from_name` accepts, for the `--diag` usage/error message.
+const DIAG_ERROR_NAMES: &[&str] = &[
+    "short-circuit",
+    "undervoltage",
+    "overvoltage",
+    "overload",
+    "overtemperature",
+    "line-break",
+    "upper-limit",
+    "lower-limit",
+    "error",
+];
 
 /// Same builder as `gen_gsdml`'s `sample_config` (inline copy — see the module doc: each
 /// bring-up example stays standalone).
@@ -143,6 +198,19 @@ fn main() {
         })
     });
 
+    // Fail fast on a bad --diag spec too, same reasoning as --csv above.
+    let diags: Vec<DiagSpec> = a
+        .diag
+        .iter()
+        .map(|s| {
+            parse_diag_spec(s).unwrap_or_else(|e| {
+                eprintln!("--diag {e}");
+                eprintln!("accepted error names: {}", DIAG_ERROR_NAMES.join(", "));
+                std::process::exit(2);
+            })
+        })
+        .collect();
+
     let cfg = sample_config(&a.station);
     let dev = IoDevice::start(
         cfg,
@@ -156,6 +224,7 @@ fn main() {
                 lock_memory: a.lock_memory,
             }),
             app_cpus: app_cpus.clone(),
+            im_store: a.im_store.clone(),
         },
     )
     .expect("start (need cap_net_raw/cap_net_admin/cap_sys_nice/cap_ipc_lock)");
@@ -180,6 +249,7 @@ fn main() {
     let mut last_err_log = started - Duration::from_secs(1);
     let stats_every = Duration::from_secs(a.stats_every);
     let mut csv = csv_file;
+    let mut diags_raised = false;
     while !stop.load(Ordering::Relaxed) {
         let st = dev.ar_state();
         if st != last_ar_state {
@@ -188,6 +258,24 @@ fn main() {
                 Some(r) => log::warn!("AR state: {st:?} (abort: {r:?})"),
             }
             last_ar_state = st;
+        }
+
+        // Raise every `--diag` once, the first time the AR (and its I/O layout) is
+        // actually up — not on `ar_state()` alone, which can transiently lag the
+        // layout (see `IoDevice::ready`'s doc).
+        if !diags_raised && dev.ready() {
+            for d in &diags {
+                match dev.raise_diagnosis(d.slot, d.channel, d.error, Severity::Fault) {
+                    Ok(()) => log::info!(
+                        "raised diagnosis: slot {:?} channel {} error {:?}",
+                        d.slot,
+                        d.channel,
+                        d.error
+                    ),
+                    Err(e) => log::warn!("--diag slot {:?}: {e}", d.slot),
+                }
+            }
+            diags_raised = true;
         }
 
         match run_app_cycle(&dev) {
@@ -238,6 +326,17 @@ fn main() {
         std::thread::sleep(Duration::from_millis(1));
     }
 
+    // Clear every diagnosis we raised before tearing the AR down (SIGINT/SIGTERM or
+    // --duration reached): a no-op for one never actually raised (AR never came up),
+    // so this is safe to run unconditionally.
+    for d in &diags {
+        if let Err(e) = dev.clear_diagnosis(d.slot, d.channel, d.error) {
+            log::warn!("--diag slot {:?}: clearing on shutdown: {e}", d.slot);
+        }
+    }
+    let alarm_stats = dev.alarm_stats();
+    let alarm_rx_no_channel = dev.alarm_rx_no_channel();
+
     let stats = dev.rt_stats();
     let r = dev.stop();
     if let Some(p) = a.csv.as_ref() {
@@ -257,6 +356,8 @@ fn main() {
         &thresholds,
         memory_locked,
         started.elapsed().as_secs(),
+        &alarm_stats,
+        alarm_rx_no_channel,
     );
     if let Err(e) = r {
         log::error!("device loop ended: {e}");
@@ -299,7 +400,14 @@ struct Thresholds {
 }
 
 /// Print the summary and return true on PASS.
-fn verdict(stats: &pnio::rt::RtStats, t: &Thresholds, memory_locked: bool, secs: u64) -> bool {
+fn verdict(
+    stats: &pnio::rt::RtStats,
+    t: &Thresholds,
+    memory_locked: bool,
+    secs: u64,
+    alarm: &pnio::alarm::AlarmStats,
+    alarm_rx_no_channel: u64,
+) -> bool {
     use pnio::rt::Histogram;
     let s = stats.snapshot();
     let line = |name: &str, h: &Histogram| {
@@ -327,6 +435,19 @@ fn verdict(stats: &pnio::rt::RtStats, t: &Thresholds, memory_locked: bool, secs:
         s.input_snapshot_reused,
         s.output_publish_deferred,
         if memory_locked { "yes" } else { "no" }
+    );
+    // Per-AR alarm channel counters (reset on every reconnect, per `AlarmStats`'
+    // doc) plus the one cumulative counter, `rx_no_channel`.
+    eprintln!(
+        "alarm: sent={} acked={} retries={} unexpected_rx={} send_failures={} \
+         rx_err_rta={} rx_no_channel={}",
+        alarm.sent,
+        alarm.acked,
+        alarm.retries,
+        alarm.unexpected_rx,
+        alarm.send_failures,
+        alarm.rx_err_rta,
+        alarm_rx_no_channel,
     );
     let mut fails = Vec::new();
     if s.missed_ticks != 0 {

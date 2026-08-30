@@ -2,15 +2,18 @@
 //! a [`DeviceConfig`] in one call, read the controller's outputs and write our inputs
 //! by (slot, index) with the config's field table. The RT path is untouched.
 
+use crate::alarm::AlarmStats;
 use crate::cm::{AbortReason, ArParams, ArState};
 use crate::config::{DeviceConfig, Direction, FieldRef, Slot};
 use crate::data::{CodecError, FieldType, Value};
-use crate::device::{Device, DeviceError, RtOptions};
+use crate::device::{Device, DeviceError, DiagCommand, DiagShared, RtOptions};
+use crate::diag::{ChannelError, Diagnosis, Severity};
 use crate::eth::{bpf::acyclic_filter, AfPacketTransport, EthTransport, MacAddr};
 use crate::rpc::{RpcTransport, UdpRpcTransport, PNIO_UDP_PORT};
 use crate::rt::{
     Freshness, ImageError, IoImage, RtConfig, RtError, RtHandle, RtStats, StatsSnapshot, Validity,
 };
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -25,14 +28,17 @@ pub struct StartOptions {
     pub rt: Option<RtOptions>,
     /// CPUs for the acyclic thread (and anything the application spawns from it).
     pub app_cpus: Option<Vec<usize>>,
+    /// Backing file for the writable I&M1-3 records; `None` keeps them in memory
+    /// only (blank at startup, lost on restart) — see [`crate::device::DeviceSetup::im_store`].
+    pub im_store: Option<PathBuf>,
 }
 
 /// Errors from the [`IoDevice`] facade: config-table lookups (slot/index/type/direction),
 /// the image not being laid out yet, and the lower layers' own errors wrapped through.
 #[derive(Debug, Error)]
 pub enum ApiError {
-    #[error("slot {0} is not declared")]
-    UnknownSlot(u16),
+    #[error("slot {0:?} is not declared")]
+    UnknownSlot(Slot),
     #[error("slot {slot} index {index} out of range (len {len})")]
     IndexOutOfRange { slot: u16, index: usize, len: usize },
     #[error("slot {slot} index {index} is {declared:?}, not {requested:?}")]
@@ -147,6 +153,11 @@ pub struct IoDevice {
     inputs: Vec<Mutex<Vec<u8>>>,
     thread: Mutex<Option<JoinHandle<Result<(), DeviceError>>>>,
     params: Arc<Mutex<Option<ArParams>>>,
+    /// The device's diagnosis interface (command queue, active set, alarm counters) —
+    /// see [`Device::diag_shared`]. Taken before the acyclic thread takes ownership of
+    /// `Device`, so it stays readable/writable from the application thread for the
+    /// `IoDevice`'s whole lifetime.
+    diag: Arc<DiagShared>,
 }
 
 impl IoDevice {
@@ -168,6 +179,7 @@ impl IoDevice {
             rpc,
             crate::rt::RtRunner::spawn,
             app_cpus,
+            opts.im_store,
         )
     }
 
@@ -186,7 +198,7 @@ impl IoDevice {
         E: EthTransport + 'static,
         R: RpcTransport + 'static,
     {
-        Self::start_inner(cfg, mac, ip, rt, eth, rpc, runner, None)
+        Self::start_inner(cfg, mac, ip, rt, eth, rpc, runner, None, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -199,13 +211,16 @@ impl IoDevice {
         rpc: R,
         runner: impl Fn(RtConfig) -> Result<RtHandle, RtError> + Send + 'static,
         app_cpus: Option<Vec<usize>>,
+        im_store: Option<PathBuf>,
     ) -> Result<IoDevice, ApiError>
     where
         E: EthTransport + 'static,
         R: RpcTransport + 'static,
     {
         let cfg = Arc::new(cfg);
-        let mut dev = Device::new(cfg.setup(mac, ip, rt), eth, rpc);
+        let mut setup = cfg.setup(mac, ip, rt);
+        setup.im_store = im_store;
+        let mut dev = Device::new(setup, eth, rpc);
         dev.with_runner_factory(runner);
         let shared = Arc::new(Shared {
             state: Mutex::new((ArState::Idle, None)),
@@ -219,6 +234,7 @@ impl IoDevice {
         }
         let image = dev.image();
         let stats = dev.rt_stats();
+        let diag = dev.diag_shared();
         let stop = Arc::new(AtomicBool::new(false));
         let inputs = cfg
             .submodules()
@@ -251,6 +267,7 @@ impl IoDevice {
             inputs,
             thread: Mutex::new(Some(thread)),
             params,
+            diag,
         })
     }
 
@@ -330,7 +347,7 @@ impl IoDevice {
             .submodules()
             .iter()
             .position(|s| s.slot == slot)
-            .ok_or(ApiError::UnknownSlot(slot.0))
+            .ok_or(ApiError::UnknownSlot(slot))
     }
 
     /// Resolve one field, checking existence, direction and (if `want` is given) type
@@ -348,7 +365,7 @@ impl IoDevice {
         let sm = self
             .cfg
             .submodule(slot)
-            .ok_or(ApiError::UnknownSlot(slot.0))?;
+            .ok_or(ApiError::UnknownSlot(slot))?;
         let fields = self.cfg.fields(slot, dir).ok_or(ApiError::WrongDirection {
             slot: slot.0,
             expected: sm.direction(),
@@ -421,7 +438,7 @@ impl IoDevice {
         let sm = self
             .cfg
             .submodule(slot)
-            .ok_or(ApiError::UnknownSlot(slot.0))?;
+            .ok_or(ApiError::UnknownSlot(slot))?;
         let fields: Arc<[FieldRef]> = self
             .cfg
             .fields(slot, Direction::Output)
@@ -503,6 +520,98 @@ impl IoDevice {
         Ok(out)
     }
 
+    // ----- diagnosis -----
+    /// Queues a channel diagnosis to be raised by the acyclic loop (spec §5.2/§8):
+    /// turned into a Low-priority alarm (or held back until the next AR, if none is
+    /// up right now) the next time `Device::step` drains the command queue. Rejected
+    /// up front, before the queue, if `slot` isn't in the config's submodule table —
+    /// the acyclic loop only logs-and-drops an unknown slot (see `DiagStore`), which
+    /// would otherwise silently swallow a caller typo.
+    ///
+    /// The pushed [`Diagnosis`]'s `direction` is not meaningful here: `DiagStore`
+    /// overwrites it from the submodule's own declared direction when the command is
+    /// applied, so any value works — this passes [`Direction::Input`].
+    pub fn raise_diagnosis(
+        &self,
+        slot: Slot,
+        channel: u16,
+        error: ChannelError,
+        severity: Severity,
+    ) -> Result<(), ApiError> {
+        self.cfg
+            .submodule(slot)
+            .ok_or(ApiError::UnknownSlot(slot))?;
+        self.diag
+            .queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(DiagCommand::Raise(Diagnosis {
+                slot,
+                channel,
+                error,
+                severity,
+                direction: Direction::Input,
+            }));
+        Ok(())
+    }
+
+    /// Queues the matching channel diagnosis to be cleared. See [`IoDevice::raise_diagnosis`]
+    /// for the slot-validation and queueing semantics.
+    pub fn clear_diagnosis(
+        &self,
+        slot: Slot,
+        channel: u16,
+        error: ChannelError,
+    ) -> Result<(), ApiError> {
+        self.cfg
+            .submodule(slot)
+            .ok_or(ApiError::UnknownSlot(slot))?;
+        self.diag
+            .queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(DiagCommand::Clear {
+                slot,
+                channel,
+                error,
+            });
+        Ok(())
+    }
+
+    /// The currently active set of channel diagnoses, as last published by the
+    /// acyclic loop.
+    pub fn diagnoses(&self) -> Vec<Diagnosis> {
+        self.diag
+            .active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The live alarm channel's counters, mirrored from [`crate::alarm::AlarmChannel::stats`]
+    /// after every batch of actions.
+    ///
+    /// These counters are per AR: the device mirrors the *current* channel's
+    /// counters, so every field here restarts at 0 on each reconnect (a fresh AR
+    /// opens a fresh channel). [`IoDevice::alarm_rx_no_channel`] is the one exception
+    /// — it is cumulative across the whole `IoDevice`'s lifetime.
+    pub fn alarm_stats(&self) -> AlarmStats {
+        AlarmStats {
+            sent: self.diag.sent.load(Ordering::Relaxed),
+            acked: self.diag.acked.load(Ordering::Relaxed),
+            retries: self.diag.retries.load(Ordering::Relaxed),
+            unexpected_rx: self.diag.unexpected_rx.load(Ordering::Relaxed),
+            send_failures: self.diag.send_failures.load(Ordering::Relaxed),
+            rx_err_rta: self.diag.rx_err_rta.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Cumulative count of alarm frames that arrived with no alarm channel open at
+    /// all (unlike [`IoDevice::alarm_stats`], not reset on reconnect).
+    pub fn alarm_rx_no_channel(&self) -> u64 {
+        self.diag.rx_no_channel.load(Ordering::Relaxed)
+    }
+
     pub fn stop(self) -> Result<(), DeviceError> {
         self.stop.store(true, Ordering::Relaxed);
         let h = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -538,18 +647,25 @@ fn run_publishing_params<E: EthTransport, R: RpcTransport>(
     stop: &AtomicBool,
     params: &Mutex<Option<ArParams>>,
 ) -> Result<(), DeviceError> {
-    // Same loop as Device::run (200 ms poll), stepping so we can observe ar_params():
+    // Same loop as Device::run (200 ms poll, shortened while an alarm is in flight
+    // or a diagnosis command is queued — see `Device::poll_interval`), stepping so
+    // we can observe ar_params():
     use std::time::{Duration, Instant};
     let mut last = None;
     while !stop.load(Ordering::Relaxed) {
-        dev.step(Instant::now(), Some(Duration::from_millis(200)))?;
+        let wait = dev.poll_interval(Duration::from_millis(200));
+        dev.step(Instant::now(), Some(wait))?;
         let p = dev.ar_params();
         if p != last {
             *params.lock().unwrap_or_else(|e| e.into_inner()) = p.clone();
             last = p;
         }
     }
-    Ok(())
+    // Tell the controller we're going away (ERR-RTA "AR removed") instead of
+    // leaving it to time out its own watchdog — this is the only place that runs:
+    // `IoDevice::stop`/`Drop` set `stop` and join this thread, but never call
+    // `Device::shutdown` themselves (see `device::Device::shutdown`'s doc).
+    dev.shutdown(Instant::now())
 }
 
 /// A consistent copy of one output slot's bytes, decoded on demand.
@@ -718,19 +834,26 @@ mod tests {
     #[derive(Clone)]
     struct SharedMock {
         frames: std::sync::Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
+        /// Frames given to `send`, shared across both handles of a pair (only the
+        /// acyclic side ever actually sends through this trait; the RT thread's
+        /// cyclic path doesn't) — mirrors `MockTransport::sent`.
+        tx: std::sync::Arc<Mutex<Vec<Vec<u8>>>>,
         range: (u16, u16),
     }
     impl SharedMock {
         /// One shared queue, two role-filtered handles: `(acyclic, rt)`.
         fn new_pair() -> (SharedMock, SharedMock) {
             let frames = std::sync::Arc::new(Mutex::new(std::collections::VecDeque::new()));
+            let tx = std::sync::Arc::new(Mutex::new(Vec::new()));
             (
                 SharedMock {
                     frames: frames.clone(),
+                    tx: tx.clone(),
                     range: (0xFC00, 0xFFFF),
                 },
                 SharedMock {
                     frames,
+                    tx,
                     range: (0x8000, 0xBFFF),
                 },
             )
@@ -740,6 +863,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push_back(frame);
+        }
+        /// All frames sent via `send`, in order.
+        fn sent(&self) -> Vec<Vec<u8>> {
+            self.tx.lock().unwrap_or_else(|e| e.into_inner()).clone()
         }
     }
     /// The FrameID of a VLAN-tagged or untagged PROFINET frame, or `None` if it isn't
@@ -754,7 +881,11 @@ mod tests {
         }
     }
     impl crate::eth::EthTransport for SharedMock {
-        fn send(&self, _f: &[u8]) -> Result<(), crate::eth::TransportError> {
+        fn send(&self, f: &[u8]) -> Result<(), crate::eth::TransportError> {
+            self.tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(f.to_vec());
             Ok(())
         }
         fn recv_into(
@@ -871,7 +1002,7 @@ mod tests {
         wait_until_ready(&dev);
         assert_eq!(
             dev.read_real(Slot(9), 0).unwrap_err(),
-            ApiError::UnknownSlot(9)
+            ApiError::UnknownSlot(Slot(9))
         );
         assert_eq!(
             dev.read_real(Slot(3), 16).unwrap_err(),
@@ -1080,5 +1211,53 @@ mod tests {
         let (dev, _eth) = started();
         wait_until_ready(&dev);
         drop(dev);
+    }
+
+    #[test]
+    fn raise_diagnosis_reaches_the_wire_and_is_listed() {
+        let (dev, eth) = started();
+        wait_until_ready(&dev);
+
+        dev.raise_diagnosis(Slot(1), 0, ChannelError::LineBreak, Severity::Fault)
+            .unwrap();
+
+        let t0 = std::time::Instant::now();
+        loop {
+            if eth.sent().iter().any(|f| crate::alarm::is_alarm_frame(f)) {
+                break;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_millis(500),
+                "diagnosis alarm never reached the wire"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(dev.diagnoses().len(), 1);
+
+        assert_eq!(
+            dev.raise_diagnosis(Slot(9), 0, ChannelError::LineBreak, Severity::Fault),
+            Err(ApiError::UnknownSlot(Slot(9)))
+        );
+
+        dev.stop().unwrap();
+    }
+
+    #[test]
+    fn stop_sends_err_rta() {
+        use crate::alarm::{parse_frame, RtaBody};
+        use crate::cm::PnioStatus;
+
+        let (dev, eth) = started();
+        wait_until_ready(&dev);
+
+        dev.stop().unwrap();
+
+        let sent = eth.sent();
+        let last = sent.last().expect("stop must send something on the wire");
+        let pdu = parse_frame(last).expect("ERR-RTA must parse as an RTA PDU");
+        assert_eq!(
+            pdu.body,
+            RtaBody::Err(PnioStatus::rta_abort(PnioStatus::RTA_ABORT_AR_REMOVED))
+        );
     }
 }
