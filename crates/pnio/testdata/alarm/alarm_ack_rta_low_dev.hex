@@ -1,0 +1,3 @@
+# frame 52816 of plan5-alarm.pcapng (2026-08-30): p-net -> CPU, Alarm Low ACK-RTA for the CPU's AlarmAck, 32 bytes
+ec 1c 5d 61 e7 3c 8c f3 19 cd 19 f8 81 00 a0 00
+88 92 fe 01 00 00 00 00 13 01 ff ff ff ff 00 00

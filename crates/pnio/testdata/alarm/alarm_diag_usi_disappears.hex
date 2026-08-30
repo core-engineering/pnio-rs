@@ -1,0 +1,5 @@
+# frame 55387 of plan5-alarm.pcapng (2026-08-30): p-net -> CPU, Alarm Low DATA: AlarmNotification DiagnosisDisappears (0x000C), USI 0x1234 (manufacturer), SendSeq 0x0004 AckSeq 0x0003, 60 bytes
+ec 1c 5d 61 e7 3c 8c f3 19 cd 19 f8 81 00 a0 00
+88 92 fe 01 00 00 00 00 11 11 00 04 00 03 00 1c
+00 02 00 18 01 00 00 0c 00 00 00 00 00 01 00 01
+00 00 00 30 00 00 01 30 a8 05 12 34

@@ -1,0 +1,5 @@
+# frame 57311 of plan5-alarm.pcapng (2026-08-30): CPU -> p-net, Alarm Low ERR-RTA reply, PNIOStatus CF 81 FD 0B (AR alarm.ind(err)), 64 bytes
+8c f3 19 cd 19 f8 ec 1c 5d 61 e7 3c 81 00 a0 00
+88 92 fe 01 00 00 00 00 14 01 00 05 00 05 00 04
+cf 81 fd 0b 00 2a 01 0e 80 04 00 0c 01 0b 00 00
+00 16 01 60 cf 81 fd 00 00 00 00 00 00 00 00 00

@@ -1,0 +1,5 @@
+# frame 50893 of plan5-alarm.pcapng (2026-08-30): p-net -> CPU, Alarm High 0xFC01 DATA: AlarmNotification Process, slot 1/1, USI 0x0010, 1 byte user data (SendSeq 0xFFFF AckSeq 0xFFFE), 61 bytes
+ec 1c 5d 61 e7 3c 8c f3 19 cd 19 f8 81 00 c0 00
+88 92 fc 01 00 00 00 00 11 11 ff ff ff fe 00 1d
+00 01 00 19 01 00 00 02 00 00 00 00 00 01 00 01
+00 00 00 30 00 00 01 30 00 00 00 10 01

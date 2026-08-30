@@ -1,0 +1,6 @@
+# frame 52813 of plan5-alarm.pcapng (2026-08-30): p-net -> CPU, Alarm Low 0xFE01 DATA: AlarmNotification Diagnosis, slot 1/1, USI 0x8002 ExtChannelDiagnosis, channel 4, properties 0x2801 (input, appears, fault), error type 0x0001, 72 bytes
+ec 1c 5d 61 e7 3c 8c f3 19 cd 19 f8 81 00 a0 00
+88 92 fe 01 00 00 00 00 11 11 ff ff ff fe 00 28
+00 02 00 24 01 00 00 01 00 00 00 00 00 01 00 01
+00 00 00 30 00 00 01 30 a8 00 80 02 00 04 28 01
+00 01 00 00 00 00 00 00

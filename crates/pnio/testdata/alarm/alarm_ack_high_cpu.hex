@@ -1,0 +1,5 @@
+# frame 50895 of plan5-alarm.pcapng (2026-08-30): CPU -> p-net, Alarm High DATA: AlarmAck Process, slot 1/1, PNIOStatus OK (SendSeq 0xFFFF AckSeq 0xFFFF), 64 bytes
+8c f3 19 cd 19 f8 ec 1c 5d 61 e7 3c 81 00 c0 00
+88 92 fc 01 00 00 00 00 11 11 ff ff ff ff 00 16
+80 01 00 12 01 00 00 02 00 00 00 00 00 01 00 01
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00

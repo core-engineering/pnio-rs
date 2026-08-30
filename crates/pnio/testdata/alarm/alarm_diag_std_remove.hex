@@ -1,0 +1,6 @@
+# frame 56029 of plan5-alarm.pcapng (2026-08-30): p-net -> CPU, Alarm Low DATA: Diagnosis with properties 0x2001 (input, specifier 0 = all disappear), error type 0x0001 - p-net's encoding of a standard-diagnosis removal, 72 bytes
+ec 1c 5d 61 e7 3c 8c f3 19 cd 19 f8 81 00 a0 00
+88 92 fe 01 00 00 00 00 11 11 00 05 00 04 00 28
+00 02 00 24 01 00 00 01 00 00 00 00 00 01 00 01
+00 00 00 30 00 00 01 30 00 06 80 02 00 04 20 01
+00 01 00 00 00 00 04 d2

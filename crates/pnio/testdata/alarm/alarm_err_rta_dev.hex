@@ -1,0 +1,4 @@
+# frame 57310 of plan5-alarm.pcapng (2026-08-30): p-net -> CPU, Alarm Low ERR-RTA, PNIOStatus CF 81 FD 00 (device-initiated abort), SendSeq 0x0006 AckSeq 0x0005, 36 bytes
+ec 1c 5d 61 e7 3c 8c f3 19 cd 19 f8 81 00 a0 00
+88 92 fe 01 00 00 00 00 14 01 00 06 00 05 00 04
+cf 81 fd 00
