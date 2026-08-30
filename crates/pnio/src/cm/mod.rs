@@ -823,17 +823,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn read_response_matches_the_pnet_im0_golden_byte_exact() {
+    /// Brings an AR up to `Data` and re-tags it with the alarm capture's `ar_uuid`.
+    ///
+    /// The AR established from the cm-golden capture carries `ar_uuid` e5e1aecc-...;
+    /// the alarm capture's Read requests carry ef796d60-... (a different p-net
+    /// session). Re-tagging the request PDUs aligns the two so the Read is answered
+    /// rather than refused as foreign. Only the PNIO blocks' own `ar_uuid` fields
+    /// (ARBlockReq, each Write record, PrmEnd's ControlBlock) carry this value — the
+    /// RPC header's object/interface/activity UUIDs are unrelated and untouched, and
+    /// `appready_res` carries no `ar_uuid` at all.
+    fn cm_in_data_with_the_alarm_capture_ar(now: Instant) -> Cm {
         let mut cm = cm();
-        let now = Instant::now();
-        // Align the AR just established (cm-golden capture, ar_uuid
-        // e5e1aecc-...) with the one carried by the alarm capture's Read request
-        // (ar_uuid ef796d60-..., a different p-net session) so the request is
-        // answered rather than refused as foreign. Only the PNIO blocks' own
-        // `ar_uuid` fields (ARBlockReq, each Write record, PrmEnd's ControlBlock)
-        // carry this value — the RPC header's object/interface/activity UUIDs are
-        // unrelated and untouched, and `appready_res` carries no `ar_uuid` at all.
         let old = Uuid::parse_str("e5e1aecc-b133-4b4d-b187-cc68b0211ed2").unwrap();
         let new = Uuid::parse_str("ef796d60-ef2b-9946-b39e-8531f5b7f966").unwrap();
         let retag = |name: &str| retag_ar_uuid(pdu(name), old, new);
@@ -850,14 +850,34 @@ mod tests {
             .unwrap();
         assert_eq!(o.notify, vec![(ArState::Data, None)]);
         assert_eq!(cm.state(), ArState::Data);
-
         cm.set_im(pnet_im0(), crate::im::ImStore::new());
+        cm
+    }
 
+    #[test]
+    fn read_response_matches_the_pnet_im0_golden_byte_exact() {
+        let now = Instant::now();
+        let mut cm = cm_in_data_with_the_alarm_capture_ar(now);
         let o = cm
             .handle_datagram(&golden_alarm("im0_read_req")[RPC_OFF..], cpu(), now)
             .unwrap();
         assert_eq!(o.send.len(), 1);
         assert_eq!(o.send[0].bytes, golden_alarm("im0_read_res")[RPC_OFF..]);
+        assert_eq!(o.send[0].to, cpu());
+    }
+
+    /// The capture reads I&M0 on the interface submodule (slot 0, subslot 0x8000)
+    /// too, and p-net answers it with the very same record — `IM_Supported = 0x000E`
+    /// included, not a zeroed mask.
+    #[test]
+    fn read_response_on_the_interface_submodule_matches_the_golden_byte_exact() {
+        let now = Instant::now();
+        let mut cm = cm_in_data_with_the_alarm_capture_ar(now);
+        let o = cm
+            .handle_datagram(&golden_alarm("im0_read_req_if")[RPC_OFF..], cpu(), now)
+            .unwrap();
+        assert_eq!(o.send.len(), 1);
+        assert_eq!(o.send[0].bytes, golden_alarm("im0_read_res_if")[RPC_OFF..]);
         assert_eq!(o.send[0].to, cpu());
     }
 

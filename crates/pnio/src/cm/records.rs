@@ -2,15 +2,15 @@
 //! `ReadImplicit` (opnum 5), plus the I&M1-3 side of a parameter Write.
 //!
 //! Which submodule answers which index (from the p-net alarm/I&M capture, see
-//! `docs/alarm-golden-frames.md`): I&M0 (`0xAFF0`) is readable on every submodule the
-//! model knows, `IM_Supported` set only on the DAP; I&M1-3 (`0xAFF1..=0xAFF3`) are
-//! readable/writable on the DAP (slot 0, subslot 1) only.
+//! `docs/alarm-golden-frames.md`): every submodule the model knows answers I&M0
+//! (`0xAFF0`) with the same `IM_Supported = 0x000E` — the capture shows the interface
+//! submodule (slot 0, subslot 0x8000) answering exactly what the DAP (slot 0,
+//! subslot 1) answers — and every known submodule also reads and writes I&M1-3
+//! (`0xAFF1..=0xAFF3`) from the one device-wide [`ImStore`].
 
 use super::model::DeviceModel;
 use super::{ty, BlockError, BlockHeader, CmError, Cursor, PnioStatus, Record};
-use crate::im::{
-    encode_im0, Im0, ImStore, IM_SUPPORTED_DAP, IM_SUPPORTED_NONE, INDEX_IM0, INDEX_IM1, INDEX_IM3,
-};
+use crate::im::{encode_im0, Im0, ImStore, IM_SUPPORTED_DAP, INDEX_IM0, INDEX_IM1, INDEX_IM3};
 use crate::rpc::{Drep, Uuid};
 
 /// One `IODReadReqHeader`/`IODReadImplicitReqHeader` request (58-byte body after the
@@ -96,37 +96,30 @@ pub struct RecordCtx<'a> {
 /// `(slot, subslot)`, `None` for "invalid index" — including a `(slot, subslot)`
 /// absent from the model entirely.
 ///
-/// - `0xAFF0` (I&M0): any submodule the model knows (`DeviceModel::find`), encoded
-///   with `IM_SUPPORTED_DAP` on the DAP (slot 0, subslot 1) and `IM_SUPPORTED_NONE`
-///   everywhere else.
-/// - `0xAFF1..=0xAFF3` (I&M1-3): the DAP (slot 0, subslot 1) only, served from the
-///   [`ImStore`].
+/// - `0xAFF0` (I&M0): any submodule the model knows (`DeviceModel::find`), always
+///   encoded with `IM_SUPPORTED_DAP` (`0x000E`) — the capture answers the same mask on
+///   the interface submodule as on the DAP.
+/// - `0xAFF1..=0xAFF3` (I&M1-3): any submodule the model knows, served from the one
+///   device-wide [`ImStore`].
 pub fn read_record(req: &ReadReq, ctx: &RecordCtx) -> Option<Vec<u8>> {
-    let is_dap = (req.slot, req.subslot) == (0, 1);
+    ctx.model.find(req.slot, req.subslot)?;
     match req.index {
-        INDEX_IM0 => {
-            ctx.model.find(req.slot, req.subslot)?;
-            let supported = if is_dap {
-                IM_SUPPORTED_DAP
-            } else {
-                IM_SUPPORTED_NONE
-            };
-            Some(encode_im0(ctx.model.vendor_id, ctx.im0, supported))
-        }
-        INDEX_IM1..=INDEX_IM3 if is_dap => ctx.im.read(req.index),
+        INDEX_IM0 => Some(encode_im0(ctx.model.vendor_id, ctx.im0, IM_SUPPORTED_DAP)),
+        INDEX_IM1..=INDEX_IM3 => ctx.im.read(req.index),
         _ => None,
     }
 }
 
 /// Called for every Write record with index `0xAFF1..=0xAFF3` once the AR has
-/// accepted the Write. Only the DAP (slot 0, subslot 1) is writable: a record on any
-/// other `(slot, subslot)`, or one [`ImStore::write`] rejects for its own reasons
-/// (bad block header/type/length), answers [`PnioStatus::write_invalid_parameter`].
-/// Not placed on the wire — the Write response keeps the AR's own OK status
-/// regardless (per-record statuses are out of scope) — the caller logs a non-OK
-/// result instead.
+/// accepted the Write. Every submodule the model knows is writable and they all share
+/// the one device-wide [`ImStore`] (matching the read side): a record on a
+/// `(slot, subslot)` absent from the model, or one [`ImStore::write`] rejects for its
+/// own reasons (bad block header/type/length), answers
+/// [`PnioStatus::write_invalid_parameter`]. Not placed on the wire — the Write
+/// response keeps the AR's own OK status regardless (per-record statuses are out of
+/// scope) — the caller logs a non-OK result instead.
 pub fn write_im_record(r: &Record, model: &DeviceModel, im: &mut ImStore) -> PnioStatus {
-    if (r.slot, r.subslot) != (0, 1) || model.find(r.slot, r.subslot).is_none() {
+    if model.find(r.slot, r.subslot).is_none() {
         return PnioStatus::write_invalid_parameter();
     }
     match im.write(r.index, &r.data) {
@@ -191,7 +184,41 @@ mod tests {
     }
 
     #[test]
-    fn im1_only_on_the_dap_and_unknown_index_is_none() {
+    fn im1_on_every_known_submodule_and_unknown_index_is_none() {
+        let model = crate::cm::DeviceModel::pnet_sample(crate::eth::MacAddr([0; 6]));
+        let (im0, mut store) = (Im0::default(), ImStore::new());
+        store.write(INDEX_IM1, &im1_record()).unwrap();
+        let ctx = RecordCtx {
+            model: &model,
+            im0: &im0,
+            im: &store,
+        };
+        let mut req = ReadReq::parse(&golden_alarm("im0_read_req")[BLOCKS..]).unwrap();
+        req.index = INDEX_IM1;
+        // The DAP, the interface submodule and a real I/O submodule all serve the one
+        // device-wide store.
+        for (slot, subslot) in [(0u16, 1u16), (0, 0x8000), (1, 1)] {
+            req.slot = slot;
+            req.subslot = subslot;
+            assert_eq!(
+                read_record(&req, &ctx).as_deref(),
+                Some(&im1_record()[..]),
+                "I&M1 on {slot}/{subslot:#x}"
+            );
+        }
+        // A (slot, subslot) the model does not know answers nothing at all.
+        req.slot = 99;
+        req.subslot = 1;
+        assert!(read_record(&req, &ctx).is_none());
+        // Neither does an index we do not serve.
+        req.slot = 0;
+        req.subslot = 1;
+        req.index = 0xF840;
+        assert!(read_record(&req, &ctx).is_none());
+    }
+
+    #[test]
+    fn im0_carries_im_supported_on_every_known_submodule() {
         let model = crate::cm::DeviceModel::pnet_sample(crate::eth::MacAddr([0; 6]));
         let (im0, store) = (Im0::default(), ImStore::new());
         let ctx = RecordCtx {
@@ -199,23 +226,23 @@ mod tests {
             im0: &im0,
             im: &store,
         };
+        let want = crate::im::encode_im0(model.vendor_id, &im0, IM_SUPPORTED_DAP);
         let mut req = ReadReq::parse(&golden_alarm("im0_read_req")[BLOCKS..]).unwrap();
-        req.index = 0xAFF1;
-        assert!(read_record(&req, &ctx).is_some());
-        req.slot = 1;
-        assert!(read_record(&req, &ctx).is_none());
-        req.slot = 0;
-        req.index = 0xF840;
-        assert!(read_record(&req, &ctx).is_none());
+        for (slot, subslot) in [(0u16, 1u16), (0, 0x8000), (0, 0x8001), (1, 1)] {
+            req.slot = slot;
+            req.subslot = subslot;
+            assert_eq!(
+                read_record(&req, &ctx),
+                Some(want.clone()),
+                "I&M0 on {slot}/{subslot:#x}"
+            );
+        }
     }
 
     #[test]
-    fn write_im_record_accepts_the_dap_and_rejects_everything_else() {
+    fn write_im_record_accepts_every_known_submodule_and_rejects_the_rest() {
         let model = crate::cm::DeviceModel::pnet_sample(crate::eth::MacAddr([0; 6]));
         let mut store = ImStore::new();
-        let mut rec = Vec::new();
-        crate::cm::block::BlockHeader::write(&mut rec, 0x0021, 54);
-        rec.extend_from_slice(&[b' '; 54]);
         let r = Record {
             seq: 0,
             ar_uuid: Uuid::NIL,
@@ -223,18 +250,30 @@ mod tests {
             slot: 0,
             subslot: 1,
             index: INDEX_IM1,
-            data: rec.clone(),
+            data: im1_record(),
         };
-        assert_eq!(write_im_record(&r, &model, &mut store), PnioStatus::OK);
-        assert!(store.read(INDEX_IM1).is_some());
+        // The DAP, the interface submodule and a real I/O submodule all write the one
+        // device-wide store.
+        for (slot, subslot) in [(0u16, 1u16), (0, 0x8000), (1, 1)] {
+            let rec = Record {
+                slot,
+                subslot,
+                ..r.clone()
+            };
+            assert_eq!(
+                write_im_record(&rec, &model, &mut store),
+                PnioStatus::OK,
+                "I&M1 write on {slot}/{subslot:#x}"
+            );
+            assert!(store.read(INDEX_IM1).is_some());
+        }
 
-        let wrong_slot = Record {
-            slot: 1,
-            subslot: 1,
+        let unknown_slot = Record {
+            slot: 99,
             ..r.clone()
         };
         assert_eq!(
-            write_im_record(&wrong_slot, &model, &mut store),
+            write_im_record(&unknown_slot, &model, &mut store),
             PnioStatus::write_invalid_parameter()
         );
 
@@ -246,5 +285,13 @@ mod tests {
             write_im_record(&bad_shape, &model, &mut store),
             PnioStatus::write_invalid_parameter()
         );
+    }
+
+    /// A minimal well-formed I&M1 record (block header + 54 space-padded bytes).
+    fn im1_record() -> Vec<u8> {
+        let mut rec = Vec::new();
+        crate::cm::block::BlockHeader::write(&mut rec, 0x0021, 54);
+        rec.extend_from_slice(&[b' '; 54]);
+        rec
     }
 }

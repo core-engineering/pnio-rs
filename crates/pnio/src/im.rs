@@ -25,9 +25,11 @@ pub const INDEX_IM1: u16 = 0xAFF1;
 pub const INDEX_IM2: u16 = 0xAFF2;
 pub const INDEX_IM3: u16 = 0xAFF3;
 
-/// `IM_Supported` bitmask values.
+/// `IM_Supported` bitmask: I&M1, I&M2 and I&M3 are supported (bits 1-3). The p-net
+/// capture answers this same value on every submodule it knows — the DAP (slot 0
+/// subslot 1) and the interface submodule (slot 0 subslot 0x8000) alike — so there is
+/// no "nothing supported" variant to encode (see `docs/alarm-golden-frames.md`).
 pub const IM_SUPPORTED_DAP: u16 = 0x000E;
-pub const IM_SUPPORTED_NONE: u16 = 0x0000;
 
 /// Fixed body lengths (bytes after the 6-byte block header) of the I&M1-3 records.
 pub const IM1_LEN: usize = 54;

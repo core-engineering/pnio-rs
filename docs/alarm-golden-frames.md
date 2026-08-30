@@ -90,7 +90,7 @@ From the Connect request (`plan5-alarm.pcapng` frame 47341): `AlarmCRType 1`, `L
 
 ### Which submodule answers I&M reads
 
-- **I&M0 (`0xAFF0`)** readable on **every** submodule (DAP slot 0/subslot 1, interface slot 0/subslot both 0x8000 and 0x8001, every module slot/subslot 1), answered with the same content (captured: `im0_read_req_if.hex`/`im0_read_res_if.hex` on interface subslot 0x8000; TIA also reads `0xAFF0` on DAP, on the other interface subslot 0x8001, and on each module).
-- **I&M1–I&M3 (`0xAFF1`–`0xAFF3`)** writable/readable **only on the DAP** slot 0/subslot 1; any other submodule → PNIORW "invalid index". TIA's capture shows no writes to I&M1–3 because p-net's GSDML lacks `Writeable_IM_Records` (a Plan 5 addition).
-- **TIA never wrote I&M1–I&M3** in the capture (p-net GSDML read-only); the codec and state machine must still support Write to these indices on the DAP for when GSDML is updated.
+- **I&M0 (`0xAFF0`)** readable on **every** submodule (DAP slot 0/subslot 1, interface slot 0/subslot both 0x8000 and 0x8001, every module slot/subslot 1), answered with the same content — the same `IM_Supported = 0x000E` included. `im0_read_res_if.hex` (interface subslot 0x8000) and `im0_read_res.hex` (DAP) carry byte-identical I&M0 records: p-net does **not** zero the mask off the DAP. TIA also reads `0xAFF0` on the other interface subslot 0x8001 and on each module.
+- **I&M1–I&M3 (`0xAFF1`–`0xAFF3`)** are device-wide: one store, readable and writable through **any** submodule the device model knows (the mask says `0x000E` everywhere, so restricting them to the DAP would contradict our own I&M0 answer). A `(slot, subslot)` absent from the model → PNIORW "invalid index". TIA's capture shows no writes to I&M1–3 because p-net's GSDML lacks `Writeable_IM_Records` (a Plan 5 addition).
+- **TIA never wrote I&M1–I&M3** in the capture (p-net GSDML read-only); the codec and state machine must still support Write to these indices for when GSDML is updated.
 
