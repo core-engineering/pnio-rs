@@ -60,7 +60,6 @@ pub mod diag;
 pub mod eth;
 pub mod gsdml;
 pub mod im;
-#[allow(missing_docs)]
 pub mod rpc;
 pub mod rt;
 #[cfg(test)]

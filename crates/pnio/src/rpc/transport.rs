@@ -37,6 +37,7 @@ pub struct MockRpcTransport {
 }
 
 impl MockRpcTransport {
+    /// An empty mock transport: nothing sent yet, nothing queued to receive.
     pub fn new() -> Self {
         Self::default()
     }

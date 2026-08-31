@@ -7,27 +7,45 @@ use super::{PNIO_CONTROLLER_INTERFACE, PNIO_DEVICE_INTERFACE};
 /// DCE-RPC version this codec speaks; anything else is rejected as [`RpcError::BadVersion`].
 const VERSION: u8 = 4;
 
+/// `flags1` bit: this is the last (or only) fragment.
 pub const FLAG1_LAST_FRAG: u8 = 0x02;
+/// `flags1` bit: this PDU is a fragment of a larger PDU (not supported by this crate).
 pub const FLAG1_FRAG: u8 = 0x04;
+/// `flags1` bit: no `fack` (fragment acknowledgement) requested.
 pub const FLAG1_NO_FACK: u8 = 0x08;
+/// `flags1` bit: the call is idempotent (safe to execute more than once).
 pub const FLAG1_IDEMPOTENT: u8 = 0x20;
 
+/// DCE-RPC `ptype` field: the PDU's role in the connectionless protocol. This crate
+/// only produces/consumes [`PacketType::Request`] and [`PacketType::Response`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketType {
+    /// A call request.
     Request = 0,
+    /// Liveness probe.
     Ping = 1,
+    /// A call response.
     Response = 2,
+    /// The call failed at the RPC runtime level.
     Fault = 3,
+    /// The server is still working on the call (keep-alive).
     Working = 4,
+    /// No call with this activity/sequence is known.
     Nocall = 5,
+    /// The call was rejected.
     Reject = 6,
+    /// Acknowledgement.
     Ack = 7,
+    /// Cancel a connectionless call.
     ClCancel = 8,
+    /// Fragment acknowledgement.
     Fack = 9,
+    /// Acknowledgement of a cancel.
     CancelAck = 10,
 }
 
 impl PacketType {
+    /// Decodes the `ptype` byte; unrecognized values are [`RpcError::UnsupportedPtype`].
     pub fn from_u8(b: u8) -> Result<PacketType, RpcError> {
         match b {
             0 => Ok(PacketType::Request),
@@ -45,22 +63,31 @@ impl PacketType {
         }
     }
 
+    /// Encodes back to the wire `ptype` byte.
     pub fn to_u8(self) -> u8 {
         self as u8
     }
 }
 
+/// PNIO device interface opnum: which operation a Request PDU calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opnum {
+    /// Establish an AR (Connect request).
     Connect = 0,
+    /// Tear an AR down (Release request).
     Release = 1,
+    /// Read a record (explicit Read request).
     Read = 2,
+    /// Write one or more parameter records.
     Write = 3,
+    /// PrmEnd / ApplicationReady / Release control exchange.
     Control = 4,
+    /// Read a record implicitly (e.g. the CPU's periodic connection-monitoring probe).
     ReadImplicit = 5,
 }
 
 impl Opnum {
+    /// Decodes the `opnum` field; `None` for a value this crate does not implement.
     pub fn from_u16(v: u16) -> Option<Opnum> {
         match v {
             0 => Some(Opnum::Connect),
@@ -73,6 +100,7 @@ impl Opnum {
         }
     }
 
+    /// Encodes back to the wire `opnum` field.
     pub fn to_u16(self) -> u16 {
         self as u16
     }
@@ -81,29 +109,52 @@ impl Opnum {
 /// The 80-byte DCE-RPC v4 connectionless header, PROFINET IO's PDU envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcHeader {
+    /// This PDU's role (Request/Response/...); see [`PacketType`].
     pub ptype: PacketType,
+    /// Flags byte 1: fragmentation and idempotency bits (see the `FLAG1_*` constants).
     pub flags1: u8,
+    /// Flags byte 2, reserved by this crate (parsed and echoed back verbatim, not decoded).
     pub flags2: u8,
+    /// Data representation (byte order) the rest of this PDU is encoded in.
     pub drep: Drep,
+    /// High byte of the call's serial number.
     pub serial_hi: u8,
+    /// Object UUID the call targets (the PNIO device's object UUID on a Connect request).
     pub object: Uuid,
+    /// Interface UUID identifying which service is called (device or controller interface).
     pub interface: Uuid,
+    /// Activity UUID grouping the calls of one client session.
     pub activity: Uuid,
+    /// Server boot time, used for reboot detection (parsed, not enforced by this crate).
     pub server_boot: u32,
+    /// Interface version (parsed, not enforced by this crate).
     pub if_version: u32,
+    /// Per-activity monotonically increasing sequence number, used for duplicate detection.
     pub seq_num: u32,
+    /// Which operation this call invokes; see [`Opnum`].
     pub opnum: u16,
+    /// Interface hint (parsed, not used by this crate).
     pub ihint: u16,
+    /// Activity hint (parsed, not used by this crate).
     pub ahint: u16,
+    /// Length of this fragment's body in bytes.
     pub frag_len: u16,
+    /// Fragment number; this crate requires `0` (no fragmentation support).
     pub frag_num: u16,
+    /// Authentication protocol identifier; `0` = none.
     pub auth_proto: u8,
+    /// Low byte of the call's serial number.
     pub serial_lo: u8,
 }
 
 impl RpcHeader {
+    /// Fixed on-wire length of the DCE-RPC connectionless header, in bytes.
     pub const LEN: usize = 80;
 
+    /// Parses the 80-byte header. Errors: [`RpcError::TooShort`] if `buf` is shorter
+    /// than [`Self::LEN`]; [`RpcError::BadVersion`] if the version byte is not 4;
+    /// [`RpcError::UnsupportedPtype`] via [`PacketType::from_u8`]; [`RpcError::Fragmented`]
+    /// if `frag_num != 0` or [`FLAG1_FRAG`] is set.
     pub fn parse(buf: &[u8]) -> Result<RpcHeader, RpcError> {
         if buf.len() < Self::LEN {
             return Err(RpcError::TooShort {
@@ -159,6 +210,8 @@ impl RpcHeader {
         })
     }
 
+    /// Serializes the 80-byte header in its own `drep`'s byte order. Inverse of
+    /// [`RpcHeader::parse`].
     pub fn write(&self, out: &mut Vec<u8>) {
         out.push(VERSION);
         out.push(self.ptype.to_u8());

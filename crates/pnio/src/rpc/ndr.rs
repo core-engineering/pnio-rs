@@ -7,14 +7,20 @@ use super::{Drep, RpcError};
 /// (`max_count`, `offset`, `actual_count`) in front of the PNIO block payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NdrRequest {
+    /// Caller's advertised maximum response array size (echoed as the response's `max_count`).
     pub args_max: u32,
+    /// Declared payload length in bytes; must equal `actual_count`.
     pub args_len: u32,
+    /// Conformant array header: declared array capacity.
     pub max_count: u32,
+    /// Conformant array header: array offset; this crate requires `0`.
     pub offset: u32,
+    /// Conformant array header: actual element count, i.e. the PNIO block payload length in bytes.
     pub actual_count: u32,
 }
 
 impl NdrRequest {
+    /// Fixed on-wire length of the NDR request header, in bytes.
     pub const LEN: usize = 20;
 
     /// Parses the 20-byte header and returns it along with the trailing block payload
@@ -68,6 +74,7 @@ impl NdrRequest {
         }
     }
 
+    /// Serializes the 20-byte header in `drep`'s byte order.
     pub fn write(&self, out: &mut Vec<u8>, drep: Drep) {
         drep.put_u32(out, self.args_max);
         drep.put_u32(out, self.args_len);
@@ -81,14 +88,21 @@ impl NdrRequest {
 /// (`args_len`/`max_count`/`offset`/`actual_count`) as [`NdrRequest`], minus `args_max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NdrResponse {
+    /// Result of the call at the PNIO/application level; `0` = success. Distinct from
+    /// a DCE-RPC-level failure, which never produces an `NdrResponse` at all.
     pub status: u32,
+    /// Declared payload length in bytes; must equal `actual_count`.
     pub args_len: u32,
+    /// Conformant array header: echoes the request's `args_max`, not the response's own length.
     pub max_count: u32,
+    /// Conformant array header: array offset; this crate requires `0`.
     pub offset: u32,
+    /// Conformant array header: actual element count, i.e. the PNIO block payload length in bytes.
     pub actual_count: u32,
 }
 
 impl NdrResponse {
+    /// Fixed on-wire length of the NDR response header, in bytes.
     pub const LEN: usize = 20;
 
     /// Parses the 20-byte header and returns it along with the trailing block payload
@@ -154,6 +168,7 @@ impl NdrResponse {
         }
     }
 
+    /// Serializes the 20-byte header in `drep`'s byte order.
     pub fn write(&self, out: &mut Vec<u8>, drep: Drep) {
         drep.put_u32(out, self.status);
         drep.put_u32(out, self.args_len);

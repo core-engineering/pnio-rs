@@ -3,6 +3,8 @@
 use super::Drep;
 use std::fmt;
 
+/// A 128-bit UUID, stored in canonical (big-endian, RFC 4122) byte order regardless
+/// of the DREP it was read from or is written in.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Uuid(pub [u8; 16]);
 
@@ -16,6 +18,7 @@ pub const PNIO_CONTROLLER_INTERFACE: Uuid = Uuid([
 ]);
 
 impl Uuid {
+    /// The all-zero UUID (`00000000-0000-0000-0000-000000000000`).
     pub const NIL: Uuid = Uuid([0; 16]);
 
     /// PNIO object UUID: `dea00000-6c97-11d1-8271-{instance}{device_id}{vendor_id}`.
@@ -29,6 +32,8 @@ impl Uuid {
         Uuid(b)
     }
 
+    /// Parses the canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` text form.
+    /// `None` if `s` does not have exactly that hyphen/hex-digit shape.
     pub fn parse_str(s: &str) -> Option<Uuid> {
         let hex: String = s.split('-').collect();
         if hex.len() != 32 || s.split('-').map(str::len).ne([8, 4, 4, 4, 12]) {
@@ -54,6 +59,8 @@ impl Uuid {
         Some(Uuid(b))
     }
 
+    /// Writes 16 bytes in wire form: `time_low`, `time_mid`, `time_hi` in `drep`'s byte
+    /// order, the remaining 8 bytes verbatim. Inverse of [`Uuid::read`].
     pub fn write(&self, out: &mut Vec<u8>, drep: Drep) {
         drep.put_u32(
             out,
