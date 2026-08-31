@@ -43,10 +43,13 @@ pub enum RtError {
     /// [`TransportError`](crate::eth::TransportError).
     #[error(transparent)]
     Transport(#[from] crate::eth::TransportError),
-    /// A real-time scheduling syscall (`SCHED_FIFO`, affinity, `mlockall`) failed.
+    /// Reserved for fatal real-time scheduling failures. Not constructed today: `SCHED_FIFO`,
+    /// affinity and `mlockall` failures are reported as non-fatal [`RtEvent::SchedWarning`]s
+    /// and the thread runs on at its inherited priority.
     #[error("scheduling error: {0}")]
     Sched(std::io::Error),
-    /// The RT thread has already stopped and cannot accept the operation.
+    /// The RT thread was still running when [`RtHandle::join`]'s timeout elapsed; it is left
+    /// detached and releases its resources when it eventually exits.
     #[error("stopped")]
     Stopped,
 }
