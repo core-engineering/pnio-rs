@@ -19,6 +19,7 @@ use pnio::api::{ApiError, IoDevice, StartOptions};
 use pnio::config::{DeviceConfig, Slot};
 use pnio::data::FieldType::*;
 use pnio::device::RtOptions;
+use pnio::im::Im0;
 use pnio::rt::Histogram;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -64,6 +65,12 @@ struct Args {
 fn sample_config(station: &str) -> DeviceConfig {
     DeviceConfig::builder(station)
         .station_type("pnio latency probe")
+        // Same identity as `gen_gsdml`, so the I&M0 OrderID on the wire equals the GSDML's
+        // `OrderNumber` (TIA displays the wire value).
+        .im0(Im0 {
+            order_id: "PNIO-SAMPLE".into(),
+            ..Im0::default()
+        })
         .input(Slot(1), &[Real; 16])
         .input(Slot(2), &[Bool; 32])
         .output(Slot(3), &[Real; 16])

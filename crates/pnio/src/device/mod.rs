@@ -355,7 +355,14 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             (None, Some(d)) => Some(d),
             (None, None) => None,
         };
-        if let (Some(eth_fd), Some(rpc_fd)) = (self.eth.raw_fd(), self.rpc.raw_fd()) {
+        // Everything below is dated with `now`. When a real poll happened it may have
+        // waited up to `effective_wait` (200 ms in `run`), so re-read the clock afterwards:
+        // an alarm enqueued in this step would otherwise carry a retry deadline computed
+        // from the pre-wait instant — already expired at the next step — and the
+        // controller would receive the notification twice (HIL 2026-08-31, §6i). Mock
+        // transports without fds skip the poll and keep the caller's `now`, so tests
+        // that drive time by hand stay deterministic.
+        let now = if let (Some(eth_fd), Some(rpc_fd)) = (self.eth.raw_fd(), self.rpc.raw_fd()) {
             let mut fds = vec![eth_fd, rpc_fd];
             #[cfg(target_os = "linux")]
             if let Some(runner) = &self.runner {
@@ -363,10 +370,13 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             }
             wait_any_readable(&fds, effective_wait)
                 .map_err(|e| DeviceError::Eth(TransportError::Io(e)))?;
-        }
-        // else: mock transports have no fds to poll on; proceed straight to draining
-        // (their `recv` ignores the timeout and returns immediately; the RT events are
-        // drained below regardless of whether we polled for them).
+            Instant::now()
+        } else {
+            // Mock transports have no fds to poll on; proceed straight to draining (their
+            // `recv` ignores the timeout and returns immediately; the RT events are
+            // drained below regardless of whether we polled for them).
+            now
+        };
 
         let mut report = StepReport::default();
         // Alarm actions produced anywhere in this step are collected here and applied
@@ -1343,6 +1353,115 @@ mod tests {
         assert_eq!(
             parse_frame(&last).unwrap().body,
             RtaBody::Err(PnioStatus::rta_abort(PnioStatus::RTA_ABORT_AR_REMOVED))
+        );
+    }
+
+    /// A pipe's read end that is never written to: `poll(2)` waits the full timeout on it.
+    struct NeverReadable(std::os::fd::RawFd);
+    impl NeverReadable {
+        fn new() -> Self {
+            let mut fds = [0; 2];
+            // Safety: `fds` is a valid 2-element array; `pipe` fills it or fails.
+            let r = unsafe { libc::pipe(fds.as_mut_ptr()) };
+            assert_eq!(r, 0, "pipe");
+            NeverReadable(fds[0])
+        }
+    }
+
+    /// `SharedEth` that also exposes a (never readable) fd, so `Device::step` really polls.
+    struct PollableEth(SharedEth, std::os::fd::RawFd);
+    impl EthTransport for PollableEth {
+        fn send(&self, frame: &[u8]) -> Result<(), TransportError> {
+            self.0.send(frame)
+        }
+        fn recv_into(
+            &self,
+            buf: &mut [u8],
+            timeout: Option<Duration>,
+        ) -> Result<Option<usize>, TransportError> {
+            self.0.recv_into(buf, timeout)
+        }
+        fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
+            Some(self.1)
+        }
+    }
+    struct PollableRpc(MockRpcTransport, std::os::fd::RawFd);
+    impl RpcTransport for PollableRpc {
+        fn send(&self, buf: &[u8], to: std::net::SocketAddr) -> Result<(), RpcError> {
+            self.0.send(buf, to)
+        }
+        fn recv(
+            &self,
+            timeout: Option<Duration>,
+        ) -> Result<Option<(Vec<u8>, std::net::SocketAddr)>, RpcError> {
+            self.0.recv(timeout)
+        }
+        fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
+            Some(self.1)
+        }
+    }
+
+    /// HIL 2026-08-31 (§6i): a notification enqueued after a long poll wait was dated with
+    /// the `now` the caller took *before* the wait, so its retry deadline was already expired
+    /// at the next step and the CPU received the frame twice, 37 µs apart. The poll wait must
+    /// not age the alarm's deadline.
+    #[test]
+    fn poll_wait_does_not_age_the_alarm_retry_deadline() {
+        let eth = SharedEth::new();
+        let pipe = NeverReadable::new();
+        let mut dev = Device::new(
+            setup(),
+            PollableEth(eth.clone(), pipe.0),
+            PollableRpc(MockRpcTransport::new(), pipe.0),
+        );
+        let cpu = "172.16.2.100:54766".parse().unwrap();
+        let cpu_cm = "172.16.2.100:34964".parse().unwrap();
+        for name in ["connect_req", "write_req", "prmend_req"] {
+            dev.rpc().0.push_rx(golden(name)[RPC_OFF..].to_vec(), cpu);
+        }
+        dev.rpc()
+            .0
+            .push_rx(golden("appready_res")[RPC_OFF..].to_vec(), cpu_cm);
+        dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.state(), ArState::Data);
+
+        dev.diag_shared()
+            .queue
+            .lock()
+            .unwrap()
+            .push_back(DiagCommand::Raise(Diagnosis {
+                slot: Slot(1),
+                channel: 0,
+                error: ChannelError::LineBreak,
+                severity: Severity::Fault,
+                direction: Direction::Input,
+            }));
+        // `now` taken before a 150 ms poll wait (the RTA timeout is 100 ms on this AR).
+        let t0 = Instant::now();
+        dev.step(t0, Some(Duration::from_millis(150))).unwrap();
+        assert!(
+            t0.elapsed() >= Duration::from_millis(140),
+            "the poll must have waited"
+        );
+        let alarms_after_send = eth
+            .sent()
+            .iter()
+            .filter(|f| crate::alarm::is_alarm_frame(f))
+            .count();
+        assert_eq!(alarms_after_send, 1, "one notification sent");
+
+        // Immediately afterwards: nothing is due yet (the CPU has ~100 ms to ACK).
+        dev.step(Instant::now(), Some(Duration::ZERO)).unwrap();
+        let alarms_now = eth
+            .sent()
+            .iter()
+            .filter(|f| crate::alarm::is_alarm_frame(f))
+            .count();
+        assert_eq!(alarms_now, 1, "no premature retransmission");
+        assert_eq!(
+            dev.diag_shared().retries.load(Ordering::Relaxed),
+            0,
+            "no retry counted"
         );
     }
 }

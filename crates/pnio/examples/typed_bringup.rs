@@ -14,6 +14,7 @@ use pnio::config::{DeviceConfig, Slot};
 use pnio::data::FieldType::*;
 use pnio::device::RtOptions;
 use pnio::diag::{ChannelError, Severity};
+use pnio::im::Im0;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -107,6 +108,12 @@ fn parse_diag_spec(s: &str) -> Result<DiagSpec, String> {
 fn sample_config(station: &str) -> DeviceConfig {
     DeviceConfig::builder(station)
         .station_type("pnio sample device")
+        // Same identity as `gen_gsdml`, so the I&M0 OrderID on the wire equals the GSDML's
+        // `OrderNumber` (TIA displays the wire value).
+        .im0(Im0 {
+            order_id: "PNIO-SAMPLE".into(),
+            ..Im0::default()
+        })
         .identity(0xFFFF, 0x0001)
         .min_device_interval(32)
         .input(Slot(1), &[Real; 16])
