@@ -7,7 +7,7 @@ jobs:
     name: fmt + clippy + test (stable)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -19,7 +19,7 @@ jobs:
     name: MSRV 1.74 (check)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.74
       # The library honours rust-version; examples/tests pull dev-dependencies (clap 4.6,
       # edition 2024) that need a newer toolchain and are covered by the stable job.
@@ -28,7 +28,7 @@ jobs:
     name: rustdoc (-D warnings) + publish dry-run
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo doc --no-deps -p pnio
         env:

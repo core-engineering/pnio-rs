@@ -4,7 +4,7 @@ use std::os::fd::{BorrowedFd, RawFd};
 use std::time::Duration;
 
 use nix::errno::Errno;
-use nix::poll::{poll, PollFd, PollFlags};
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
 /// Waits for `fd` to become readable.
 ///
@@ -15,22 +15,13 @@ use nix::poll::{poll, PollFd, PollFlags};
 /// Returns `Ok(true)` once `fd` is readable, `Ok(false)` if `timeout` elapsed first.
 /// Retries transparently on `EINTR`.
 pub(crate) fn wait_readable(fd: RawFd, timeout: Option<Duration>) -> std::io::Result<bool> {
-    let timeout_ms: libc::c_int = match timeout {
-        None => -1,
-        Some(d) => {
-            // Round up: any leftover sub-millisecond remainder still costs a whole
-            // millisecond of `poll(2)` timeout, so `0 < d < 1ms` must not become 0
-            // (which would mean "return immediately" instead of "wait a little").
-            let ms = d.as_millis() + u128::from(d.subsec_nanos() % 1_000_000 != 0);
-            libc::c_int::try_from(ms).unwrap_or(libc::c_int::MAX)
-        }
-    };
+    let timeout_ms = poll_timeout(timeout);
 
     loop {
         // Safety: `fd` is owned by the caller for the duration of this call; we only
         // borrow it to build the pollfd entry, we never close or duplicate it here.
         let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-        let mut fds = [PollFd::new(&borrowed, PollFlags::POLLIN)];
+        let mut fds = [PollFd::new(borrowed, PollFlags::POLLIN)];
         match poll(&mut fds, timeout_ms) {
             Ok(0) => return Ok(false),
             Ok(_) => return Ok(true),
@@ -46,13 +37,7 @@ pub(crate) fn wait_readable(fd: RawFd, timeout: Option<Duration>) -> std::io::Re
 /// one fd is readable, `Ok(false)` if `timeout` elapsed first. Retries transparently
 /// on `EINTR`.
 pub(crate) fn wait_any_readable(fds: &[RawFd], timeout: Option<Duration>) -> std::io::Result<bool> {
-    let timeout_ms: libc::c_int = match timeout {
-        None => -1,
-        Some(d) => {
-            let ms = d.as_millis() + u128::from(d.subsec_nanos() % 1_000_000 != 0);
-            libc::c_int::try_from(ms).unwrap_or(libc::c_int::MAX)
-        }
-    };
+    let timeout_ms = poll_timeout(timeout);
 
     loop {
         // Safety: each `fd` is owned by the caller for the duration of this call; we
@@ -63,7 +48,7 @@ pub(crate) fn wait_any_readable(fds: &[RawFd], timeout: Option<Duration>) -> std
             .collect();
         let mut pollfds: Vec<PollFd> = borrowed
             .iter()
-            .map(|fd| PollFd::new(fd, PollFlags::POLLIN))
+            .map(|&fd| PollFd::new(fd, PollFlags::POLLIN))
             .collect();
         match poll(&mut pollfds, timeout_ms) {
             Ok(0) => return Ok(false),
@@ -107,13 +92,7 @@ pub(crate) fn poll_readable_into(
         "poll_readable_into: ready too short"
     );
 
-    let timeout_ms: libc::c_int = match timeout {
-        None => -1,
-        Some(d) => {
-            let ms = d.as_millis() + u128::from(d.subsec_nanos() % 1_000_000 != 0);
-            libc::c_int::try_from(ms).unwrap_or(libc::c_int::MAX)
-        }
-    };
+    let timeout_ms = poll_timeout(timeout);
 
     loop {
         for r in ready[..fds.len()].iter_mut() {
@@ -126,7 +105,7 @@ pub(crate) fn poll_readable_into(
             BorrowedFd::borrow_raw(if i < fds.len() { fds[i] } else { fds[0] })
         });
         let mut pollfds: [PollFd; MAX_POLL_FDS] =
-            std::array::from_fn(|i| PollFd::new(&borrowed[i], PollFlags::POLLIN));
+            std::array::from_fn(|i| PollFd::new(borrowed[i], PollFlags::POLLIN));
         match poll(&mut pollfds[..fds.len()], timeout_ms) {
             Ok(0) => return Ok(0),
             Ok(_) => {
@@ -141,6 +120,22 @@ pub(crate) fn poll_readable_into(
             }
             Err(Errno::EINTR) => continue,
             Err(e) => return Err(std::io::Error::from(e)),
+        }
+    }
+}
+
+/// `poll(2)` timeout for `timeout`: `None` blocks; a duration is rounded **up** to whole
+/// milliseconds — any leftover sub-millisecond remainder still costs a whole millisecond,
+/// so `0 < d < 1 ms` must not become 0 (which would mean "return immediately" instead of
+/// "wait a little"). Durations beyond `PollTimeout`'s range saturate to its maximum.
+fn poll_timeout(timeout: Option<Duration>) -> PollTimeout {
+    match timeout {
+        None => PollTimeout::NONE,
+        Some(d) => {
+            let ms = d.as_millis() + u128::from(d.subsec_nanos() % 1_000_000 != 0);
+            u16::try_from(ms)
+                .map(PollTimeout::from)
+                .unwrap_or(PollTimeout::MAX)
         }
     }
 }
