@@ -9,8 +9,13 @@ use std::fmt::Write;
 /// Vendor/product texts and the date that go into the file (and its name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GsdmlMeta {
+    /// `VendorName`/`DeviceIdentity` text; also cleaned to `[A-Za-z0-9]` for the file
+    /// name — see [`file_name`].
     pub vendor_name: String,
+    /// `ProductFamily` text; also cleaned to `[A-Za-z0-9]` for the file name — see
+    /// [`file_name`].
     pub product_family: String,
+    /// `InfoText` shown for the device in TIA's hardware catalog.
     pub info_text: String,
     /// (year, month, day) — the GSDML release date, also the file-name suffix.
     pub date: (u16, u8, u8),
