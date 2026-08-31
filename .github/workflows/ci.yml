@@ -21,7 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.74
-      - run: cargo check -p pnio --all-targets
+      # The library honours rust-version; examples/tests pull dev-dependencies (clap 4.6,
+      # edition 2024) that need a newer toolchain and are covered by the stable job.
+      - run: cargo check -p pnio
   docs:
     name: rustdoc (-D warnings) + publish dry-run
     runs-on: ubuntu-latest

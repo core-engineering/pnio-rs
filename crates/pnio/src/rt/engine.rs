@@ -360,9 +360,7 @@ impl RtEngine {
     /// own consumer status, always GOOD for a plugged submodule (see `on_tick`),
     /// independent of this.
     pub fn mark_outputs_stale(&mut self) {
-        for good in &mut self.rx_iops_good {
-            *good = false;
-        }
+        self.rx_iops_good.fill(false);
     }
 
     /// Convenience: `self.stats.snapshot()`.
