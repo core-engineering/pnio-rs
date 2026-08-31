@@ -53,9 +53,14 @@ pub struct RtOptions {
 /// configuration (if any) started once the AR reaches `Data`.
 #[derive(Debug, Clone)]
 pub struct DeviceSetup {
+    /// DCP identity (MAC + [`DeviceProperties`](crate::dcp::DeviceProperties))
+    /// answered on Identify/Set.
     pub dcp: DcpConfig,
+    /// The AR/slot model `Cm` validates Connect requests against.
     pub model: DeviceModel,
+    /// Seed for the activity UUID of our outgoing ApplicationReady calls.
     pub activity_seed: Uuid,
+    /// Cyclic (RT) thread configuration; `None` means no RT thread is ever started.
     pub rt: Option<RtOptions>,
     /// Device identity answered by I&M0 reads.
     pub im0: Im0,
@@ -68,10 +73,15 @@ pub struct DeviceSetup {
 /// [`DiagShared::queue`] and drained once per [`Device::step`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagCommand {
+    /// Raise a channel diagnosis.
     Raise(Diagnosis),
+    /// Clear a previously raised channel diagnosis.
     Clear {
+        /// Slot the diagnosis was raised on.
         slot: Slot,
+        /// Channel number.
         channel: u16,
+        /// The specific error to clear.
         error: ChannelError,
     },
 }
@@ -86,15 +96,29 @@ pub enum DiagCommand {
 /// arrived with no channel open at all.
 #[derive(Debug, Default)]
 pub struct DiagShared {
+    /// Pending [`DiagCommand`]s, drained once per [`Device::step`].
     pub queue: Mutex<VecDeque<DiagCommand>>,
+    /// The currently active set of channel diagnoses, as last published by the
+    /// acyclic loop.
     pub active: Mutex<Vec<Diagnosis>>,
+    /// Alarm PDUs sent (per AR).
     pub sent: AtomicU64,
+    /// Alarm PDUs acknowledged by the controller (per AR).
     pub acked: AtomicU64,
+    /// RTA retransmissions (per AR).
     pub retries: AtomicU64,
+    /// Alarm frames received that didn't match the expected reference/sequence (per
+    /// AR).
     pub unexpected_rx: AtomicU64,
+    /// Failed sends on the alarm channel (per AR).
     pub send_failures: AtomicU64,
+    /// RTA timeouts waiting for the controller's Ack (per AR).
     pub ack_timeouts: AtomicU64,
+    /// ERR-RTA PDUs received from the controller (per AR).
     pub rx_err_rta: AtomicU64,
+    /// Alarm frames received with no alarm channel open at all — cumulative across
+    /// the `Device`'s whole lifetime, not reset per AR (unlike every other counter
+    /// here).
     pub rx_no_channel: AtomicU64,
 }
 
@@ -133,8 +157,11 @@ const RTA_TIMEOUT_UNIT: Duration = Duration::from_millis(100);
 /// transport, and PDUs sent out (DCP responses are not counted; only RPC sends are).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StepReport {
+    /// DCP frames drained from the Ethernet transport.
     pub eth_frames: usize,
+    /// RPC datagrams drained from the UDP transport.
     pub rpc_datagrams: usize,
+    /// RPC PDUs sent (DCP responses are not counted here).
     pub sent: usize,
 }
 
@@ -142,8 +169,10 @@ pub struct StepReport {
 /// `Cm::handle_datagram` never reach here — those are logged and dropped in place.
 #[derive(Debug, Error)]
 pub enum DeviceError {
+    /// Error from the Ethernet (DCP) transport.
     #[error("Ethernet transport error: {0}")]
     Eth(#[from] TransportError),
+    /// Error from the RPC (UDP) transport.
     #[error("RPC transport error: {0}")]
     Rpc(#[from] RpcError),
 }
@@ -199,6 +228,9 @@ pub struct Device<E: EthTransport, R: RpcTransport> {
 }
 
 impl<E: EthTransport, R: RpcTransport> Device<E, R> {
+    /// Builds a `Device` from its static [`DeviceSetup`] and the two transports; the
+    /// AR starts `Idle`, the I/O image starts empty, and no RT thread runs until the
+    /// AR reaches `Data`.
     pub fn new(setup: DeviceSetup, eth: E, rpc: R) -> Device<E, R> {
         let mut cm = Cm::new(setup.model.clone(), setup.activity_seed);
         cm.set_im(setup.im0.clone(), ImStore::load(setup.im_store.clone()));
@@ -224,14 +256,17 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         }
     }
 
+    /// The AR's current state.
     pub fn state(&self) -> ArState {
         self.cm.state()
     }
 
+    /// The Ethernet (DCP) transport.
     pub fn eth(&self) -> &E {
         &self.eth
     }
 
+    /// The RPC (UDP) transport.
     pub fn rpc(&self) -> &R {
         &self.rpc
     }
