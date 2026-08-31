@@ -39,22 +39,32 @@
 // `unsafe` is confined to the raw-socket / scheduler layer: `eth::afpacket`, `eth::poll`,
 // `rt::sched`, `rt::runner`. Every other module is checked by the compiler to contain none.
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
 
+// Protocol modules not yet documented (doc pass B and later); their public items are exempt
+// from `missing_docs` until then.
+#[allow(missing_docs)]
 pub mod alarm;
 #[cfg(target_os = "linux")]
 pub mod api;
+#[allow(missing_docs)]
 #[cfg(feature = "capture")]
 pub mod capture;
+#[allow(missing_docs)]
 pub mod cm;
 pub mod config;
 pub mod data;
+#[allow(missing_docs)]
 pub mod dcp;
 pub mod device;
 pub mod diag;
+#[allow(missing_docs)]
 pub mod eth;
 pub mod gsdml;
 pub mod im;
+#[allow(missing_docs)]
 pub mod rpc;
+#[allow(missing_docs)]
 pub mod rt;
 #[cfg(test)]
 pub(crate) mod testutil;
