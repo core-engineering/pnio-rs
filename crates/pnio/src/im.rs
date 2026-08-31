@@ -19,10 +19,13 @@ const BLOCK_TYPE_IM1: u16 = 0x0021;
 const BLOCK_TYPE_IM2: u16 = 0x0022;
 const BLOCK_TYPE_IM3: u16 = 0x0023;
 
-/// Record data indices for the PNIO Read/Write service (§ I&M records).
+/// Record data index of I&M0 (read-only device identity).
 pub const INDEX_IM0: u16 = 0xAFF0;
+/// Record data index of I&M1 (tag function / tag location).
 pub const INDEX_IM1: u16 = 0xAFF1;
+/// Record data index of I&M2 (install date).
 pub const INDEX_IM2: u16 = 0xAFF2;
+/// Record data index of I&M3 (descriptor).
 pub const INDEX_IM3: u16 = 0xAFF3;
 
 /// `IM_Supported` bitmask: I&M1, I&M2 and I&M3 are supported (bits 1-3). The p-net
@@ -31,30 +34,46 @@ pub const INDEX_IM3: u16 = 0xAFF3;
 /// no "nothing supported" variant to encode (see `docs/alarm-golden-frames.md`).
 pub const IM_SUPPORTED_DAP: u16 = 0x000E;
 
-/// Fixed body lengths (bytes after the 6-byte block header) of the I&M1-3 records.
+/// Fixed body length (bytes after the 6-byte block header) of the I&M1 record
+/// (TagFunction, 32 bytes, + TagLocation, 22 bytes).
 pub const IM1_LEN: usize = 54;
+/// Fixed body length (bytes after the 6-byte block header) of the I&M2 record
+/// (install date).
 pub const IM2_LEN: usize = 16;
+/// Fixed body length (bytes after the 6-byte block header) of the I&M3 record
+/// (descriptor).
 pub const IM3_LEN: usize = 54;
 
 /// `IM_Software_Revision`: a prefix letter ('V'ersion, 'R'evision, 'P'rototype,
 /// 'U'nder test, 'T'est device) plus a three-part x.y.z revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwRevision {
+    /// One of `V`ersion, `R`evision, `P`rototype, `U`nder test, `T`est device.
     pub prefix: char,
+    /// Functional enhancement counter (`x` of `x.y.z`).
     pub functional: u8,
+    /// Bug-fix counter (`y` of `x.y.z`).
     pub bug_fix: u8,
+    /// Internal/build counter (`z` of `x.y.z`).
     pub internal: u8,
 }
 
 /// I&M0: read-only device identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Im0 {
+    /// `IM_Order_ID`: at most 20 ASCII bytes, space-padded on the wire.
     pub order_id: String,
+    /// `IM_Serial_Number`: at most 16 ASCII bytes, space-padded on the wire.
     pub serial_number: String,
+    /// `IM_Hardware_Revision`.
     pub hardware_revision: u16,
+    /// `IM_Software_Revision`.
     pub software_revision: SwRevision,
+    /// `IM_Revision_Counter`.
     pub revision_counter: u16,
+    /// `IM_Profile_ID`.
     pub profile_id: u16,
+    /// `IM_Profile_Specific_Type`.
     pub profile_specific_type: u16,
 }
 
@@ -108,16 +127,35 @@ impl Default for Im0 {
     }
 }
 
+/// Errors from [`Im0::validate`] and [`ImStore::write`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ImError {
+    /// The named [`Im0`] field contains non-ASCII characters.
     #[error("{field} is not ASCII")]
-    NotAscii { field: &'static str },
+    NotAscii {
+        /// Name of the offending field.
+        field: &'static str,
+    },
+    /// The named [`Im0`] field exceeds its maximum encoded length.
     #[error("{field} longer than {max} bytes")]
-    TooLong { field: &'static str, max: usize },
+    TooLong {
+        /// Name of the offending field.
+        field: &'static str,
+        /// The field's maximum length in bytes.
+        max: usize,
+    },
+    /// `software_revision.prefix` is not one of `VRPUT`.
     #[error("bad software revision prefix {0:?}")]
     BadPrefix(char),
+    /// An I&M1-3 record written by the controller failed to parse or validate — see
+    /// [`ImStore::write`].
     #[error("record {index:#06x} has a bad shape: {why}")]
-    BadRecord { index: u16, why: &'static str },
+    BadRecord {
+        /// The record's data index (`INDEX_IM1..=INDEX_IM3`).
+        index: u16,
+        /// Human-readable reason.
+        why: &'static str,
+    },
 }
 
 /// Push `s` into `out` as exactly `len` ASCII bytes: truncated if longer, space-padded
@@ -165,6 +203,7 @@ pub struct ImStore {
     im1: [u8; IM1_LEN],
     im2: [u8; IM2_LEN],
     im3: [u8; IM3_LEN],
+    /// Backing file the store persists to on every [`ImStore::write`], if set.
     pub path: Option<std::path::PathBuf>,
 }
 
@@ -289,18 +328,22 @@ impl ImStore {
         }
     }
 
+    /// I&M1's `TagFunction` field (first 32 bytes), trimmed of trailing padding.
     pub fn tag_function(&self) -> String {
         trimmed(&self.im1[..32])
     }
 
+    /// I&M1's `TagLocation` field (last 22 bytes), trimmed of trailing padding.
     pub fn tag_location(&self) -> String {
         trimmed(&self.im1[32..IM1_LEN])
     }
 
+    /// I&M2's install date, trimmed of trailing padding.
     pub fn date(&self) -> String {
         trimmed(&self.im2[..IM2_LEN])
     }
 
+    /// I&M3's descriptor, trimmed of trailing padding.
     pub fn descriptor(&self) -> String {
         trimmed(&self.im3[..IM3_LEN])
     }
