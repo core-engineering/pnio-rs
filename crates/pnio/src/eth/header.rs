@@ -1,21 +1,31 @@
 use thiserror::Error;
 
+/// Ethertype identifying PROFINET (RT cyclic, DCP, alarm, and this crate's own RPC framing).
 pub const ETHERTYPE_PROFINET: u16 = 0x8892;
+/// Ethertype identifying an 802.1Q VLAN tag.
 pub const ETHERTYPE_VLAN: u16 = 0x8100;
 
+/// A 6-byte Ethernet MAC address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MacAddr(pub [u8; 6]);
 
+/// A parsed or to-be-written Ethernet II header, VLAN tag included when present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EthHeader {
+    /// Destination MAC address.
     pub dst: MacAddr,
+    /// Source MAC address.
     pub src: MacAddr,
+    /// The VLAN TCI, if an 802.1Q tag is present (`None` for an untagged frame).
     pub vlan: Option<u16>,
+    /// The ethertype after the (optional) VLAN tag — the payload's real type.
     pub ethertype: u16,
 }
 
+/// Errors from parsing an Ethernet header.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum EthError {
+    /// Fewer bytes available than a minimal (untagged or tagged) header needs.
     #[error("frame too short")]
     TooShort,
 }

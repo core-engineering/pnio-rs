@@ -55,7 +55,6 @@ pub mod data;
 pub mod dcp;
 pub mod device;
 pub mod diag;
-#[allow(missing_docs)]
 pub mod eth;
 pub mod gsdml;
 pub mod im;

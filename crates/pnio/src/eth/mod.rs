@@ -1,3 +1,7 @@
+//! Raw Ethernet layer: the L2 header codec, the [`EthTransport`] send/receive
+//! abstraction, a BPF filter builder, and the Linux `AF_PACKET` transport
+//! ([`AfPacketTransport`], the only production backend).
+
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 mod afpacket;

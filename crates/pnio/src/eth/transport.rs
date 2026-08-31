@@ -7,8 +7,10 @@ use thiserror::Error;
 /// header + 4-byte 802.1Q tag + 4-byte FCS.
 pub const MAX_FRAME_LEN: usize = 1522;
 
+/// Errors from a raw Ethernet transport's send/receive.
 #[derive(Debug, Error)]
 pub enum TransportError {
+    /// The underlying socket/device failed.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     /// `recv_into` was given a buffer shorter than [`MAX_FRAME_LEN`] — a programming
@@ -17,11 +19,15 @@ pub enum TransportError {
     BufferTooSmall,
     /// A frame longer than the buffer arrived; it was discarded, never truncated.
     #[error("frame of {len} bytes does not fit the receive buffer")]
-    FrameTooLong { len: usize },
+    FrameTooLong {
+        /// The oversized frame's actual length in bytes.
+        len: usize,
+    },
 }
 
 /// Raw Ethernet frame I/O abstraction (L2 header included).
 pub trait EthTransport: Send + Sync {
+    /// Sends a complete Ethernet frame (L2 header included).
     fn send(&self, frame: &[u8]) -> Result<(), TransportError>;
 
     /// Receive the next frame into `buf` and return its length.
@@ -74,6 +80,7 @@ pub struct MockTransport {
 }
 
 impl MockTransport {
+    /// An empty mock transport: nothing sent yet, nothing queued to receive.
     pub fn new() -> Self {
         Self::default()
     }
