@@ -26,7 +26,7 @@ pub struct StartOptions {
     /// Network interface to open (e.g. `"eth0"`); its MAC is read from
     /// `/sys/class/net/<iface>/address`.
     pub iface: String,
-    /// Our IPv4 address (big-endian octets), advertised in the DCP identity.
+    /// Our IPv4 address (octets in network order), advertised in the DCP identity.
     pub ip: [u8; 4],
     /// RT thread scheduling; `None` means no RT thread is started, so no cyclic I/O is
     /// exchanged even once the AR reaches [`ArState::Data`].
@@ -331,9 +331,10 @@ impl IoDevice {
             .unwrap_or_else(|e| e.into_inner())
             .0
     }
-    /// `ar_state() == Data` *and* the I/O image has actually been rebuilt from the
-    /// negotiated layout — the condition a caller should poll for before the first
-    /// read/write, since `ar_state()` alone can transiently lag it (see its doc).
+    /// `ar_state() == Data`, the I/O image has actually been rebuilt from the negotiated
+    /// layout, *and* [`IoDevice::ar_params`] is available — everything a first read/write
+    /// needs, and the condition to poll for before the first read/write: `ar_state()` alone
+    /// can transiently lead it (see its doc).
     ///
     /// This is a lifecycle invariant, not just a start-up detail: the image's cell
     /// index only ever exists while the *current* AR is in `Data`.
@@ -343,7 +344,16 @@ impl IoDevice {
     /// for the current one's — `ready()` reads `false` again until the next `Data`
     /// rebuilds it.
     pub fn ready(&self) -> bool {
-        self.ar_state() == ArState::Data && !self.image.cells().is_empty()
+        // `ar_params()` is mirrored by the acyclic thread right *after* the `step` that
+        // rebuilt the image, so a caller racing that thread could otherwise see
+        // `ready() == true` and `ar_params() == None` for a few microseconds.
+        self.ar_state() == ArState::Data
+            && !self.image.cells().is_empty()
+            && self
+                .params
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
     }
     /// The reason for the most recent AR state change, or `None` if the AR has never
     /// aborted (or the last change was a fresh connect to [`ArState::Data`], which
@@ -368,8 +378,8 @@ impl IoDevice {
     pub fn validity(&self) -> Validity {
         self.image.validity()
     }
-    /// Whether the outputs were updated within the RT thread's consumer watchdog
-    /// window — see [`Validity::freshness`].
+    /// The freshness class of the controller's outputs (`NoData` / `Fresh` / `Stopped` /
+    /// `Stale`) — see [`Validity::freshness`].
     pub fn freshness(&self) -> Freshness {
         self.image.validity().freshness()
     }

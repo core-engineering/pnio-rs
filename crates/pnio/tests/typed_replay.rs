@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")] // drives `pnio::api`, which needs the Linux transports
 //! End-to-end with the typed config: synthetic Connect → Data, a fabricated CPU frame for
 //! the 16 REAL + 32 BOOL layout decoded through IoDevice, our inputs published and
 //! visible in the produced frame.

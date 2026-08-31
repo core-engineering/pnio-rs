@@ -203,7 +203,7 @@ pub struct ImStore {
     im1: [u8; IM1_LEN],
     im2: [u8; IM2_LEN],
     im3: [u8; IM3_LEN],
-    /// Backing file the store persists to on every [`ImStore::write`], if set.
+    /// Backing file the store persists to on every accepted [`ImStore::write`], if set.
     pub path: Option<std::path::PathBuf>,
 }
 
