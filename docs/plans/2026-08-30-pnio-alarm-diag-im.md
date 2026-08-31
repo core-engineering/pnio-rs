@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2021, `libc`/`nix` (existing), classic BPF filter (existing), goldens from `captures/plan5-20260830/plan5-alarm.pcapng` already extracted to `crates/pnio/testdata/alarm/*.hex`.
 
-**Spec:** `docs/superpowers/specs/2026-08-30-pnio-alarm-diag-im-design.md`
+**Spec:** `docs/design/2026-08-30-pnio-alarm-diag-im-design.md`
 
 ## Global Constraints
 
@@ -1048,7 +1048,7 @@ fn alarm_handshake_err_rta_and_im0_read_replay_byte_exact() {
 ### Task 12: Docs and follow-ups
 
 **Files:**
-- Modify: `README.md` (Status table rows `alarm`, `diag`, `im` = done with a one-liner each; Quick Start snippet after the typed write example: `dev.raise_diagnosis(Slot(1), 0, ChannelError::LineBreak, Severity::Fault)?;` + `StartOptions { im_store: Some("/var/lib/pnio/im.bin".into()), .. }`), `FOLLOWUPS.md` (mark resolved: Plan 3 "Minimal Read/ReadImplicit" and "Alarm channel", Plan 4 "ERR-RTA on device stop / ProblemIndicator" and `AbortReason::RtSocket`; add the spec §2 "Out" items as new follow-ups), `docs/bench-pnet-device.md` (new `## 6i. HIL — alarms, diagnosis and I&M (Plan 5)` with the **procedure only** — the six acceptance checks of spec §6 as a checklist with the exact commands: `typed_bringup --diag 1:0:line-break --im-store ~/bench/im.bin …`, what to look at in TIA, which capture to take — results are filled in after the HIL session), `docs/superpowers/specs/2026-08-30-pnio-alarm-diag-im-design.md` status line → "implemented (branch), HIL pending".
+- Modify: `README.md` (Status table rows `alarm`, `diag`, `im` = done with a one-liner each; Quick Start snippet after the typed write example: `dev.raise_diagnosis(Slot(1), 0, ChannelError::LineBreak, Severity::Fault)?;` + `StartOptions { im_store: Some("/var/lib/pnio/im.bin".into()), .. }`), `FOLLOWUPS.md` (mark resolved: Plan 3 "Minimal Read/ReadImplicit" and "Alarm channel", Plan 4 "ERR-RTA on device stop / ProblemIndicator" and `AbortReason::RtSocket`; add the spec §2 "Out" items as new follow-ups), `docs/bench-pnet-device.md` (new `## 6i. HIL — alarms, diagnosis and I&M (Plan 5)` with the **procedure only** — the six acceptance checks of spec §6 as a checklist with the exact commands: `typed_bringup --diag 1:0:line-break --im-store ~/bench/im.bin …`, what to look at in TIA, which capture to take — results are filled in after the HIL session), `docs/design/2026-08-30-pnio-alarm-diag-im-design.md` status line → "implemented (branch), HIL pending".
 
 - [ ] **Step 1:** write the docs. **Step 2:** `cargo test --all`, `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `grep -rn "TODO\|TBD" docs/alarm-golden-frames.md docs/gsdml.md README.md` → nothing. **Step 3: Commit** `docs: Plan 5 — README status, FOLLOWUPS, §6i HIL procedure, gsdml I&M section`.
 

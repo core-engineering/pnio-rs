@@ -1,7 +1,9 @@
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
 mod afpacket;
 pub mod bpf;
 mod header;
+#[allow(unsafe_code)]
 pub(crate) mod poll;
 mod transport;
 

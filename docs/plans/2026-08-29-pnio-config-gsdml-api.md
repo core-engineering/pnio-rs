@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.96 workspace toolchain, crate `pnio` (`crates/pnio`); deps unchanged (`libc`, `log`, `nix`, `pcap-file`, `thiserror`); new **dev**-dependency `roxmltree = "0.20"`; existing dev-deps `clap`, `env_logger`.
 
-**Spec:** `docs/superpowers/specs/2026-08-29-pnio-config-gsdml-api-design.md` (read it; sections referenced as spec §N).
+**Spec:** `docs/design/2026-08-29-pnio-config-gsdml-api-design.md` (read it; sections referenced as spec §N).
 
 ## Global Constraints
 

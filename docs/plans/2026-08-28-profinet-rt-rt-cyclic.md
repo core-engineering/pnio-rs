@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust stable (1.96), `libc` (timerfd, eventfd, sched, recvfrom), `nix` (poll), std `Mutex`/`Arc`/atomics. No new dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-08-28-profinet-rt-rt-cyclic-design.md` — read it first. Bench facts: `docs/bench-pnet-device.md` §6b (C-SDU layout, bit order, data status), `docs/cm-golden-frames.md`.
+**Spec:** `docs/design/2026-08-28-profinet-rt-rt-cyclic-design.md` — read it first. Bench facts: `docs/bench-pnet-device.md` §6b (C-SDU layout, bit order, data status), `docs/cm-golden-frames.md`.
 
 ## Global Constraints
 

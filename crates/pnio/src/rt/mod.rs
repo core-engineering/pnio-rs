@@ -6,8 +6,10 @@ pub mod hist;
 pub mod image;
 pub mod layout;
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
 pub mod runner;
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
 pub mod sched;
 
 pub use engine::{

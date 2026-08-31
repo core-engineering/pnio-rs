@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust stable (1.96), `thiserror`, `nix`/`libc` (AF_PACKET, `poll`), std `UdpSocket`; new deps: `log` (crate), `env_logger` + `clap` (example only).
 
-**Spec:** `docs/superpowers/specs/2026-08-27-profinet-rt-cm-ar-design.md` — read it first; every task below argues from it. Bench facts: `docs/bench-pnet-device.md` §6b.
+**Spec:** `docs/design/2026-08-27-profinet-rt-cm-ar-design.md` — read it first; every task below argues from it. Bench facts: `docs/bench-pnet-device.md` §6b.
 
 ## Global Constraints
 
@@ -76,7 +76,7 @@ Golden frame inventory (full Ethernet frames; RPC ones are untagged IPv4/UDP so 
 - [ ] **Step 1: Create the branch**
 
 ```bash
-cd /mnt/c/Users/martinc8/projects/203-profinet-rt && git checkout -b feat/cm-ar main
+git checkout -b feat/cm-ar main
 ```
 
 - [ ] **Step 2: Write the hex files**

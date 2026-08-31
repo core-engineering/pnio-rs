@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.96 (workspace toolchain), `libc` (raw syscalls, `sock_filter`), `nix` (existing), no new dependencies. Bash scripts on Debian 13 (`ethtool`, `chrt`, `rt-tests`, `stress-ng`, `tcpdump`). Bench: edge `lab-server` 192.168.1.21 (`eno2` 172.16.2.10 ↔ CPU 1515-2 PN 172.16.2.100), musl build for the edge binary.
 
-**Spec:** `docs/superpowers/specs/2026-08-28-profinet-rt-rt-1ms-design.md` (read it; sections referenced as spec §N below).
+**Spec:** `docs/design/2026-08-28-profinet-rt-rt-1ms-design.md` (read it; sections referenced as spec §N below).
 
 ## Global Constraints
 
@@ -1661,7 +1661,7 @@ git commit -m "feat(bench): edge RT tuning script + systemd unit, load and campa
 ### Task 7: HIL campaign, report, docs (controller + user, not a subagent)
 
 **Files:**
-- Modify: `docs/bench-pnet-device.md` (new §6e before §7; update §7), `README.md` (status rows for `rt` and HIL, architecture note), `FOLLOWUPS.md` (Plan 7 section; close or defer the seqlock item per spec §9), `docs/superpowers/specs/2026-08-28-profinet-rt-rt-1ms-design.md` (status line → "implemented, HIL <date>")
+- Modify: `docs/bench-pnet-device.md` (new §6e before §7; update §7), `README.md` (status rows for `rt` and HIL, architecture note), `FOLLOWUPS.md` (Plan 7 section; close or defer the seqlock item per spec §9), `docs/design/2026-08-28-profinet-rt-rt-1ms-design.md` (status line → "implemented, HIL <date>")
 
 - [ ] **Step 1: Build and deploy**
 

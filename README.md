@@ -2,79 +2,59 @@
 
 [![CI](https://github.com/core-engineering/pnio-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/core-engineering/pnio-rs/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
-![status](https://img.shields.io/badge/status-pre--1.0%20(WIP)-orange)
+![MSRV](https://img.shields.io/badge/MSRV-1.74-informational)
+![status](https://img.shields.io/badge/status-0.1%20pre--release-orange)
 
-**IO-Device PROFINET RT (Class 1 / Conformance Class A)** stack in **pure Rust**, for Linux
-**PREEMPT_RT** — designed to close control loops on the *edge* side with an S7‑1500
-(IO‑Controller), target cycle **< 2 ms**.
+A **PROFINET RT IO-Device** (Conformance Class A, RT class 1) in **pure Rust**, for Linux
+`PREEMPT_RT`. It lets an edge computer sit on a PLC's PROFINET IO system like any other
+field device — the controller (an S7‑1500 in our bench) exchanges cyclic process data with it
+every **500 µs or 1 ms**, sees its **diagnosis alarms**, reads its **I&M identification**, and
+you program the device side in Rust with typed reads and writes.
 
-> **Disclaimer.** Community project, **not affiliated with, nor endorsed or certified by**
-> PROFIBUS & PROFINET International (PI). "PROFINET" is a registered trademark of PNO.
-> This library is a **clean‑room** implementation derived from the public standard
-> IEC 61158/61784. No normative text is reproduced herein.
+Validated **byte‑exact** against captures of a real S7‑1515‑2 PN (TIA Portal V21) and in
+hardware‑in‑the‑loop: a 12 h 51 soak at 500 µs with 0 missed cycles, tick lateness p99.99 ≈ 20 µs on a
+4‑core Atom.
 
-## Why
+> **Disclaimer.** Community project, **not affiliated with, endorsed or certified by**
+> PROFIBUS & PROFINET International (PI). "PROFINET" is a registered trademark of PNO. This is a
+> **clean‑room** implementation from the public IEC 61158/61784 standards and from Wireshark
+> captures; no normative text is reproduced.
 
-Acyclic exchange protocols (S7comm, Modbus, OPC UA) are unsuitable for
-**deterministic control**: the **real-time cyclic channel** of PROFINET is required. Existing
-stacks impose licensing constraints (e.g. `p-net` is GPLv3 + commercial). This project
-aims for a **reusable stack under a permissive dual license**, with full IP ownership.
+## What you get
 
-## Status
-
-Active development, **pre‑1.0**. Validated **byte‑exact** against real captures from an
-S7‑1500 (1515‑2 PN).
-
-| Layer | Module | Status |
-|---|---|---|
-| L2 Ethernet layer (header + VLAN, AF_PACKET transport, mock) | `eth` | ✅ |
-| **pcap & pcapng** capture replay harness | `capture` | ✅ |
-| Process type codecs (INT/WORD/DINT/REAL big‑endian, packed BOOL) | `data` | ✅ |
-| **DCP** device side: Identify (request parsing + byte-exact response, dispatch) | `dcp` | ✅ |
-| DCP Set-IP (guarded) ✅, Get / Set‑name / Flash ⏳ | `dcp` | ⏳ |
-| DCE-RPC CL codec + UDP transport | `rpc` | ✅ |
-| AR establishment (DCE/RPC, state machine) | `cm` | ✅ AR reaches DATA on a real S7-1500 (HIL 2026-08-28) |
-| Acyclic device loop + bring-up example | `device` | ✅ |
-| RT cyclic exchange (PPM/CPM, IOPS/IOCS, watchdog, `SCHED_FIFO` thread) | `rt` | ✅ 1 ms held on PREEMPT_RT (edge Atom E3940). **L2-pair profile (default, Plan 7bis, HIL 2026-08-28)**: under load p99.99 13 µs / max 22.4 µs, idle p99.99 20 µs / max 22.7 µs, 0 missed ticks / 0 watchdog expirations over 1.2 M cycles (600078 + 597969). Single-core profile (Plan 7, HIL 2026-08-28), under load on CPUs 0-2: p99.99 147-203 µs / max ≤ 284 µs — see `docs/bench-pnet-device.md` §6e/§6f |
-| Alarm channel (RTA codec, sender/receiver state machine, ERR-RTA) | `alarm` | ✅ byte-exact vs a p-net capture (notification → ACK-RTA → Alarm-Ack → ACK-RTA, both-ways ERR-RTA) — see `docs/alarm-golden-frames.md` |
-| Channel diagnosis (raise/clear, `ProblemIndicator`, replay on reconnect) | `diag` | ✅ |
-| I&M0-3 records (identity from `config`, I&M1-3 writable + file-persisted) | `im`/`cm::records` | ✅ |
-| Typed device configuration (builder, layout rule, DCP/model derivation) | `config` | ✅ |
-| Generated GSDML (V2.4, matches `config` by construction — see `docs/gsdml.md`) | `gsdml` | ✅ HIL with our own GSDML on the S7-1500, 2026-08-29: import accepted by TIA V21 (device-view addresses = computed), 10 min at 1 ms, L2-pair profile, tick lateness p99.99 29 µs / max 61.1 µs, 0 missed ticks over 599 737 cycles — see `docs/bench-pnet-device.md` §6g |
-| Typed device facade (`IoDevice`, typed reads/writes, per-slot snapshots) | `api` | ✅ HIL with our own GSDML on the S7-1500, 2026-08-29: typed `REAL`/`BOOL` round trip verified in the watch table, same 10-minute 1 ms run as `gsdml` above — see `docs/bench-pnet-device.md` §6g; 500 µs held for 5 min on the CPU's X1 port (0 missed ticks over 596 899 cycles, p99.99 lateness 27 µs) |
-| HIL integration + determinism (real S7‑1500, jitter measurement) | — | 1 ms held against a real S7-1500, idle and under load, on PREEMPT_RT ✅ (HIL 2026-08-28, `docs/bench-pnet-device.md` §6e/§6f — L2-pair profile now the default); see the `rt` row above for numbers |
-
-## Architecture
-
-- **Pure Rust**, no heavy dependencies; everything is **big‑endian** ("Motorola" format,
-  identical to Siemens memory — no word-swap).
-- Protocol layer decomposition (`eth` → `dcp` → `cm`/AR → `rt`/alarms), each layer
-  independently testable.
-- Runtime target: Debian **PREEMPT_RT**, 1 ms send clock, `SCHED_FIFO` RT thread. The I/O
-  image shared with the application is mutex-protected, publishing a per-cycle-consistent
-  snapshot on each side (non-blocking on the RT side). The Plan 7 HIL campaign measured
-  `input_snapshot_reused + output_publish_deferred` at 0.07-0.12 % of ticks at 1 ms; the spec's
-  §9 rule (< 0.1 % → `Mutex` stays, otherwise a seqlock) is exceeded under the spec's own load
-  (0.11-0.12 %), so keeping the `Mutex` + `try_lock` image is a **deliberate deviation from
-  that rule** — every run showed zero dropped frames, and the overshoot is only 0.01-0.02
-  points. The Plan 7bis L2-pair campaign measured 0.13 % idle / 0.15 % under load — still over
-  the line, by a slightly wider margin, and the deviation stands unchanged (`docs/bench-pnet-device.md`
-  §6f). A lock-free seqlock stays a FOLLOWUP, triggered only if a consumer needs every single
-  cycle's outputs.
+- **Cyclic real‑time exchange** (`rt`): PPM/CPM with IOPS/IOCS, cycle counter, consumer watchdog,
+  data status (incl. the station problem indicator), on a `SCHED_FIFO` thread pinned to an
+  isolated core, memory locked. 500 µs and 1 ms send clocks held against a real controller.
+- **AR establishment** (`cm`, `rpc`): DCE‑RPC Connect / Write / PrmEnd / ApplicationReady /
+  Release, controller reconnect, record reads and writes.
+- **Discovery** (`dcp`): Identify and Set‑IP on the device side.
+- **Alarm channel** (`alarm`): RTA codec and a sender/receiver with retries, deduplication and
+  ERR‑RTA in both directions — the controller learns about a device stop within a millisecond
+  instead of waiting for its watchdog.
+- **Channel diagnosis** (`diag`): `raise_diagnosis` / `clear_diagnosis` from your code → the
+  CPU's diagnostic buffer, OB82 and the device fault state; re‑announced after an AR loss.
+- **I&M records** (`im`): I&M0 from the device configuration, I&M1‑3 readable/writable with an
+  optional file store.
+- **Typed configuration → GSDML** (`config`, `gsdml`): declare slots and fields in Rust, render the
+  GSDML V2.4 TIA imports from the same object — no drift between what the controller expects and
+  what the device does.
+- **A small facade** (`api::IoDevice`): typed `BOOL`/`INT`/`WORD`/`DINT`/`REAL` reads and writes,
+  per‑cycle‑consistent slot snapshots, freshness/validity of the controller's data.
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/core-engineering/pnio-rs.git
 cd pnio-rs
-cargo test          # unit suite + capture-replay integration test
-cargo clippy --all-targets -- -D warnings
+cargo test                                   # unit suite + byte-exact capture replays
+cargo run --example gen_gsdml -- --out .     # the GSDML matching the sample declaration
 ```
 
-The `AfPacketTransport` backend (raw L2 sockets) requires Linux and the `CAP_NET_RAW`
-capability at runtime; tests that depend on it are marked `#[ignore]`.
+Linux only: the `AF_PACKET` backend needs `CAP_NET_RAW`/`CAP_NET_ADMIN` at runtime (plus
+`CAP_SYS_NICE`/`CAP_IPC_LOCK` for the real‑time thread); tests that need a real socket are
+`#[ignore]`d.
 
-Declare the device's process data in Rust, start it, exchange typed values:
+Declare the device's process data, start it, exchange typed values:
 
 ```rust
 use pnio::api::{IoDevice, StartOptions};
@@ -93,82 +73,110 @@ let dev = IoDevice::start(cfg, StartOptions {
     ip: [172, 16, 2, 10],
     rt: Some(RtOptions { iface: "eno2".into(), cpu_pin: Some(3), rt_priority: Some(80), lock_memory: true }),
     app_cpus: Some(vec![0, 1, 2]),
-}).expect("start (needs cap_net_raw/cap_net_admin/cap_sys_nice)");
+    im_store: Some("/var/lib/pnio/im.bin".into()),   // persists the I&M1-3 written by TIA
+}).expect("start (needs cap_net_raw/cap_net_admin/cap_sys_nice/cap_ipc_lock)");
 
 while !dev.ready() {
     std::thread::sleep(std::time::Duration::from_millis(5));
 }
+// Echo the controller's first REAL back into our first input, consistently per cycle.
 if let Ok(out) = dev.outputs(Slot(3)) {
     dev.with_inputs(Slot(1), |w| w.real(0, out.real(0)?)).ok();
 }
 ```
 
-Raise or clear a channel diagnosis, and persist the writable I&M1-3 records across restarts:
+Tell the controller something is wrong, then that it is fixed:
 
 ```rust
 use pnio::diag::{ChannelError, Severity};
 
 dev.raise_diagnosis(Slot(1), 0, ChannelError::LineBreak, Severity::Fault)?;
-// ... the CPU's diagnostic buffer/OB82 see it, ProblemIndicator is set in the data status
+// -> "Wire break on input channel 0" in the CPU's diagnostic buffer, device shown in fault,
+//    ProblemIndicator cleared in every cyclic frame until:
 dev.clear_diagnosis(Slot(1), 0, ChannelError::LineBreak)?;
 ```
 
-```rust
-let dev = IoDevice::start(cfg, StartOptions {
-    im_store: Some("/var/lib/pnio/im.bin".into()),
-    ..opts
-})?;
-```
+`IoDevice::alarm_stats()` mirrors the live alarm channel (counters restart with each AR);
+`alarm_rx_no_channel()` is the one process‑wide counter. The GSDML for your declaration comes from
+`pnio::gsdml::render` (see the `gen_gsdml` example and [`docs/gsdml.md`](docs/gsdml.md) for the
+TIA import and XSD validation steps).
 
-`raise_diagnosis`/`clear_diagnosis` queue the change for the acyclic loop to send as an
-`AlarmNotification` (Diagnosis/DiagnosisDisappears) and set/clear the `ProblemIndicator` bit the
-RT thread reports in the cyclic data status (`0x15`/`0x35`); an active diagnosis is announced
-again after an AR loss. `im_store` is the backing file for I&M1-3 (tag function/location, install
-date, descriptor) as written by TIA's *I&M* tab — without it they stay in memory only, blank at
-startup. `IoDevice::alarm_stats()`'s counters mirror the current alarm channel and restart at 0 on
-every reconnect (a fresh AR opens a fresh channel); `alarm_rx_no_channel()` is the one
-cumulative-for-the-process exception.
+> ⚠️ **Identity.** The builder's default identity (`vendor_id = 0xFFFF`, `device_id = 0x0001`)
+> is a **development value, not a PI‑assigned ID**. Set `.identity(vendor_id, device_id)` before
+> any deployment outside the lab.
 
-`cargo run --example gen_gsdml` renders the matching GSDML for the sample declaration above and
-prints the resulting controller address map; see [`docs/gsdml.md`](docs/gsdml.md) for the layout
-rule, the TIA import steps and the XSD validation recipe.
+## Status
 
-> ⚠️ **Identity**: `DeviceConfig::builder`'s default identity (`vendor_id = 0xFFFF`, `device_id =
-> 0x0001`, used above) is a **development value, not a PI-assigned ID**. Replace it via
-> `.identity(vendor_id, device_id)` before any deployment outside the lab.
+| Area | Module | Status |
+|---|---|---|
+| L2 framing, `AF_PACKET` transport, BPF filters, mock | `eth` | ✅ |
+| DCP Identify (name / all), Set‑IP | `dcp` | ✅ — Set‑name, Signal, Reset‑to‑factory: see Limitations |
+| DCE‑RPC CL codec, UDP transport | `rpc` | ✅ |
+| AR state machine, records, reconnect | `cm` | ✅ HIL |
+| Cyclic exchange, watchdog, RT thread | `rt` | ✅ HIL — 500 µs / 1 ms, 0 missed ticks |
+| Alarm channel (RTA, retries, ERR‑RTA) | `alarm` | ✅ HIL — byte‑exact vs a p‑net capture |
+| Channel diagnosis, problem indicator, replay | `diag` | ✅ HIL |
+| I&M0 read; I&M1‑3 read/write + file store | `im`, `cm::records` | ✅ I&M0 HIL; I&M1‑3 unit‑tested (see Limitations) |
+| Typed configuration, generated GSDML | `config`, `gsdml` | ✅ HIL — imported by TIA V21 |
+| Device facade, typed I/O | `api` | ✅ HIL |
+| pcap/pcapng replay harness (feature `capture`, default on) | `capture` | ✅ |
 
-## Clean‑room Approach
+Measured on the bench (Atom E3940, Debian 13 `PREEMPT_RT`, S7‑1515‑2 PN, TIA V21, X1 port at
+500 µs): tick lateness p99.99 13‑22 µs / max ≤ 66 µs, 12 h 51 soak with 0 anomalies over 79.7 M
+application samples, controller‑side abort detected in 0.65 ms on device stop. Full reports:
+[`docs/bench-pnet-device.md`](docs/bench-pnet-device.md).
 
-The implementation is derived from the **public IEC standard** (IEC 61158‑6‑10 for the
-protocol, 61158‑5‑10 for services, 61784‑2‑3 for RT profiles) and from **Wireshark captures**
-of real traffic. Reference frames ("golden frames") and their provenance are documented in
-[`docs/dcp-golden-frames.md`](docs/dcp-golden-frames.md). No third-party copyleft code is
-included.
+## Limitations (0.1)
+
+- **No DCP Set‑NameOfStation, Signal (LED flash) or Reset‑to‑factory**: the station name comes
+  from the configuration; TIA's *Assign PROFINET device name* is not served yet.
+- **No process alarms** (OB40), manufacturer‑specific diagnosis codes, plug/pull alarms,
+  `ModuleDiffBlock`, or diagnosis record reads (`0x800x`, `0xF8xx` — answered "invalid index").
+- **I&M1‑3 writes were never issued by TIA V21** to this device (GSDML `PNIO_Version="V2.3"`);
+  the write path is unit‑tested only.
+- **RT class 1 only**: no IRT, no MRP, no LLDP/PTP topology (the V2.31+ GSDML profile).
+- **Linux only**, single AR, development Vendor ID — **not PI‑certified**.
+
+## Architecture
+
+Pure Rust, four runtime dependencies (`libc`, `nix`, `log`, `thiserror`; `pcap-file` behind the
+`capture` feature). Everything on the wire is big‑endian, exactly as in Siemens memory. Two
+threads: an **acyclic** loop (DCP, RPC/AR, alarms, records) and a **real‑time** loop (cyclic
+frames only — one atomic load, no allocation, no lock held across a syscall) that share a
+per‑cycle‑consistent I/O image. `unsafe` is confined to the raw‑socket and scheduler modules
+(`eth::afpacket`, `eth::poll`, `rt::sched`, `rt::runner`); the rest of the crate is
+`#![deny(unsafe_code)]`.
+
+Design documents: [`docs/design/`](docs/design/) — the overall device design and one design note
+per subsystem (AR, cyclic exchange, 1 ms determinism, configuration/GSDML/API, alarms/diagnosis/I&M).
+
+## Clean‑room approach
+
+Derived from the **public IEC standards** (IEC 61158‑6‑10 protocol, 61158‑5‑10 services,
+61784‑2‑3 RT profiles) and from **Wireshark captures** of real traffic. Every frame the device
+emits that has a real counterpart is pinned byte‑exact as a "golden frame" with its provenance
+([`docs/dcp-golden-frames.md`](docs/dcp-golden-frames.md),
+[`docs/cm-golden-frames.md`](docs/cm-golden-frames.md),
+[`docs/alarm-golden-frames.md`](docs/alarm-golden-frames.md)). No copyleft code is included.
 
 ## Documentation
 
-- Design: [`docs/superpowers/specs/`](docs/superpowers/specs/)
-- Implementation plans (TDD, task by task): [`docs/superpowers/plans/`](docs/superpowers/plans/)
-- Typed configuration, generated GSDML, import/validation in TIA:
-  [`docs/gsdml.md`](docs/gsdml.md)
-- Test benches: [`docs/bench-capture-protocol.md`](docs/bench-capture-protocol.md),
-  [`docs/bench-pnet-device.md`](docs/bench-pnet-device.md)
-- 1 ms HIL campaign scripts and usage: [`bench/README.md`](bench/README.md)
+- [`CHANGELOG.md`](CHANGELOG.md) — releases and known limitations
+- [`docs/design/`](docs/design/) — design documents; [`docs/plans/`](docs/plans/) — the
+  task‑by‑task implementation plans they were built from
+- [`docs/gsdml.md`](docs/gsdml.md) — typed configuration, generated GSDML, TIA import, XSD validation
+- [`docs/bench-pnet-device.md`](docs/bench-pnet-device.md) — bench setup and every HIL report;
+  [`bench/README.md`](bench/README.md) — campaign scripts
+- [`FOLLOWUPS.md`](FOLLOWUPS.md) — open points, by subsystem
+- [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ## Roadmap
 
-`cm` (AR) ✅ → `rt` (cyclic exchange) ✅ → determinism (1 ms, `PREEMPT_RT`) ✅ → Plan 7bis
-(L2-pair isolation) ✅ → `config`/GSDML/typed API (Plan 6) ✅ → `alarm`/`diag`/`im` (Plan 5) ✅
-merged (`3508a34`), HIL 2026-08-31: 5/6 checks passed, TIA V21 issued no I&M1-3 Write under `PNIO_Version="V2.3"`
-— see `docs/bench-pnet-device.md` §6i →
-**next: the V2.31+ GSDML profile (`LLDP_NoD_Supported`, `PTP_BoundarySupported`/
-`DCP_BoundarySupported`, `ResetToFactoryModes`, `CertificationInfo`) and process alarms**.
-`PACKET_MMAP`/busy-poll stays deferred, only needed if a future campaign under the original
-CPU-0-2 load layout still needs the p99.99 budget. Details in the plans above.
+0.1 (this): CC‑A device with alarms, diagnosis and I&M, validated on an S7‑1500. Next: the
+V2.31+ GSDML profile (LLDP, PTP/DCP boundaries, reset‑to‑factory, certification info), DCP
+Set‑name/Signal, process alarms, then the 250 µs work (`PACKET_MMAP`/busy‑poll).
 
 ## License
 
-Your choice: [MIT](LICENSE-MIT) or [Apache‑2.0](LICENSE-APACHE)
-(`SPDX: MIT OR Apache-2.0`).
-
+Your choice: [MIT](LICENSE-MIT) or [Apache‑2.0](LICENSE-APACHE) (`SPDX: MIT OR Apache-2.0`).
 Unless stated otherwise, any contribution submitted for inclusion is under this dual license.

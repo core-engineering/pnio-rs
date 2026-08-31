@@ -1018,7 +1018,7 @@ effect. Loading our responder on HIL needs a second host on the segment — open
 
 ## 6i. HIL — alarms, diagnosis and I&M (Plan 5)
 
-Procedure for the Plan 5 acceptance criteria (spec §6, `docs/superpowers/specs/2026-08-30-pnio-alarm-diag-im-design.md`):
+Procedure for the Plan 5 acceptance criteria (spec §6, `docs/design/2026-08-30-pnio-alarm-diag-im-design.md`):
 the six checks below, to be run once against a real S7-1500 with our own GSDML. This section is
 the checklist and the exact commands; results filled in from the **2026-08-31 session** (X1, 500 µs,
 DGS-1008P in line, binary md5 `05e869f2` = `main` 3508a34, capture `captures/plan5-20260830/plan5-hil-20260831.pcapng`).

@@ -1359,6 +1359,7 @@ mod tests {
     /// A pipe's read end that is never written to: `poll(2)` waits the full timeout on it.
     struct NeverReadable(std::os::fd::RawFd);
     impl NeverReadable {
+        #[allow(unsafe_code)] // test-only pipe(2); the crate forbids `unsafe` outside eth/rt
         fn new() -> Self {
             let mut fds = [0; 2];
             // Safety: `fds` is a valid 2-element array; `pipe` fills it or fails.

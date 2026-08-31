@@ -36,6 +36,10 @@
 //! assert!(resp.is_some());
 //! ```
 
+// `unsafe` is confined to the raw-socket / scheduler layer: `eth::afpacket`, `eth::poll`,
+// `rt::sched`, `rt::runner`. Every other module is checked by the compiler to contain none.
+#![deny(unsafe_code)]
+
 pub mod alarm;
 #[cfg(target_os = "linux")]
 pub mod api;
