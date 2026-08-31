@@ -21,21 +21,33 @@ pub struct Slot(pub u16);
 /// (the controller's `%I`), `Output` = controller → device (its `%Q`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
+    /// Device → controller (the controller's `%I`).
     Input,
+    /// Controller → device (the controller's `%Q`).
     Output,
+    /// Both: the submodule declares fields in each direction.
     InputOutput,
 }
 
 /// One submodule: an ordered list of input fields and/or output fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmoduleSpec {
+    /// Slot this submodule is plugged into.
     pub slot: Slot,
+    /// Name reported in the model/GSDML; auto-generated (`in<slot>`/`out<slot>`) by
+    /// [`DeviceConfigBuilder::input`]/[`DeviceConfigBuilder::output`], or given
+    /// explicitly to [`DeviceConfigBuilder::submodule`].
     pub name: String,
+    /// Input fields (device → controller), in declaration order.
     pub inputs: Vec<FieldType>,
+    /// Output fields (controller → device), in declaration order.
     pub outputs: Vec<FieldType>,
 }
 
 impl SubmoduleSpec {
+    /// [`Direction::Input`] if only `inputs` is non-empty, [`Direction::Output`] if
+    /// only `outputs` is, [`Direction::InputOutput`] otherwise (including the
+    /// pathological case where both are empty).
     pub fn direction(&self) -> Direction {
         match (self.inputs.is_empty(), self.outputs.is_empty()) {
             (false, true) => Direction::Input,
@@ -49,37 +61,66 @@ impl SubmoduleSpec {
 /// `0` for byte types) and type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FieldRef {
+    /// Byte offset within the submodule's data.
     pub byte: u16,
+    /// Bit offset within `byte`, LSB-first; always `0` for byte-typed fields.
     pub bit: u8,
+    /// The field's type.
     pub ty: FieldType,
 }
 
+/// Errors from [`DeviceConfigBuilder::build`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
+    /// A submodule was declared at slot 0, which is reserved for the DAP.
     #[error("slot 0 is the DAP and cannot carry process data")]
     SlotZeroReserved,
+    /// Two submodules were declared at the same slot.
     #[error("slot {0} declared twice")]
     DuplicateSlot(u16),
+    /// A submodule was declared with no input fields and no output fields.
     #[error("slot {0} has neither inputs nor outputs")]
     EmptySubmodule(u16),
+    /// The builder has no submodule at all.
     #[error("no submodule declared")]
     NoSubmodule,
+    /// One submodule's byte layout, in one direction, exceeds
+    /// [`MAX_SUBMODULE_BYTES`].
     #[error("slot {slot}: {bytes} bytes exceed the {max}-byte submodule limit")]
-    TooLong { slot: u16, bytes: u32, max: u16 },
+    TooLong {
+        /// Slot that overflowed.
+        slot: u16,
+        /// Its byte length in that direction.
+        bytes: u32,
+        /// The limit, i.e. [`MAX_SUBMODULE_BYTES`].
+        max: u16,
+    },
+    /// The station name fails the PROFINET name-of-station rule — see
+    /// `normalize_station_name`'s doc for the exact grammar.
     #[error("station name {0:?} is not a valid PROFINET name of station")]
     BadStationName(String),
+    /// [`DeviceConfigBuilder::min_device_interval`] was given a value other than 16
+    /// or 32.
     #[error("min device interval {0} is not one of 16, 32")]
     BadInterval(u16),
+    /// [`DeviceConfigBuilder::identity`] was given a zero `vendor_id`.
     #[error("vendor id must be non-zero")]
     BadIdentity,
+    /// The sum of all submodules' C-SDU, in one direction (including the DAP/IOPS/IOCS
+    /// overhead — see `cr_lengths`), exceeds the 1440-byte RT frame budget even though
+    /// every individual submodule fit under [`MAX_SUBMODULE_BYTES`].
     #[error(
         "total {direction:?} C-SDU is {bytes} bytes, exceeding the {max}-byte RT frame budget"
     )]
     TooLongTotal {
+        /// The direction that overflowed.
         direction: Direction,
+        /// Its total C-SDU length.
         bytes: u32,
+        /// The limit, i.e. [`MAX_SUBMODULE_BYTES`].
         max: u16,
     },
+    /// The declared or defaulted I&M0 identity failed [`Im0::validate`].
     #[error("invalid I&M0 identity: {0}")]
     Im(#[from] ImError),
 }
@@ -171,6 +212,9 @@ pub struct DeviceConfigBuilder {
 }
 
 impl DeviceConfig {
+    /// Starts a builder with the given station name and every other field at its
+    /// default (station type `"pnio device"`, vendor/device id `0xFFFF`/`0x0001`,
+    /// 1 ms `min_device_interval`, no submodules).
     pub fn builder(station_name: &str) -> DeviceConfigBuilder {
         DeviceConfigBuilder {
             station_name: station_name.to_string(),
@@ -183,24 +227,33 @@ impl DeviceConfig {
         }
     }
 
+    /// The normalized station name (see `normalize_station_name`), as answered on the
+    /// wire by DCP.
     pub fn station_name(&self) -> &str {
         &self.station_name
     }
+    /// The station type ([`DeviceConfigBuilder::station_type`]).
     pub fn station_type(&self) -> &str {
         &self.station_type
     }
+    /// The PROFINET vendor ID.
     pub fn vendor_id(&self) -> u16 {
         self.vendor_id
     }
+    /// The PROFINET device ID.
     pub fn device_id(&self) -> u16 {
         self.device_id
     }
+    /// The AR's cyclic update time, in units of 31.25 µs — see
+    /// [`DeviceConfigBuilder::min_device_interval`].
     pub fn min_device_interval(&self) -> u16 {
         self.min_device_interval
     }
+    /// Every declared submodule, sorted by slot.
     pub fn submodules(&self) -> &[SubmoduleSpec] {
         &self.submodules
     }
+    /// The device's I&M0 identity.
     pub fn im0(&self) -> &Im0 {
         &self.im0
     }
@@ -209,6 +262,7 @@ impl DeviceConfig {
         self.submodules.iter().position(|s| s.slot == slot)
     }
 
+    /// The declared submodule at `slot`, if any.
     pub fn submodule(&self, slot: Slot) -> Option<&SubmoduleSpec> {
         self.index_of(slot).map(|i| &self.submodules[i])
     }
@@ -224,14 +278,20 @@ impl DeviceConfig {
         }
     }
 
+    /// The [`FieldRef`] at `index` in one direction of a slot, or `None` if the slot,
+    /// direction or index doesn't resolve — see [`DeviceConfig::fields`].
     pub fn field(&self, slot: Slot, dir: Direction, index: usize) -> Option<FieldRef> {
         self.fields(slot, dir)?.get(index).copied()
     }
 
+    /// The slot's input byte length (device → controller), or `None` if the slot
+    /// isn't declared. `0` if declared with no input fields.
     pub fn input_len(&self, slot: Slot) -> Option<u16> {
         self.index_of(slot).map(|i| self.derived[i].input_len)
     }
 
+    /// The slot's output byte length (controller → device), or `None` if the slot
+    /// isn't declared. `0` if declared with no output fields.
     pub fn output_len(&self, slot: Slot) -> Option<u16> {
         self.index_of(slot).map(|i| self.derived[i].output_len)
     }
@@ -335,10 +395,14 @@ impl DeviceConfig {
 }
 
 impl DeviceConfigBuilder {
+    /// The `TypeOfStation` reported by DCP (default `"pnio device"`); also the source
+    /// of the default I&M0 `OrderID` — see [`DeviceConfigBuilder::im0`].
     pub fn station_type(mut self, s: &str) -> Self {
         self.station_type = s.to_string();
         self
     }
+    /// PROFINET vendor/device ID pair (default `0xFFFF`/`0x0001`). `build()` rejects a
+    /// zero `vendor_id` with [`ConfigError::BadIdentity`].
     pub fn identity(mut self, vendor_id: u16, device_id: u16) -> Self {
         self.vendor_id = vendor_id;
         self.device_id = device_id;
@@ -372,6 +436,9 @@ impl DeviceConfigBuilder {
     pub fn output(self, slot: Slot, fields: &[FieldType]) -> Self {
         self.submodule(slot, &format!("out{}", slot.0), &[], fields)
     }
+    /// Declares one submodule at `slot` with both input and output fields (the
+    /// general form of [`DeviceConfigBuilder::input`]/[`DeviceConfigBuilder::output`],
+    /// for a mixed-direction submodule).
     pub fn submodule(
         mut self,
         slot: Slot,
