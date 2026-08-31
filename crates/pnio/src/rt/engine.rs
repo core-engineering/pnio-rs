@@ -46,7 +46,7 @@ pub enum RxVerdict {
         provider_run: bool,
         /// `State.Primary` from the frame's data status.
         primary: bool,
-        /// `DataState.Valid` from the frame's data status; `false` means the C-SDU was
+        /// The `State.DataValid` bit of the frame's data status; `false` means the C-SDU was
         /// *not* copied (stale data kept).
         data_valid: bool,
     },
@@ -82,7 +82,7 @@ pub struct RtStats {
     pub rx_ignored: AtomicU64,
     /// Frames [`RtEngine::on_frame`] dropped after being addressed to us but unusable; see [`DropReason`].
     pub rx_dropped: AtomicU64,
-    /// Accepted frames whose `DataState.Valid` bit was clear, so the C-SDU was not copied;
+    /// Accepted frames whose data-status `State.DataValid` bit was clear, so the C-SDU was not copied;
     /// also incremented by the RT runner for an oversized frame that cannot be ours.
     pub rx_invalid: AtomicU64,
     /// Accepted frames whose cycle counter did not advance from the previous one (stale or out-of-order).

@@ -1,6 +1,7 @@
 use thiserror::Error;
 
-/// Ethertype identifying PROFINET (RT cyclic, DCP, alarm, and this crate's own RPC framing).
+/// Ethertype identifying PROFINET frames on the wire: RT cyclic, DCP and alarms. (The
+/// DCE-RPC context management runs over plain UDP/IP, not this ethertype.)
 pub const ETHERTYPE_PROFINET: u16 = 0x8892;
 /// Ethertype identifying an 802.1Q VLAN tag.
 pub const ETHERTYPE_VLAN: u16 = 0x8100;

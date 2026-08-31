@@ -11,7 +11,7 @@ pub struct DcpBlock {
     pub option: u8,
     /// The block's `Suboption` byte, meaning depends on `option`.
     pub suboption: u8,
-    /// The 2-byte `BlockInfo` prefix, present on response/Get blocks; `None` on a
+    /// The 2-byte `BlockInfo` prefix, present on response blocks; `None` on a
     /// request filter block, which has no `BlockInfo`.
     pub block_info: Option<u16>,
     /// The block's payload, excluding any `BlockInfo` and the trailing pad byte.
@@ -19,7 +19,7 @@ pub struct DcpBlock {
 }
 
 /// Parse a contiguous sequence of DCP blocks. `has_block_info` selects whether
-/// each block's payload begins with a 2-byte BlockInfo (true for response/get,
+/// each block's payload begins with a 2-byte BlockInfo (true for responses,
 /// false for request filter blocks).
 pub fn parse_blocks(buf: &[u8], has_block_info: bool) -> Result<Vec<DcpBlock>, DcpError> {
     let mut blocks = Vec::new();

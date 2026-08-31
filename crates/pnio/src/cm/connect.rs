@@ -147,7 +147,9 @@ pub struct IocrParams {
     pub send_clock_factor: u16,
     /// `ReductionRatio`: how many send-clock periods make up one cycle for this CR.
     pub reduction_ratio: u16,
-    /// `WatchdogFactor`: consumer watchdog window, in cycles.
+    /// `WatchdogFactor`: the controller's consumer watchdog, in cycles. Parsed and stored only:
+    /// this device's own consumer watchdog is derived from [`IocrParams::data_hold_factor`]
+    /// (see `rt::layout`).
     pub watchdog_factor: u16,
     /// `DataHoldFactor`: cycles the consumer holds the last valid data before declaring the watchdog expired.
     pub data_hold_factor: u16,

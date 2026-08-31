@@ -221,7 +221,7 @@ pub struct ArBlockReq {
     /// `ARProperties` bitfield (parsed but not decoded further by this crate).
     pub ar_properties: u32,
     /// `CMInitiatorActivityTimeoutFactor`, in units of `ACTIVITY_TIMEOUT_UNIT`
-    /// (100 for a 200-value on the bench, i.e. `activity_timeout_factor = 200`).
+    /// (100 ms per unit; the bench controller sends `activity_timeout_factor = 200`, i.e. 20 s).
     pub activity_timeout_factor: u16,
     /// `CMInitiatorUDPRTPort`; `0x8892` on the bench (the RT/DCP ethertype, not a real UDP port).
     pub initiator_udp_rt_port: u16,
@@ -290,7 +290,9 @@ pub struct IocrBlockReq {
     pub sequence: u16,
     /// `FrameSendOffset` (parsed, not used by this crate's layout).
     pub frame_send_offset: u32,
-    /// `WatchdogFactor`: consumer watchdog window, in cycles.
+    /// `WatchdogFactor`: the controller's consumer watchdog, in cycles. Parsed and stored only:
+    /// this device's own consumer watchdog is derived from `data_hold_factor` (see
+    /// `rt::layout`).
     pub watchdog_factor: u16,
     /// `DataHoldFactor`: cycles the consumer holds the last valid data before declaring the watchdog expired.
     pub data_hold_factor: u16,
