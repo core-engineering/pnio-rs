@@ -13,7 +13,7 @@ readme = "../../README.md"
 [dependencies]
 libc = "0.2"
 log = "0.4"
-nix = { version = "0.27", default-features = false, features = ["net", "socket", "poll"] }
+nix = { version = "0.31", default-features = false, features = ["net", "socket", "poll"] }
 pcap-file = { version = "2", optional = true }
 thiserror = "1"
 
