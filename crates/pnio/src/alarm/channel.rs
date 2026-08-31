@@ -51,7 +51,9 @@ pub struct AlarmReq {
     /// Caller-chosen id echoed back in `AlarmAction::Acked` so the caller can match
     /// its own request without the channel knowing anything about its origin.
     pub id: u32,
+    /// Which alarm channel (High/Low) to send it on.
     pub priority: Priority,
+    /// The AlarmNotification block to send.
     pub notification: AlarmNotification,
 }
 
@@ -62,7 +64,12 @@ pub enum AlarmAction {
     /// Send this complete Ethernet frame on the alarm channel.
     Send(Vec<u8>),
     /// The in-flight alarm `id` was acknowledged by the controller with `status`.
-    Acked { id: u32, status: PnioStatus },
+    Acked {
+        /// The [`AlarmReq::id`] of the acknowledged alarm.
+        id: u32,
+        /// Result reported by the controller's AlarmAck; `PnioStatus::OK` on success.
+        status: PnioStatus,
+    },
     /// The AR must be aborted for `reason`.
     Abort(AbortReason),
     /// A frame arrived that this channel could not use (wrong source, malformed,
@@ -73,8 +80,15 @@ pub enum AlarmAction {
 /// Errors from [`AlarmChannel::enqueue`].
 #[derive(Debug, Error, PartialEq)]
 pub enum AlarmError {
+    /// The notification's block length would exceed the AR's negotiated
+    /// `MaxAlarmDataLength`; the alarm was refused before it touched the wire.
     #[error("alarm data {len} bytes exceeds the negotiated {max}")]
-    TooLong { len: usize, max: u16 },
+    TooLong {
+        /// The notification block's would-be length in bytes.
+        len: usize,
+        /// The AR's negotiated `MaxAlarmDataLength`.
+        max: u16,
+    },
 }
 
 /// Running counters, queryable by the caller for diagnostics/metrics.
@@ -144,6 +158,8 @@ pub struct AlarmChannel {
 }
 
 impl AlarmChannel {
+    /// A fresh, idle channel for `cfg`: empty queue, no alarm in flight, sequence
+    /// counters at their initial values ([`super::rta::SEQ_INIT`] / [`super::rta::SEQ_NONE`]).
     pub fn new(cfg: AlarmChannelConfig) -> Self {
         AlarmChannel {
             cfg,
@@ -274,6 +290,7 @@ impl AlarmChannel {
         self.queue.len()
     }
 
+    /// A plain-value copy of this channel's running counters.
     pub fn stats(&self) -> AlarmStats {
         self.stats
     }

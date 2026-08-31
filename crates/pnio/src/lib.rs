@@ -43,7 +43,6 @@
 
 // Protocol modules not yet documented (doc pass B and later); their public items are exempt
 // from `missing_docs` until then.
-#[allow(missing_docs)]
 pub mod alarm;
 #[cfg(target_os = "linux")]
 pub mod api;

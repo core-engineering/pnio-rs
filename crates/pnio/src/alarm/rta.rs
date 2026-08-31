@@ -37,11 +37,15 @@ pub const USI_EXT_CHANNEL_DIAG: u16 = 0x8002;
 /// Which of the two alarm channels (VLAN priority / FrameID) a PDU travels on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
+    /// FrameID `0xFC01`, VLAN priority 6, TCI `0xC000`.
     High,
+    /// FrameID `0xFE01`, VLAN priority 5, TCI `0xA000`. ERR-RTA is always sent here,
+    /// regardless of which channel the aborted exchange used.
     Low,
 }
 
 impl Priority {
+    /// This channel's alarm FrameID: [`FRAME_ID_HIGH`] or [`FRAME_ID_LOW`].
     pub fn frame_id(self) -> u16 {
         match self {
             Priority::High => FRAME_ID_HIGH,
@@ -49,6 +53,7 @@ impl Priority {
         }
     }
 
+    /// This channel's VLAN TCI: [`TCI_HIGH`] or [`TCI_LOW`].
     pub fn tci(self) -> u16 {
         match self {
             Priority::High => TCI_HIGH,
@@ -60,24 +65,37 @@ impl Priority {
 /// RTA-PDU `PDUType` (low nibble of the type/version byte).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PduType {
+    /// Carries one PNIO block (`AlarmNotification` or `AlarmAck`); `VarPartLen` is the block's length.
     Data = 1,
+    /// Negative acknowledgement of the last DATA received; empty `VarPartLen`.
     Nack = 2,
+    /// Transport-level acknowledgement of the last DATA received; empty `VarPartLen`.
     Ack = 3,
+    /// Aborts the alarm exchange; `VarPartLen` 4, carrying a [`PnioStatus`].
     Err = 4,
 }
 
 /// The 12-byte RTA-PDU header that follows the alarm FrameID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RtaHeader {
+    /// `AlarmDstEndpoint`: the peer's `LocalAlarmReference` (the CPU sends `0x0000`).
     pub dst_ref: u16,
+    /// `AlarmSrcEndpoint`: our `LocalAlarmReference` (we answer `0x0000`).
     pub src_ref: u16,
+    /// `PDUType`, low nibble of byte 4; the high nibble is always the RTA-PDU version (1).
     pub pdu_type: PduType,
+    /// `AddFlags` bit 4: transport ack requested (1 on DATA, 0 on ACK/ERR).
     pub tack: bool,
+    /// `SendSeqNum`: this side's DATA sequence counter — [`SEQ_INIT`] before any DATA has
+    /// been sent, then `0x0000, 0x0001, …`, wrapping after `0x7FFF`.
     pub send_seq: u16,
+    /// `AckSeqNum`: the last DATA sequence accepted from the peer — [`SEQ_NONE`] before any
+    /// DATA has been accepted.
     pub ack_seq: u16,
 }
 
 impl RtaHeader {
+    /// Fixed on-wire length of the RTA-PDU header, in bytes.
     pub const LEN: usize = 12;
 
     /// Parses the 12-byte header; returns `(header, var_part_len)`.
@@ -129,22 +147,36 @@ impl RtaHeader {
 /// `AlarmType` field of an AlarmNotification/AlarmAck.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlarmType {
+    /// `AlarmType` 0x0001 — a channel or extended-channel diagnosis appeared.
     Diagnosis,
+    /// `AlarmType` 0x0002 — a manufacturer-specific process alarm.
     Process,
+    /// `AlarmType` 0x0003 — a submodule was pulled.
     Pull,
+    /// `AlarmType` 0x0004 — a submodule was plugged.
     Plug,
+    /// `AlarmType` 0x0005 — device status changed.
     Status,
+    /// `AlarmType` 0x0006 — a submodule's identification changed.
     Update,
+    /// `AlarmType` 0x0007 — redundancy state changed.
     Redundancy,
+    /// `AlarmType` 0x0008 — the AR is now controlled by a supervisor.
     ControlledBySupervisor,
+    /// `AlarmType` 0x0009 — the AR was released.
     Released,
+    /// `AlarmType` 0x000A — the wrong submodule was plugged into a slot.
     PlugWrongSubmodule,
+    /// `AlarmType` 0x000B — a previously missing submodule returned.
     ReturnOfSubmodule,
+    /// `AlarmType` 0x000C — a channel or extended-channel diagnosis cleared.
     DiagnosisDisappears,
+    /// Any `AlarmType` value not otherwise known, carried verbatim.
     Other(u16),
 }
 
 impl AlarmType {
+    /// Decodes an `AlarmType` field; an unrecognized value becomes [`AlarmType::Other`].
     pub fn from_u16(v: u16) -> Self {
         match v {
             0x0001 => AlarmType::Diagnosis,
@@ -163,6 +195,7 @@ impl AlarmType {
         }
     }
 
+    /// Inverse of [`AlarmType::from_u16`].
     pub fn to_u16(self) -> u16 {
         match self {
             AlarmType::Diagnosis => 0x0001,
@@ -189,14 +222,20 @@ impl AlarmType {
 /// `AlarmSpecifier` field: per-AR sequence number plus diagnosis-state flags.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AlarmSpecifier {
+    /// Bits 0-10: per-AR sequence number, starting at 0 and wrapping at `0x7FF`.
     pub sequence: u16,
+    /// Bit 11: a channel diagnosis exists on this submodule after this alarm.
     pub channel_diag: bool,
+    /// Bit 12: a manufacturer-specific diagnosis exists on this submodule after this alarm.
     pub manufacturer_diag: bool,
+    /// Bit 13: any diagnosis exists on this submodule after this alarm.
     pub submodule_diag: bool,
+    /// Bit 15: any diagnosis exists anywhere on the AR after this alarm.
     pub ar_diag: bool,
 }
 
 impl AlarmSpecifier {
+    /// Decodes an `AlarmSpecifier` u16 field.
     pub fn from_u16(raw: u16) -> Self {
         AlarmSpecifier {
             sequence: raw & 0x07FF,
@@ -207,6 +246,7 @@ impl AlarmSpecifier {
         }
     }
 
+    /// Inverse of [`AlarmSpecifier::from_u16`].
     pub fn to_u16(self) -> u16 {
         (self.sequence & 0x07FF)
             | (self.channel_diag as u16) << 11
@@ -223,32 +263,47 @@ impl AlarmSpecifier {
 /// `ChannelProperties.Maintenance` (bits 9-10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Maintenance {
+    /// `Maintenance` 00 — a fault: the channel is not usable.
     Fault = 0,
+    /// `Maintenance` 01 — maintenance is required soon.
     Required = 1,
+    /// `Maintenance` 10 — maintenance is demanded now.
     Demanded = 2,
+    /// `Maintenance` 11 — reserved/qualified (not produced by this crate; seen on the wire as a placeholder value).
     Qualified = 3,
 }
 
 /// `ChannelProperties.Specifier` (bits 11-12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Specifier {
+    /// `Specifier` 00 — every diagnosis on this channel disappears (p-net's encoding of a
+    /// standard-diagnosis removal, e.g. `properties 0x2001` on the bench).
     AllDisappear = 0,
+    /// `Specifier` 01 — this diagnosis appears.
     Appears = 1,
+    /// `Specifier` 10 — this diagnosis disappears and it was the last one on the channel.
     Disappears = 2,
+    /// `Specifier` 11 — this diagnosis disappears but other diagnoses remain on the channel.
     DisappearsOthersRemain = 3,
 }
 
 /// `ChannelProperties` u16 bitfield carried by `ChannelDiagnosis`/`ExtChannelDiagnosis`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelProperties {
+    /// Bits 0-7: manufacturer-specific channel type (this crate always sends 0 = unspecified).
     pub type_: u8,
+    /// Bit 8: whether this is an accumulative (summary) diagnosis.
     pub accumulative: bool,
+    /// Bits 9-10: severity; see [`Maintenance`].
     pub maintenance: Maintenance,
+    /// Bits 11-12: appears/disappears state; see [`Specifier`].
     pub specifier: Specifier,
+    /// Bits 13-15: `0` manufacturer-specific, `1` input, `2` output, `3` input+output.
     pub direction: u8,
 }
 
 impl ChannelProperties {
+    /// Decodes a `ChannelProperties` u16 field.
     pub fn from_u16(raw: u16) -> Self {
         let maintenance = match (raw >> 9) & 0x3 {
             0 => Maintenance::Fault,
@@ -271,6 +326,7 @@ impl ChannelProperties {
         }
     }
 
+    /// Inverse of [`ChannelProperties::from_u16`].
     pub fn to_u16(self) -> u16 {
         self.type_ as u16
             | (self.accumulative as u16) << 8
@@ -283,8 +339,11 @@ impl ChannelProperties {
 /// `ChannelDiagnosis` USI `0x8000` payload (6 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelDiagnosis {
+    /// `ChannelNumber`; [`crate::diag::WHOLE_SUBMODULE`] (`0x8000`) means the whole submodule.
     pub channel: u16,
+    /// `ChannelProperties` bitfield.
     pub properties: ChannelProperties,
+    /// `ChannelErrorType`; see [`crate::diag::ChannelError`] for the codes this crate raises.
     pub error_type: u16,
 }
 
@@ -308,10 +367,15 @@ impl ChannelDiagnosis {
 /// `ExtChannelErrorType` and `ExtChannelAddValue`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtChannelDiagnosis {
+    /// `ChannelNumber`; [`crate::diag::WHOLE_SUBMODULE`] (`0x8000`) means the whole submodule.
     pub channel: u16,
+    /// `ChannelProperties` bitfield.
     pub properties: ChannelProperties,
+    /// `ChannelErrorType`; see [`crate::diag::ChannelError`] for the codes this crate raises.
     pub error_type: u16,
+    /// `ExtChannelErrorType`: manufacturer-specific detail code for `error_type`.
     pub ext_error_type: u16,
+    /// `ExtChannelAddValue`: manufacturer-specific additional value for `ext_error_type`.
     pub ext_add_value: u32,
 }
 
@@ -338,8 +402,11 @@ impl ExtChannelDiagnosis {
 /// The USI-specific user data carried by an `AlarmNotification`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserData {
+    /// USI [`USI_CHANNEL_DIAG`]: a 6-byte [`ChannelDiagnosis`].
     Channel(ChannelDiagnosis),
+    /// USI [`USI_EXT_CHANNEL_DIAG`]: a 12-byte [`ExtChannelDiagnosis`].
     ExtChannel(ExtChannelDiagnosis),
+    /// Any other USI, carried verbatim (e.g. process alarm payloads).
     Raw(Vec<u8>),
 }
 
@@ -350,50 +417,80 @@ pub enum UserData {
 /// AlarmNotification block body (BlockType `0x0001` High / `0x0002` Low).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlarmNotification {
+    /// What kind of event this alarm reports.
     pub alarm_type: AlarmType,
+    /// Application Process Identifier the alarm applies to (`0` for the device AP).
     pub api: u32,
+    /// Slot the alarm applies to.
     pub slot: u16,
+    /// Subslot the alarm applies to.
     pub subslot: u16,
+    /// The slot's module identity number.
     pub module_ident: u32,
+    /// The submodule's identity number.
     pub submodule_ident: u32,
+    /// Per-AR sequence number plus diagnosis-state flags.
     pub specifier: AlarmSpecifier,
+    /// User Structure Identifier selecting how `data` is interpreted; see [`UserData`].
     pub usi: u16,
+    /// USI-specific payload; see [`UserData`].
     pub data: UserData,
 }
 
 /// AlarmAck block body (BlockType `0x8001` High / `0x8002` Low).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlarmAck {
+    /// Echoes the acknowledged notification's `alarm_type`.
     pub alarm_type: AlarmType,
+    /// Echoes the acknowledged notification's `api`.
     pub api: u32,
+    /// Echoes the acknowledged notification's `slot`.
     pub slot: u16,
+    /// Echoes the acknowledged notification's `subslot`.
     pub subslot: u16,
+    /// Echoes the acknowledged notification's `specifier`.
     pub specifier: AlarmSpecifier,
+    /// Result of processing the alarm; `PnioStatus::OK` on success.
     pub status: PnioStatus,
 }
 
 /// The parsed content of an RTA DATA PDU's single PNIO block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RtaData {
+    /// BlockType `0x0001`/`0x0002`: an [`AlarmNotification`].
     Notification(AlarmNotification),
+    /// BlockType `0x8001`/`0x8002`: an [`AlarmAck`].
     Ack(AlarmAck),
-    Unknown { block_type: u16, body: Vec<u8> },
+    /// Any other block type, carried verbatim.
+    Unknown {
+        /// The block's `BlockType`.
+        block_type: u16,
+        /// The block's body, excluding the block header.
+        body: Vec<u8>,
+    },
 }
 
 /// The RTA-PDU body, keyed by `PduType`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RtaBody {
+    /// [`PduType::Data`]: one PNIO block.
     Data(RtaData),
+    /// [`PduType::Ack`]: transport-level acknowledgement, no payload.
     Ack,
+    /// [`PduType::Nack`]: negative acknowledgement, no payload.
     Nack,
+    /// [`PduType::Err`]: the exchange is aborted, with the reason.
     Err(PnioStatus),
 }
 
 /// A fully parsed/to-be-built alarm frame: channel, RTA header, and body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RtaPdu {
+    /// Which alarm channel (FrameID/VLAN priority) this PDU travels on.
     pub priority: Priority,
+    /// The 12-byte RTA-PDU header.
     pub header: RtaHeader,
+    /// The PDU's payload, keyed by `header.pdu_type`.
     pub body: RtaBody,
 }
 
@@ -401,22 +498,36 @@ pub struct RtaPdu {
 // Errors
 // ---------------------------------------------------------------------------------
 
+/// Errors from [`parse_frame`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RtaError {
+    /// The Ethernet header failed to parse; see [`EthError`].
     #[error("ethernet header: {0}")]
     Eth(#[from] EthError),
+    /// The frame's ethertype is not PROFINET, or its FrameID is not an alarm channel.
     #[error("not an alarm frame")]
     NotAlarm,
+    /// The frame is shorter than the RTA-PDU header, or (for `PduType::Err`) than the
+    /// 4-byte `PNIOStatus` its `VarPartLen` promises.
     #[error("frame too short")]
     TooShort,
+    /// The RTA-PDU type nibble is not 1 (DATA), 2 (NACK), 3 (ACK) or 4 (ERR).
     #[error("bad RTA PDU type {0:#x}")]
     BadPduType(u8),
+    /// The RTA-PDU version nibble is not 1.
     #[error("bad RTA-PDU version {0}")]
     BadVersion(u8),
+    /// The DATA PDU's PNIO block failed to parse; see [`BlockError`].
     #[error("block error: {0}")]
     Block(#[from] BlockError),
+    /// `VarPartLen` declares more bytes than the frame actually has left.
     #[error("bad var part length: declared {declared}, available {available}")]
-    BadVarPartLen { declared: u16, available: usize },
+    BadVarPartLen {
+        /// `VarPartLen` as declared in the RTA-PDU header.
+        declared: u16,
+        /// Bytes actually remaining in the frame after the header.
+        available: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------------
