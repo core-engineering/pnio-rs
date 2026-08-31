@@ -16,12 +16,19 @@ pub const INDEX_MULTIPLE_WRITE: u16 = 0xe040;
 /// payload (the raw record data, before any nested parsing).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Record {
+    /// `Sequence Number`, echoed back unchanged in the matching response record.
     pub seq: u16,
+    /// The AR this record is written against.
     pub ar_uuid: Uuid,
+    /// Application Process Identifier.
     pub api: u32,
+    /// Target slot (`0xffff` on the outer `MultipleWrite` record).
     pub slot: u16,
+    /// Target subslot (`0xffff` on the outer `MultipleWrite` record).
     pub subslot: u16,
+    /// The record data index being written (e.g. [`INDEX_MULTIPLE_WRITE`], or an I&M index).
     pub index: u16,
+    /// The record's raw payload, `record_data_length` bytes, unparsed.
     pub data: Vec<u8>,
 }
 
@@ -31,6 +38,8 @@ pub struct Record {
 /// single record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WriteReq {
+    /// The request's records, in request order (see the type's doc for `MultipleWrite`
+    /// unwrapping).
     pub records: Vec<Record>,
 }
 

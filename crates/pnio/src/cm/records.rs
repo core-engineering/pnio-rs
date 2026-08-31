@@ -18,13 +18,21 @@ use crate::rpc::{Drep, Uuid};
 /// index)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadReq {
+    /// `Sequence Number`, echoed back unchanged in the matching response.
     pub seq: u16,
+    /// The AR this record read is issued against.
     pub ar_uuid: Uuid,
+    /// Application Process Identifier.
     pub api: u32,
+    /// Target slot.
     pub slot: u16,
+    /// Target subslot.
     pub subslot: u16,
+    /// The record data index being read (e.g. [`crate::im::INDEX_IM0`]).
     pub index: u16,
+    /// `RecordDataLength`: the buffer size the requester is prepared to receive.
     pub record_data_length: u32,
+    /// `TargetARUUID`, present but unused by this crate's read handling.
     pub target_ar_uuid: Uuid,
 }
 
@@ -87,8 +95,11 @@ pub fn build_read_res(req: &ReadReq, data: &[u8]) -> Vec<u8> {
 
 /// Everything [`read_record`] needs that is not in the request.
 pub struct RecordCtx<'a> {
+    /// The device's slot/submodule model, used to check `(slot, subslot)` is known.
     pub model: &'a DeviceModel,
+    /// The device identity answered for I&M0 reads.
     pub im0: &'a Im0,
+    /// The device-wide writable I&M1-3 store.
     pub im: &'a ImStore,
 }
 

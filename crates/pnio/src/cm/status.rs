@@ -6,9 +6,13 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ConnectBlock {
+    /// ARBlockReq — the controller's AR parameters.
     ArBlock = 1,
+    /// IOCRBlockReq — one of the controller's CR parameters.
     IocrBlock = 2,
+    /// ExpectedSubmoduleBlockReq — the controller's expected slot/submodule layout.
     ExpectedSubmodule = 3,
+    /// AlarmCRBlockReq — the controller's alarm CR parameters.
     AlarmCr = 4,
 }
 
@@ -21,30 +25,37 @@ impl PnioStatus {
     /// PNIOStatus.Code = 0: no error.
     pub const OK: PnioStatus = PnioStatus(0);
 
+    /// Packs the four status bytes big-endian into one `u32`.
     pub fn new(code: u8, decode: u8, code1: u8, code2: u8) -> PnioStatus {
         PnioStatus(u32::from_be_bytes([code, decode, code1, code2]))
     }
 
+    /// `PNIOStatus.Code` (bits 24-31): the error class, `0` = OK.
     pub fn code(&self) -> u8 {
         (self.0 >> 24) as u8
     }
 
+    /// `PNIOStatus.ErrorDecode` (bits 16-23): how `code1`/`code2` are to be interpreted.
     pub fn decode(&self) -> u8 {
         (self.0 >> 16) as u8
     }
 
+    /// `PNIOStatus.ErrorCode1` (bits 8-15).
     pub fn code1(&self) -> u8 {
         (self.0 >> 8) as u8
     }
 
+    /// `PNIOStatus.ErrorCode2` (bits 0-7).
     pub fn code2(&self) -> u8 {
         self.0 as u8
     }
 
+    /// True if `Code == 0` (no error).
     pub fn is_ok(&self) -> bool {
         self.0 == 0
     }
 
+    /// The raw big-endian-packed `u32` as it appears on the wire.
     pub fn to_u32(&self) -> u32 {
         self.0
     }

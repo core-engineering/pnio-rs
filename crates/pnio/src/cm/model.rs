@@ -12,27 +12,46 @@ use crate::rpc::Uuid;
 /// Connect (station name, MAC, alarm sizing) and to build the PNIO object UUID.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceModel {
+    /// `VendorID`, part of the PNIO object UUID and I&M0's identity.
     pub vendor_id: u16,
+    /// `DeviceID`, part of the PNIO object UUID and I&M0's identity.
     pub device_id: u16,
+    /// `DeviceInstance`, part of the PNIO object UUID.
     pub instance: u16,
+    /// `NameOfStation`, matched against the Connect request's station name.
     pub station_name: String,
+    /// This device's Ethernet MAC address.
     pub mac: MacAddr,
+    /// Value this device answers with in the AlarmCR negotiation
+    /// (`AlarmCRBlockRes.MaxAlarmDataLength`); the actual cap applied to outgoing
+    /// alarms is the controller's own requested value, not this one (see
+    /// [`ArParams::max_alarm_data_length_remote`](crate::cm::connect::ArParams::max_alarm_data_length_remote)).
     pub max_alarm_data_length: u16,
+    /// The device's slots, in any order; slot `0` is the DAP.
     pub slots: Vec<SlotModel>,
 }
 
+/// One slot's plugged module and its submodules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlotModel {
+    /// Slot number.
     pub slot: u16,
+    /// The plugged module's identity number (`ModuleIdentNumber`).
     pub module_ident: u32,
+    /// The module's submodules, in any order.
     pub submodules: Vec<SubmoduleModel>,
 }
 
+/// One submodule's identity and IO data lengths.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubmoduleModel {
+    /// Subslot number.
     pub subslot: u16,
+    /// The plugged submodule's identity number (`SubmoduleIdentNumber`).
     pub submodule_ident: u32,
+    /// Input (device-to-controller) data length in bytes; `0` if this submodule has no input data.
     pub input_len: u16,
+    /// Output (controller-to-device) data length in bytes; `0` if this submodule has no output data.
     pub output_len: u16,
 }
 

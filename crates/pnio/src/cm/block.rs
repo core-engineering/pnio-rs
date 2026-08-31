@@ -8,23 +8,41 @@ use crate::rpc::{Drep, Uuid};
 
 /// Block type constants (`BlockType` field), request and response.
 pub mod ty {
+    /// ARBlockReq — the controller's AR parameters (Connect request).
     pub const AR_BLOCK_REQ: u16 = 0x0101;
+    /// IOCRBlockReq — one of the controller's CR parameters (Connect request).
     pub const IOCR_BLOCK_REQ: u16 = 0x0102;
+    /// AlarmCRBlockReq — the controller's alarm CR parameters (Connect request).
     pub const ALARM_CR_BLOCK_REQ: u16 = 0x0103;
+    /// ExpectedSubmoduleBlockReq — the controller's expected slot/submodule layout (Connect request).
     pub const EXPECTED_SUBMODULE_BLOCK_REQ: u16 = 0x0104;
+    /// IODWriteReqHeader — one parameter-write record (Write request).
     pub const IOD_WRITE_REQ_HEADER: u16 = 0x0008;
+    /// IODReadReqHeader — one record-read request (Read/ReadImplicit request).
     pub const IOD_READ_REQ_HEADER: u16 = 0x0009;
+    /// IODControlReq, `command = PrmEnd` — end of parameterization (Control request).
     pub const IOD_CONTROL_REQ_PRM_END: u16 = 0x0110;
+    /// IODControlReq, `command = ApplicationReady` — device-initiated, ready for cyclic data (Control request).
     pub const IOX_BLOCK_REQ_APP_READY: u16 = 0x0112;
+    /// IODControlReq, `command = Release` — release the AR (Control request).
     pub const RELEASE_BLOCK_REQ: u16 = 0x0114;
+    /// ARBlockRes — this device's AR parameters (Connect response).
     pub const AR_BLOCK_RES: u16 = 0x8101;
+    /// IOCRBlockRes — this device's CR parameters (Connect response, e.g. a device-selected FrameID).
     pub const IOCR_BLOCK_RES: u16 = 0x8102;
+    /// AlarmCRBlockRes — this device's alarm CR parameters (Connect response).
     pub const ALARM_CR_BLOCK_RES: u16 = 0x8103;
+    /// ARServerBlockRes — this device's station name (Connect response).
     pub const AR_SERVER_BLOCK_RES: u16 = 0x8106;
+    /// IODWriteResHeader — the answer to one write record (Write response).
     pub const IOD_WRITE_RES_HEADER: u16 = 0x8008;
+    /// IODReadResHeader — the answer to a record-read request, followed by the record itself (Read response).
     pub const IOD_READ_RES_HEADER: u16 = 0x8009;
+    /// IODControlRes, `command = Done` answering PrmEnd (Control response).
     pub const IOD_CONTROL_RES_PRM_END: u16 = 0x8110;
+    /// IODControlRes, `command = Done` answering ApplicationReady (Control response).
     pub const IOX_BLOCK_RES_APP_READY: u16 = 0x8112;
+    /// IODControlRes, `command = Done` answering Release (Control response).
     pub const RELEASE_BLOCK_RES: u16 = 0x8114;
 }
 
@@ -40,10 +58,12 @@ pub struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
+    /// A cursor positioned at the start of `buf`.
     pub fn new(buf: &'a [u8]) -> Self {
         Cursor { buf, pos: 0 }
     }
 
+    /// Bytes left unread.
     pub fn remaining(&self) -> usize {
         self.buf.len() - self.pos
     }
@@ -59,6 +79,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    /// Reads one byte, advancing the cursor by 1.
     pub fn u8(&mut self) -> Result<u8, BlockError> {
         self.need(1)?;
         let v = self.buf[self.pos];
@@ -66,6 +87,7 @@ impl<'a> Cursor<'a> {
         Ok(v)
     }
 
+    /// Reads a big-endian `u16`, advancing the cursor by 2.
     pub fn u16(&mut self) -> Result<u16, BlockError> {
         self.need(2)?;
         let v = u16::from_be_bytes([self.buf[self.pos], self.buf[self.pos + 1]]);
@@ -73,6 +95,7 @@ impl<'a> Cursor<'a> {
         Ok(v)
     }
 
+    /// Reads a big-endian `u32`, advancing the cursor by 4.
     pub fn u32(&mut self) -> Result<u32, BlockError> {
         self.need(4)?;
         let v = u32::from_be_bytes(self.buf[self.pos..self.pos + 4].try_into().unwrap());
@@ -80,6 +103,7 @@ impl<'a> Cursor<'a> {
         Ok(v)
     }
 
+    /// Reads `n` raw bytes, advancing the cursor by `n`.
     pub fn bytes(&mut self, n: usize) -> Result<&'a [u8], BlockError> {
         self.need(n)?;
         let v = &self.buf[self.pos..self.pos + n];
@@ -87,11 +111,13 @@ impl<'a> Cursor<'a> {
         Ok(v)
     }
 
+    /// Reads a 16-byte UUID (big-endian on the wire), advancing the cursor by 16.
     pub fn uuid(&mut self) -> Result<Uuid, BlockError> {
         let b = self.bytes(16)?;
         Uuid::read(b, Drep::BIG).ok_or(BlockError::Malformed("uuid"))
     }
 
+    /// Reads a 6-byte Ethernet MAC address, advancing the cursor by 6.
     pub fn mac(&mut self) -> Result<MacAddr, BlockError> {
         let b = self.bytes(6)?;
         Ok(MacAddr([b[0], b[1], b[2], b[3], b[4], b[5]]))
@@ -105,13 +131,19 @@ impl<'a> Cursor<'a> {
 /// The 6-byte header shared by every PNIO block: type, length, and version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockHeader {
+    /// Identifies the block's shape; see [`ty`].
     pub block_type: u16,
+    /// Bytes that follow, counting the 2 version bytes but not the 4-byte
+    /// type/length header itself (so the body is `block_length - 2` bytes).
     pub block_length: u16,
+    /// Block version major number; this crate requires `1`.
     pub version_high: u8,
+    /// Block version minor number; this crate requires `0`.
     pub version_low: u8,
 }
 
 impl BlockHeader {
+    /// Fixed on-wire length of the block header, in bytes.
     pub const LEN: usize = 6;
 
     /// Parse one block header and return it along with its body (`block_length - 2`
@@ -173,16 +205,27 @@ impl BlockHeader {
 // ARBlockReq
 // ---------------------------------------------------------------------------------
 
+/// ARBlockReq (`BlockType` [`ty::AR_BLOCK_REQ`]) body: the controller's AR parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArBlockReq {
+    /// `ARType`; this crate requires `1` (IOCARSingle).
     pub ar_type: u16,
+    /// The AR's identifying UUID.
     pub ar_uuid: Uuid,
+    /// Session key for this AR, echoed on subsequent control exchanges.
     pub session_key: u16,
+    /// The controller's Ethernet MAC address.
     pub initiator_mac: MacAddr,
+    /// The controller's PNIO object UUID.
     pub initiator_object_uuid: Uuid,
+    /// `ARProperties` bitfield (parsed but not decoded further by this crate).
     pub ar_properties: u32,
+    /// `CMInitiatorActivityTimeoutFactor`, in units of `ACTIVITY_TIMEOUT_UNIT`
+    /// (100 for a 200-value on the bench, i.e. `activity_timeout_factor = 200`).
     pub activity_timeout_factor: u16,
+    /// `CMInitiatorUDPRTPort`; `0x8892` on the bench (the RT/DCP ethertype, not a real UDP port).
     pub initiator_udp_rt_port: u16,
+    /// `StationName` of the controller/AR.
     pub station_name: String,
 }
 
@@ -220,37 +263,64 @@ impl ArBlockReq {
 // IOCRBlockReq
 // ---------------------------------------------------------------------------------
 
+/// IOCRBlockReq (`BlockType` [`ty::IOCR_BLOCK_REQ`]) body: one Communication
+/// Relationship's requested parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IocrBlockReq {
+    /// `IOCRType`: `1` = Input CR, `2` = Output CR.
     pub iocr_type: u16,
+    /// `IOCRReference`, identifying this CR within the AR.
     pub reference: u16,
+    /// `LT` (LengthType/EtherType); `0x8892` (PROFINET) on the bench.
     pub lt: u16,
+    /// `IOCRProperties` bitfield (parsed but not decoded further by this crate).
     pub properties: u32,
+    /// Total C-SDU length in bytes requested for this CR.
     pub data_length: u16,
+    /// Requested `FrameID`; `0xFFFF` on an Output CR means device-selected (see
+    /// [`super::connect::FRAME_ID_DEVICE_SELECTS`]).
     pub frame_id: u16,
+    /// `SendClockFactor`: base send-clock multiplier (send clock = `send_clock_factor * 31.25 us`).
     pub send_clock_factor: u16,
+    /// `ReductionRatio`: how many send-clock periods make up one cycle for this CR.
     pub reduction_ratio: u16,
+    /// `Phase`: which cycle phase this CR is scheduled in (parsed, not used by this crate's layout).
     pub phase: u16,
+    /// `Sequence` (parsed, not used by this crate's layout).
     pub sequence: u16,
+    /// `FrameSendOffset` (parsed, not used by this crate's layout).
     pub frame_send_offset: u32,
+    /// `WatchdogFactor`: consumer watchdog window, in cycles.
     pub watchdog_factor: u16,
+    /// `DataHoldFactor`: cycles the consumer holds the last valid data before declaring the watchdog expired.
     pub data_hold_factor: u16,
+    /// `IOCRTagHeader`: the VLAN TCI negotiated for this CR.
     pub tag_header: u16,
+    /// `IOCRMulticastMACAdd` (parsed, unused for the unicast RTC1 exchange this crate implements).
     pub multicast_mac: MacAddr,
+    /// The CR's APIs, each with its IO data and IOCS objects; this crate requires exactly one.
     pub apis: Vec<IocrApi>,
 }
 
+/// One API's IO data and consumer-status objects within an [`IocrBlockReq`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct IocrApi {
+    /// Application Process Identifier (`0` for the device AP).
     pub api: u32,
+    /// IO data objects: one per submodule carrying data in this CR's direction.
     pub io_data: Vec<IocrObject>,
+    /// IOCS-only objects.
     pub iocs: Vec<IocrObject>,
 }
 
+/// One submodule's object placement within a CR's C-SDU, as requested by the controller.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IocrObject {
+    /// Slot of the submodule this object belongs to.
     pub slot: u16,
+    /// Subslot of the submodule this object belongs to.
     pub subslot: u16,
+    /// Byte offset in the CR's C-SDU where this object's data (or IOCS byte) starts.
     pub frame_offset: u16,
 }
 
@@ -322,33 +392,54 @@ impl IocrBlockReq {
 // ExpectedSubmoduleBlockReq
 // ---------------------------------------------------------------------------------
 
+/// ExpectedSubmoduleBlockReq (`BlockType` [`ty::EXPECTED_SUBMODULE_BLOCK_REQ`]) body:
+/// the controller's expected layout for one slot's API. The Connect request carries
+/// one of these per expected slot (5 on the bench: the DAP plus slots 1-4).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpectedSubmoduleBlockReq {
+    /// This block's (single) API entry; this crate expects exactly one.
     pub apis: Vec<ExpectedApi>,
 }
 
+/// One API's expected module and submodules within an [`ExpectedSubmoduleBlockReq`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpectedApi {
+    /// Application Process Identifier (`0` for the device AP).
     pub api: u32,
+    /// Slot the controller expects a module plugged into.
     pub slot: u16,
+    /// Expected `ModuleIdentNumber`; validated against the device model.
     pub module_ident: u32,
+    /// `ModuleProperties` bitfield (parsed but not decoded further by this crate).
     pub module_properties: u16,
+    /// The slot's expected submodules.
     pub submodules: Vec<ExpectedSubmodule>,
 }
 
+/// One expected submodule within an [`ExpectedApi`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpectedSubmodule {
+    /// Subslot the controller expects this submodule plugged into.
     pub subslot: u16,
+    /// Expected `SubmoduleIdentNumber`; validated against the device model.
     pub submodule_ident: u32,
+    /// `SubmoduleProperties`; bits 0-1 select which of `input`/`output` are present
+    /// (`0`/`1` input only, `2` output only, `3` both — see [`ExpectedSubmoduleBlockReq::parse`]).
     pub properties: u16,
+    /// Expected input data shape, present for properties type `0`, `1` or `3`.
     pub input: Option<DataDescription>,
+    /// Expected output data shape, present for properties type `2` or `3`.
     pub output: Option<DataDescription>,
 }
 
+/// One direction's expected data shape within an [`ExpectedSubmodule`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DataDescription {
+    /// Expected data length in bytes; validated against the device model's submodule length.
     pub data_length: u16,
+    /// Expected IOCS length in bytes (this crate always produces/expects `1`).
     pub length_iocs: u8,
+    /// Expected IOPS length in bytes (this crate always produces/expects `1`).
     pub length_iops: u8,
 }
 
@@ -432,16 +523,30 @@ impl ExpectedSubmoduleBlockReq {
 // AlarmCRBlockReq
 // ---------------------------------------------------------------------------------
 
+/// AlarmCRBlockReq (`BlockType` [`ty::ALARM_CR_BLOCK_REQ`]) body: the controller's
+/// alarm CR parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlarmCrBlockReq {
+    /// `AlarmCRType`; this crate requires `1`.
     pub alarm_cr_type: u16,
+    /// `LT` (LengthType/EtherType); `0x8892` (PROFINET) on the bench.
     pub lt: u16,
+    /// `AlarmCRProperties` bitfield (parsed but not decoded further by this crate).
     pub properties: u32,
+    /// `RTATimeoutFactor`: how long to wait for a transport ACK or content AlarmAck
+    /// before resending, in units defined by the standard.
     pub rta_timeout_factor: u16,
+    /// `RTARetries`: resends of an unacknowledged alarm before the channel aborts the AR.
     pub rta_retries: u16,
+    /// The controller's `LocalAlarmReference`, used as `AlarmDstEndpoint` on outgoing alarm frames.
     pub local_alarm_reference: u16,
+    /// `MaxAlarmDataLength` as the controller requested it (256 on the bench); this
+    /// crate answers with its own model value instead, not the smaller of the two
+    /// (see [`super::model::DeviceModel::max_alarm_data_length`]).
     pub max_alarm_data_length: u16,
+    /// `AlarmCRTagHeaderHigh`: the VLAN TCI negotiated for the High priority alarm channel.
     pub tag_header_high: u16,
+    /// `AlarmCRTagHeaderLow`: the VLAN TCI negotiated for the Low priority alarm channel.
     pub tag_header_low: u16,
 }
 

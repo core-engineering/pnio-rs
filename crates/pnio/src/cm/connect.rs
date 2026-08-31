@@ -14,11 +14,16 @@ use crate::rpc::{Drep, Uuid};
 // ConnectReq: the grouped Connect-request blocks.
 // ---------------------------------------------------------------------------------
 
+/// The Connect request's blocks, grouped by type; see [`ConnectReq::parse`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnectReq {
+    /// The (single, required) ARBlockReq.
     pub ar: ArBlockReq,
+    /// The IOCRBlockReq blocks, in request order (normally one Input, one Output).
     pub iocrs: Vec<IocrBlockReq>,
+    /// The ExpectedSubmoduleBlockReq blocks, in request order.
     pub expected: Vec<super::ExpectedSubmoduleBlockReq>,
+    /// The (single, required) AlarmCRBlockReq.
     pub alarm_cr: AlarmCrBlockReq,
 }
 
@@ -81,39 +86,74 @@ impl ConnectReq {
 // ArParams / IocrParams: the AR parameters extracted from a validated Connect request.
 // ---------------------------------------------------------------------------------
 
+/// The AR parameters extracted from a validated Connect request, ready to build the
+/// device's layout, alarm channel and Connect response from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArParams {
+    /// The AR's identifying UUID (`ARBlockReq.ARUUID`).
     pub ar_uuid: Uuid,
+    /// Session key, echoed on every subsequent control exchange for this AR.
     pub session_key: u16,
+    /// The controller's MAC address (`ARBlockReq.CMInitiatorMacAdd`).
     pub initiator_mac: MacAddr,
+    /// The controller's PNIO object UUID (`ARBlockReq.CMInitiatorObjectUUID`).
     pub initiator_object_uuid: Uuid,
+    /// `ARBlockReq.ARProperties`-adjacent `CMInitiatorActivityTimeoutFactor`, in units
+    /// of [`super::ar::ACTIVITY_TIMEOUT_UNIT`].
     pub activity_timeout_factor: u16,
+    /// The negotiated Input CR (device-to-controller) parameters.
     pub input_cr: IocrParams,
+    /// The negotiated Output CR (controller-to-device) parameters.
     pub output_cr: IocrParams,
+    /// The controller's `LocalAlarmReference` (`AlarmCRBlockReq.LocalAlarmReference`),
+    /// used as `AlarmDstEndpoint` on outgoing alarm frames.
     pub alarm_ref_remote: u16,
+    /// The value this device answers with in `AlarmCRBlockRes.MaxAlarmDataLength`
+    /// (from [`DeviceModel::max_alarm_data_length`]).
     pub max_alarm_data_length: u16,
     /// `AlarmCRBlockReq.MaxAlarmDataLength` as the CPU asked for it (256 on the
     /// bench) — `max_alarm_data_length` above is our own value (from the model),
     /// which is what we actually answer in `AlarmCRBlockRes`.
     pub max_alarm_data_length_remote: u16,
+    /// `AlarmCRBlockReq.RTATimeoutFactor`: how long to wait for a transport ACK or
+    /// content AlarmAck before resending, in units defined by the standard.
     pub rta_timeout_factor: u16,
+    /// `AlarmCRBlockReq.RTARetries`: resends of an unacknowledged alarm before the
+    /// channel gives up and aborts the AR.
     pub rta_retries: u16,
     /// Our own local alarm reference, always 0 — what `AlarmCRBlockRes` answers.
     pub alarm_ref_local: u16,
+    /// `AlarmCRBlockReq.AlarmCRTagHeaderHigh`: the VLAN TCI negotiated for the High
+    /// priority alarm channel.
     pub alarm_tag_high: u16,
+    /// `AlarmCRBlockReq.AlarmCRTagHeaderLow`: the VLAN TCI negotiated for the Low
+    /// priority alarm channel.
     pub alarm_tag_low: u16,
 }
 
+/// One Communication Relationship's negotiated parameters, extracted from its
+/// `IOCRBlockReq` (and, for the Output CR, resolved of a device-selected FrameID).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IocrParams {
+    /// `IOCRReference`, identifying this CR within the AR.
     pub reference: u16,
+    /// The CR's `FrameID`; this crate requires `0x8000..=0xBBFF` on input (or
+    /// `0xFFFF`/[`FRAME_ID_DEVICE_SELECTS`] on the Output CR, resolved here to a real
+    /// value).
     pub frame_id: u16,
+    /// Total C-SDU length in bytes, as negotiated.
     pub data_length: u16,
+    /// `SendClockFactor`: base send-clock multiplier (send clock = `send_clock_factor * 31.25 us`).
     pub send_clock_factor: u16,
+    /// `ReductionRatio`: how many send-clock periods make up one cycle for this CR.
     pub reduction_ratio: u16,
+    /// `WatchdogFactor`: consumer watchdog window, in cycles.
     pub watchdog_factor: u16,
+    /// `DataHoldFactor`: cycles the consumer holds the last valid data before declaring the watchdog expired.
     pub data_hold_factor: u16,
+    /// The CR's IO data objects (one per submodule carrying data in this direction).
     pub io_data: Vec<IocrObject>,
+    /// The CR's IOCS-only objects.
     pub iocs: Vec<IocrObject>,
 }
 

@@ -49,7 +49,6 @@ pub mod api;
 #[allow(missing_docs)]
 #[cfg(feature = "capture")]
 pub mod capture;
-#[allow(missing_docs)]
 pub mod cm;
 pub mod config;
 pub mod data;

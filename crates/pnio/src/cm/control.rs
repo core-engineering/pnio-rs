@@ -8,9 +8,13 @@ use crate::rpc::{Drep, Uuid};
 
 /// `IODControlReq`/`Res` `ControlCommand` bit values.
 pub mod cmd {
+    /// `PrmEnd`: end of parameterization (request).
     pub const PRM_END: u16 = 0x0001;
+    /// `ApplicationReady`: the device is ready for cyclic data (request, device-initiated).
     pub const APPLICATION_READY: u16 = 0x0002;
+    /// `Release`: release the AR (request).
     pub const RELEASE: u16 = 0x0004;
+    /// `Done`: the answering side's response to any of the above.
     pub const DONE: u16 = 0x0008;
 }
 
@@ -22,10 +26,16 @@ const BODY_LEN: usize = 26;
 /// request or response. All six variants share this one body shape.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ControlBlock {
+    /// `BlockType`, identifying which of the six PrmEnd/ApplicationReady/Release
+    /// request/response variants this is (see [`ty`]).
     pub block_type: u16,
+    /// The AR this control block applies to.
     pub ar_uuid: Uuid,
+    /// The AR's session key, echoed back on every control exchange.
     pub session_key: u16,
+    /// `ControlCommand` bitmask; see [`cmd`].
     pub command: u16,
+    /// `ControlBlockProperties`; always `0` on the exchanges this crate builds.
     pub properties: u16,
 }
 

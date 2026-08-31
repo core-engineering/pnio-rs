@@ -39,14 +39,35 @@ use thiserror::Error;
 /// Errors from parsing/serializing PNIO blocks (the 6-byte header and the per-type bodies).
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum BlockError {
+    /// Fewer bytes available than the block shape being parsed needs.
     #[error("block buffer too short: need {need}, have {have}")]
-    TooShort { need: usize, have: usize },
+    TooShort {
+        /// Bytes the parse needs.
+        need: usize,
+        /// Bytes actually available.
+        have: usize,
+    },
+    /// The block header's `BlockType` is not the one the caller asked to parse.
     #[error("unexpected block type: expected {expected:#06x}, got {got:#06x}")]
-    UnexpectedType { expected: u16, got: u16 },
+    UnexpectedType {
+        /// `BlockType` the caller expected.
+        expected: u16,
+        /// `BlockType` actually found.
+        got: u16,
+    },
+    /// The block header's version is not `1.0`.
     #[error("bad block version {0}.{1} (expected 1.0)")]
     BadVersion(u8, u8),
+    /// The block header's `BlockLength` declares more bytes than are available.
     #[error("bad block length: declared {declared}, available {available}")]
-    BadLength { declared: u16, available: usize },
+    BadLength {
+        /// `BlockLength` as declared in the block header.
+        declared: u16,
+        /// Bytes actually available after the header.
+        available: usize,
+    },
+    /// The block parsed to the right length and type but its content violates a
+    /// structural rule (e.g. a count field disagreeing with the actual data).
     #[error("malformed block: {0}")]
     Malformed(&'static str),
 }
@@ -54,8 +75,10 @@ pub enum BlockError {
 /// Errors from the Context Manager's AR establishment / lifecycle handling.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CmError {
+    /// A PNIO block failed to parse; see [`BlockError`].
     #[error("block error: {0}")]
     Block(#[from] BlockError),
+    /// The request is well-formed but the AR/CM logic rejects it with this status.
     #[error("connect rejected: {0:?}")]
     Reject(PnioStatus),
 }
@@ -74,7 +97,9 @@ const CACHE_CAPACITY: usize = 4;
 /// One outgoing RPC datagram: the raw bytes to send and the address to send them to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Outgoing {
+    /// The complete UDP payload (RPC header + NDR body) to send.
     pub bytes: Vec<u8>,
+    /// Destination address.
     pub to: SocketAddr,
 }
 
@@ -82,7 +107,10 @@ pub struct Outgoing {
 /// state-change notifications to report (state plus the abort reason, when any).
 #[derive(Debug, Default, PartialEq)]
 pub struct CmOutput {
+    /// Datagrams the caller must send on the wire, in order.
     pub send: Vec<Outgoing>,
+    /// AR state transitions to report to the application, each with the reason when
+    /// the transition is a fall back to [`ArState::Idle`] due to an abort.
     pub notify: Vec<(ArState, Option<AbortReason>)>,
 }
 
@@ -157,6 +185,9 @@ pub struct Cm {
 }
 
 impl Cm {
+    /// A fresh Context Manager for `model`, idle (no AR). `activity_seed` is the
+    /// activity UUID used for calls this device places to the controller
+    /// (ApplicationReady); it should be stable across the device's lifetime.
     pub fn new(model: DeviceModel, activity_seed: Uuid) -> Cm {
         Cm {
             model: model.clone(),
@@ -171,14 +202,18 @@ impl Cm {
         }
     }
 
+    /// The AR's current lifecycle state.
     pub fn state(&self) -> ArState {
         self.ar.state()
     }
 
+    /// The current AR's negotiated context (parameters, layout, ...), if one is established.
     pub fn context(&self) -> Option<&ArContext> {
         self.ar.context()
     }
 
+    /// The next time the caller must call [`Cm::tick`] (a pending timeout), or `None`
+    /// if nothing is outstanding.
     pub fn next_deadline(&self) -> Option<Instant> {
         self.ar.next_deadline()
     }

@@ -36,9 +36,13 @@ const MAX_RECORD_BYTES: usize = 64 * 1024;
 /// The AR's lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArState {
+    /// No AR established.
     Idle,
+    /// Connect accepted; accumulating parameter-write records until PrmEnd.
     Connected,
+    /// PrmEnd received; waiting for the controller's answer to our ApplicationReady call.
     AppReadySent,
+    /// ApplicationReady acknowledged: the AR is ready for cyclic (RTC1) data.
     Data,
 }
 
@@ -78,12 +82,23 @@ pub enum AbortReason {
 /// itself does no codec work.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
+    /// A Connect request arrived; validate it against the model and (re)establish the AR.
     ConnectReq(ConnectReq),
+    /// A parameter-write request arrived; accumulate its records against the current AR.
     WriteReq(WriteReq),
+    /// A PrmEnd control request arrived: parameterization is done, place the
+    /// ApplicationReady call.
     PrmEndReq(ControlBlock),
+    /// A Release control request arrived: tear the AR down.
     ReleaseReq(ControlBlock),
-    AppReadyRsp { status: PnioStatus },
+    /// The controller answered our ApplicationReady call.
+    AppReadyRsp {
+        /// The controller's reported result; `PnioStatus::OK` accepts the AR into `Data`.
+        status: PnioStatus,
+    },
+    /// The caller's deadline (from [`Ar::next_deadline`]) elapsed; check timeouts.
     Tick,
+    /// An external condition (RT watchdog, alarm failure, shutdown, ...) requires the AR to abort.
     Abort(AbortReason),
 }
 
@@ -107,13 +122,24 @@ impl Event {
 pub enum Action {
     /// Answer the request that triggered this event with these PNIO blocks (empty
     /// on rejection/wrong-state).
-    Respond { status: PnioStatus, blocks: Vec<u8> },
+    Respond {
+        /// Result to answer the triggering request with.
+        status: PnioStatus,
+        /// PNIO response blocks to append; empty on rejection/wrong-state.
+        blocks: Vec<u8>,
+    },
     /// Call the controller (ApplicationReady request PNIO blocks).
-    CallController { blocks: Vec<u8> },
+    CallController {
+        /// The ApplicationReady request's PNIO blocks.
+        blocks: Vec<u8>,
+    },
     /// The AR changed state; `reason` is set only when the new state is `Idle` via
     /// an abort.
     Notify {
+        /// The AR's new state.
         state: ArState,
+        /// Why the AR aborted, when `state == ArState::Idle` via an abort (`None` on a
+        /// normal forward transition).
         reason: Option<AbortReason>,
     },
 }
@@ -123,8 +149,12 @@ pub enum Action {
 /// Connect response bytes (so a duplicate Connect resend is byte-identical).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArContext {
+    /// The AR parameters extracted from the validated Connect request.
     pub params: ArParams,
+    /// Parameter-write records accumulated on this AR so far, in arrival order,
+    /// capped at `MAX_RECORDS` records / `MAX_RECORD_BYTES` summed data bytes.
     pub records: Vec<Record>,
+    /// When the AR transitioned into `Connected`.
     pub connected_at: Instant,
     connect_res: Vec<u8>,
 }
@@ -141,6 +171,7 @@ pub struct Ar {
 }
 
 impl Ar {
+    /// A fresh, idle AR state machine validating Connect requests against `model`.
     pub fn new(model: DeviceModel) -> Ar {
         Ar {
             model,
@@ -152,10 +183,12 @@ impl Ar {
         }
     }
 
+    /// The AR's current lifecycle state.
     pub fn state(&self) -> ArState {
         self.state
     }
 
+    /// The established AR's context, if one exists (`state() != ArState::Idle`).
     pub fn context(&self) -> Option<&ArContext> {
         self.ctx.as_ref()
     }
