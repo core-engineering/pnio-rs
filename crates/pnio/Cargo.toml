@@ -1,6 +1,6 @@
 [package]
 name = "pnio"
-version = "0.0.0"
+version = "0.1.0"
 description = "PROFINET RT IO-Device stack in pure Rust (community, not affiliated with PI)"
 edition.workspace = true
 rust-version.workspace = true
@@ -14,8 +14,13 @@ readme = "../../README.md"
 libc = "0.2"
 log = "0.4"
 nix = { version = "0.27", default-features = false, features = ["net", "socket", "poll"] }
-pcap-file = "2"
+pcap-file = { version = "2", optional = true }
 thiserror = "1"
+
+[features]
+default = ["capture"]
+# pcap/pcapng replay harness (`pnio::capture`); off = no `pcap-file` dependency.
+capture = ["dep:pcap-file"]
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }

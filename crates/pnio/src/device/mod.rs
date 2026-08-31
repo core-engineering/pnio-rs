@@ -1,5 +1,5 @@
 //! The acyclic loop: services the DCP (Ethernet) and RPC (UDP) sockets, drives
-//! [`Cm`](crate::cm::Cm) with what they produce, and executes its outputs. Log-and-drop
+//! [`Cm`] with what they produce, and executes its outputs. Log-and-drop
 //! for parse errors (spec §8); only transport I/O failures abort the loop.
 
 use std::collections::VecDeque;
@@ -270,7 +270,7 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             .is_some_and(|ch| ch.in_flight().is_some())
     }
 
-    /// Poll bound for the caller's loop: [`ALARM_POLL_INTERVAL`] (20 ms) while an
+    /// Poll bound for the caller's loop: `ALARM_POLL_INTERVAL` (20 ms) while an
     /// alarm is in flight or diagnosis commands are queued, so RTA retries and fresh
     /// alarms are serviced promptly; otherwise `default`.
     pub fn poll_interval(&self, default: Duration) -> Duration {

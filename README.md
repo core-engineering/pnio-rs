@@ -159,7 +159,8 @@ included.
 
 `cm` (AR) ✅ → `rt` (cyclic exchange) ✅ → determinism (1 ms, `PREEMPT_RT`) ✅ → Plan 7bis
 (L2-pair isolation) ✅ → `config`/GSDML/typed API (Plan 6) ✅ → `alarm`/`diag`/`im` (Plan 5) ✅
-implemented (branch `feat/alarm-diag-im`), HIL pending — see `docs/bench-pnet-device.md` §6i →
+merged (`3508a34`), HIL 2026-08-31: 5/6 checks passed, TIA V21 issued no I&M1-3 Write under `PNIO_Version="V2.3"`
+— see `docs/bench-pnet-device.md` §6i →
 **next: the V2.31+ GSDML profile (`LLDP_NoD_Supported`, `PTP_BoundarySupported`/
 `DCP_BoundarySupported`, `ResetToFactoryModes`, `CertificationInfo`) and process alarms**.
 `PACKET_MMAP`/busy-poll stays deferred, only needed if a future campaign under the original

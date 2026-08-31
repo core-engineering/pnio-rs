@@ -39,6 +39,7 @@
 pub mod alarm;
 #[cfg(target_os = "linux")]
 pub mod api;
+#[cfg(feature = "capture")]
 pub mod capture;
 pub mod cm;
 pub mod config;

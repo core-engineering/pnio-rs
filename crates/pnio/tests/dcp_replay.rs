@@ -1,3 +1,4 @@
+#![cfg(feature = "capture")]
 //! End-to-end: replay a pcapng holding a real DCP Identify request through the
 //! capture -> eth -> dcp pipeline and check the device produces the golden response.
 

@@ -208,7 +208,7 @@ impl AlarmChannel {
     /// Called by the caller when `now >= next_deadline()`. In `SentData` (no transport
     /// ACK yet) resends the in-flight DATA up to `rta_retries` times, then aborts the
     /// AR. In `AwaitAlarmAck` (delivery already confirmed) drops the alarm and moves
-    /// on to the queue — see [`ALARM_ACK_TIMEOUT_FACTOR`].
+    /// on to the queue (deadline = `ALARM_ACK_TIMEOUT_FACTOR` × the RTA timeout).
     pub fn on_tick(&mut self, now: Instant) -> Vec<AlarmAction> {
         let awaiting_alarm_ack = match &self.state {
             State::SentData { deadline, .. } => {
