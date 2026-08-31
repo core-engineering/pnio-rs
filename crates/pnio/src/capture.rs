@@ -1,3 +1,7 @@
+//! Offline replay of captured traffic: an iterator over raw Ethernet frames read
+//! from a pcap or pcapng file (auto-detected by magic bytes), for feeding recorded
+//! captures back through the codecs without a live socket.
+
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -6,12 +10,16 @@ use pcap_file::pcap::PcapReader;
 use pcap_file::pcapng::PcapNgReader;
 use thiserror::Error;
 
+/// Errors from opening or reading a pcap/pcapng capture.
 #[derive(Debug, Error)]
 pub enum CaptureError {
+    /// The underlying file/reader failed.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// The capture's own container format is malformed.
     #[error("capture parse error: {0}")]
     Pcap(#[from] pcap_file::PcapError),
+    /// The first 4 bytes match neither a pcap nor a pcapng magic number.
     #[error("unknown capture format (magic {0:02x?})")]
     UnknownFormat([u8; 4]),
 }
@@ -29,12 +37,15 @@ pub struct PcapFrames<R: Read> {
 }
 
 impl PcapFrames<File> {
+    /// Opens `path` and auto-detects its pcap/pcapng format from the leading magic bytes.
     pub fn open(path: &Path) -> Result<Self, CaptureError> {
         Self::from_reader(File::open(path)?)
     }
 }
 
 impl<R: Read> PcapFrames<R> {
+    /// Wraps any `Read` source, auto-detecting its pcap/pcapng format from the
+    /// leading 4 magic bytes. [`CaptureError::UnknownFormat`] if neither matches.
     pub fn from_reader(mut r: R) -> Result<Self, CaptureError> {
         let mut magic = [0u8; 4];
         r.read_exact(&mut magic)?;

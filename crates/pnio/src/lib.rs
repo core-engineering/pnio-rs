@@ -41,12 +41,9 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-// Protocol modules not yet documented (doc pass B and later); their public items are exempt
-// from `missing_docs` until then.
 pub mod alarm;
 #[cfg(target_os = "linux")]
 pub mod api;
-#[allow(missing_docs)]
 #[cfg(feature = "capture")]
 pub mod capture;
 pub mod cm;
