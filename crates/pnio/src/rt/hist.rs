@@ -27,6 +27,7 @@ pub struct Histogram {
 }
 
 impl Histogram {
+    /// An empty histogram: every bin, the count and the maximum start at zero.
     pub const fn new() -> Self {
         // Used only to repeat-initialize the array below, never as a shared instance:
         // the interior-mutability lint's concern (aliased const state) doesn't apply.
@@ -78,6 +79,7 @@ impl Histogram {
         Some((HIST_BINS - 1) as u64) // counts raced past `count`: report the tail
     }
 
+    /// Take a plain-value copy of all bins, the count and the maximum (one relaxed load each).
     pub fn snapshot(&self) -> HistSnapshot {
         HistSnapshot {
             bins: self

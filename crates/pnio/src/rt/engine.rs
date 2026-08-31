@@ -25,7 +25,12 @@ pub enum DropReason {
     /// Non-zero transfer status: the provider marks this frame not to be used.
     TransferStatus(u8),
     /// C-SDU shorter than the output CR's `data_length`.
-    ShortCsdu { have: usize, need: usize },
+    ShortCsdu {
+        /// Bytes actually present in the received C-SDU.
+        have: usize,
+        /// Bytes required by the output CR's negotiated `data_length`.
+        need: usize,
+    },
     /// Parse failure (too short, wrong ethertype, ...).
     Malformed,
 }
@@ -37,8 +42,12 @@ pub enum RxVerdict {
     /// C-SDU long enough. `data_valid` false means the C-SDU was *not* copied
     /// (stale data kept).
     Accepted {
+        /// `Provider_State.Run` from the frame's data status.
         provider_run: bool,
+        /// `State.Primary` from the frame's data status.
         primary: bool,
+        /// `DataState.Valid` from the frame's data status; `false` means the C-SDU was
+        /// *not* copied (stale data kept).
         data_valid: bool,
     },
     /// Not for us: wrong source MAC or wrong frame ID (e.g. our own frame echoed back).
@@ -65,15 +74,28 @@ pub enum WatchdogVerdict {
 /// thread (e.g. a diagnostics endpoint) without locking.
 #[derive(Debug, Default)]
 pub struct RtStats {
+    /// Frames produced by [`RtEngine::on_tick`].
     pub tx: AtomicU64,
+    /// Frames [`RtEngine::on_frame`] accepted (matched us, transfer status OK, long enough).
     pub rx_accepted: AtomicU64,
+    /// Frames [`RtEngine::on_frame`] ignored (wrong source MAC or frame ID).
     pub rx_ignored: AtomicU64,
+    /// Frames [`RtEngine::on_frame`] dropped after being addressed to us but unusable; see [`DropReason`].
     pub rx_dropped: AtomicU64,
+    /// Accepted frames whose `DataState.Valid` bit was clear, so the C-SDU was not copied;
+    /// also incremented by the RT runner for an oversized frame that cannot be ours.
     pub rx_invalid: AtomicU64,
+    /// Accepted frames whose cycle counter did not advance from the previous one (stale or out-of-order).
     pub reordered: AtomicU64,
+    /// Transitions of [`RtEngine::check_watchdog`] into [`WatchdogVerdict::Expired`].
     pub watchdog_expirations: AtomicU64,
+    /// Tick expirations beyond the first counted in a single [`RtEngine::on_tick`] call (coalesced wake-ups).
     pub missed_ticks: AtomicU64,
+    /// Ticks where the RT runner reused the previous input snapshot because the
+    /// non-blocking [`IoImage`](super::image::IoImage) read did not land a fresh one.
     pub input_snapshot_reused: AtomicU64,
+    /// Times the RT runner had to defer publishing outputs/validity to the
+    /// [`IoImage`](super::image::IoImage) because the acyclic side had it locked, retried later.
     pub output_publish_deferred: AtomicU64,
     /// Timer wake-up minus scheduled expiry, per tick.
     pub tick_lateness: Histogram,
@@ -86,18 +108,31 @@ pub struct RtStats {
 /// Plain-value snapshot of [`RtStats`], taken with a single relaxed load per field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StatsSnapshot {
+    /// See [`RtStats::tx`].
     pub tx: u64,
+    /// See [`RtStats::rx_accepted`].
     pub rx_accepted: u64,
+    /// See [`RtStats::rx_ignored`].
     pub rx_ignored: u64,
+    /// See [`RtStats::rx_dropped`].
     pub rx_dropped: u64,
+    /// See [`RtStats::rx_invalid`].
     pub rx_invalid: u64,
+    /// See [`RtStats::reordered`].
     pub reordered: u64,
+    /// See [`RtStats::watchdog_expirations`].
     pub watchdog_expirations: u64,
+    /// See [`RtStats::missed_ticks`].
     pub missed_ticks: u64,
+    /// See [`RtStats::input_snapshot_reused`].
     pub input_snapshot_reused: u64,
+    /// See [`RtStats::output_publish_deferred`].
     pub output_publish_deferred: u64,
+    /// Largest tick lateness observed, in nanoseconds; see [`RtStats::tick_lateness`].
     pub max_tick_lateness_ns: u64,
+    /// Largest cycle work duration observed, in nanoseconds; see [`RtStats::cycle_work`].
     pub max_cycle_work_ns: u64,
+    /// Largest interval between two accepted controller frames, in nanoseconds; see [`RtStats::rx_interval`].
     pub max_rx_interval_ns: u64,
 }
 

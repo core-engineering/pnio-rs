@@ -64,7 +64,6 @@ pub mod gsdml;
 pub mod im;
 #[allow(missing_docs)]
 pub mod rpc;
-#[allow(missing_docs)]
 pub mod rt;
 #[cfg(test)]
 pub(crate) mod testutil;

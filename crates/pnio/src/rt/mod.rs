@@ -29,16 +29,24 @@ use thiserror::Error;
 /// Top-level error type for the `rt` cyclic exchange.
 #[derive(Debug, Error)]
 pub enum RtError {
+    /// A cyclic frame failed to parse or did not fit its buffer; see [`FrameError`].
     #[error(transparent)]
     Frame(#[from] FrameError),
+    /// The submodule layout could not be built or an offset fell outside it; see
+    /// [`LayoutError`].
     #[error(transparent)]
     Layout(#[from] LayoutError),
+    /// A raw-socket or `epoll`/`timerfd` syscall failed.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// The Ethernet transport layer failed to send or receive; see
+    /// [`TransportError`](crate::eth::TransportError).
     #[error(transparent)]
     Transport(#[from] crate::eth::TransportError),
+    /// A real-time scheduling syscall (`SCHED_FIFO`, affinity, `mlockall`) failed.
     #[error("scheduling error: {0}")]
     Sched(std::io::Error),
+    /// The RT thread has already stopped and cannot accept the operation.
     #[error("stopped")]
     Stopped,
 }

@@ -26,12 +26,25 @@ pub const CYCLE_UNIT: Duration = Duration::from_nanos(31_250);
 /// Errors from parsing or writing an RTC1 frame.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FrameError {
+    /// The input is shorter than a minimal RTC1 frame (header + FrameID + [`CSDU_MIN`] + [`APDU_LEN`]).
     #[error("frame too short: need {need}, have {have}")]
-    TooShort { need: usize, have: usize },
+    TooShort {
+        /// Bytes a minimal frame of this shape would need.
+        need: usize,
+        /// Bytes actually present in the input.
+        have: usize,
+    },
+    /// The Ethernet header's ethertype is not [`ETHERTYPE_PROFINET`].
     #[error("not a PROFINET frame")]
     NotProfinet,
+    /// [`RtFrame::write`]'s output buffer is smaller than [`frame_len`] requires.
     #[error("output buffer too small: need {need}, have {have}")]
-    BufferTooSmall { need: usize, have: usize },
+    BufferTooSmall {
+        /// Bytes [`frame_len`] computed for this C-SDU.
+        need: usize,
+        /// Bytes actually available in the output buffer.
+        have: usize,
+    },
 }
 
 /// APDU DataStatus byte (IEC 61158-6-10 table): provider/consumer state bits.
@@ -75,10 +88,15 @@ impl DataStatus {
 /// A parsed or to-be-written RTC1 cyclic frame (APDU: DataRequestPDU/DataResponsePDU).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RtFrame<'a> {
+    /// The frame's `FrameID`, identifying the Communication Relationship (e.g. `0x8000`/`0x8001` on the bench).
     pub frame_id: u16,
+    /// The C-SDU payload, at least [`CSDU_MIN`] bytes.
     pub csdu: &'a [u8],
+    /// APDU cycle counter: increments by the CR's `cycle_step` every send cycle, wraps at `u16::MAX`.
     pub cycle_counter: u16,
+    /// APDU DataStatus byte; see [`DataStatus`].
     pub data_status: DataStatus,
+    /// APDU TransferStatus byte: `0` means usable, non-zero means the provider marks this frame not to be used.
     pub transfer_status: u8,
 }
 

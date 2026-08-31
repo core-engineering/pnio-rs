@@ -13,10 +13,15 @@ use crate::cm::{ArParams, DeviceModel, IocrParams};
 /// One IO data object inside a CR's C-SDU: payload bytes plus its trailing IOPS byte.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IoObject {
+    /// Slot of the submodule this object carries data for.
     pub slot: u16,
+    /// Subslot of the submodule this object carries data for.
     pub subslot: u16,
+    /// Byte offset of the payload in the CR's C-SDU.
     pub data_off: usize,
+    /// Payload length in bytes (the submodule's input or output length, per [`CrLayout`]'s direction).
     pub data_len: usize,
+    /// Byte offset of the trailing IOPS (IO Provider Status) byte, always `data_off + data_len`.
     pub iops_off: usize,
 }
 
@@ -24,19 +29,28 @@ pub struct IoObject {
 /// or an extra consumer-status point such as the DAP's slot/subslot entries).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CsObject {
+    /// Slot this consumer-status byte applies to.
     pub slot: u16,
+    /// Subslot this consumer-status byte applies to.
     pub subslot: u16,
+    /// Byte offset of the IOCS (IO Consumer Status) byte in the CR's C-SDU.
     pub iocs_off: usize,
 }
 
 /// The flat serialization table for one Communication Relationship (input or output).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrLayout {
+    /// The CR's `FrameID`, as negotiated at Connect (e.g. `0x8000` input, `0x8001` output on the bench).
     pub frame_id: u16,
+    /// Total C-SDU length in bytes, as negotiated at Connect.
     pub data_length: usize,
+    /// Send interval, in units of [`CYCLE_UNIT`]: `send_clock_factor * reduction_ratio`.
     pub cycle_step: u16,
+    /// Watchdog timeout: `data_hold_factor` missed cycles' worth of [`period`](CrLayout::period).
     pub watchdog: Duration,
+    /// The CR's IO data objects, in the order they were negotiated.
     pub objects: Vec<IoObject>,
+    /// The CR's IOCS-only objects, in the order they were negotiated.
     pub iocs: Vec<CsObject>,
 }
 
@@ -50,9 +64,13 @@ impl CrLayout {
 /// One model submodule's offsets in each direction's CR, if it carries data there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
+    /// Slot of the submodule.
     pub slot: u16,
+    /// Subslot of the submodule.
     pub subslot: u16,
+    /// The submodule's input length in bytes, from the device model.
     pub input_len: usize,
+    /// The submodule's output length in bytes, from the device model.
     pub output_len: usize,
     /// `data_off` in the input CR, if this submodule has an IO data object there.
     pub input_off: Option<usize>,
@@ -63,27 +81,47 @@ pub struct Cell {
 /// The C-SDU plan for both CRs of an AR, plus the per-submodule `Cell` index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
+    /// The input CR's (controller-consumed) serialization table.
     pub input_cr: CrLayout,
+    /// The output CR's (device-consumed) serialization table.
     pub output_cr: CrLayout,
+    /// One entry per model submodule, in model order, indexing both CRs.
     pub cells: Vec<Cell>,
 }
 
 /// Errors building a `Layout` from an AR's parameters against a `DeviceModel`.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LayoutError {
+    /// An IO data or IOCS object referenced a slot/subslot the device model has no submodule for.
     #[error("unknown submodule at slot {slot}, subslot {subslot:#06x}")]
-    UnknownSubmodule { slot: u16, subslot: u16 },
+    UnknownSubmodule {
+        /// Slot named by the object.
+        slot: u16,
+        /// Subslot named by the object.
+        subslot: u16,
+    },
+    /// An object's offset plus its length runs past the CR's negotiated `data_length`.
     #[error(
         "object at slot {slot}, subslot {subslot:#06x} does not fit: end {end} > data_length {data_length}"
     )]
     OutOfBounds {
+        /// Slot of the offending object.
         slot: u16,
+        /// Subslot of the offending object.
         subslot: u16,
+        /// The object's last byte offset, exclusive (`data_off + data_len [+ 1 for IOPS/IOCS]`).
         end: usize,
+        /// The CR's negotiated total length in bytes.
         data_length: usize,
     },
+    /// Two objects' byte ranges in the same CR overlap.
     #[error("overlapping object at slot {slot}, subslot {subslot:#06x}")]
-    Overlap { slot: u16, subslot: u16 },
+    Overlap {
+        /// Slot of the object found to overlap another.
+        slot: u16,
+        /// Subslot of the object found to overlap another.
+        subslot: u16,
+    },
 }
 
 /// Which side of the AR a CR carries data for: which model length (`input_len` vs

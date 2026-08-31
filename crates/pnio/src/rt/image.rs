@@ -81,14 +81,40 @@ impl Validity {
 /// Errors from the application-side accessors of [`IoImage`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ImageError {
+    /// No cell in the current [`Layout`] matches this slot/subslot — either no layout has
+    /// been installed yet ([`IoImage::rebuild`] not yet called) or the AR does not have
+    /// this submodule.
     #[error("unknown submodule at slot {slot}, subslot {subslot:#06x}")]
-    UnknownSubmodule { slot: u16, subslot: u16 },
+    UnknownSubmodule {
+        /// Slot looked up.
+        slot: u16,
+        /// Subslot looked up.
+        subslot: u16,
+    },
+    /// The caller's buffer length does not match the submodule's data length in the layout.
     #[error("length mismatch: expected {expected}, got {got}")]
-    LengthMismatch { expected: usize, got: usize },
+    LengthMismatch {
+        /// Length the layout expects, in bytes.
+        expected: usize,
+        /// Length the caller's buffer actually has, in bytes.
+        got: usize,
+    },
+    /// The submodule exists in the layout but has no input object (it is output-only).
     #[error("no input data at slot {slot}, subslot {subslot:#06x}")]
-    NoInput { slot: u16, subslot: u16 },
+    NoInput {
+        /// Slot looked up.
+        slot: u16,
+        /// Subslot looked up.
+        subslot: u16,
+    },
+    /// The submodule exists in the layout but has no output object (it is input-only).
     #[error("no output data at slot {slot}, subslot {subslot:#06x}")]
-    NoOutput { slot: u16, subslot: u16 },
+    NoOutput {
+        /// Slot looked up.
+        slot: u16,
+        /// Subslot looked up.
+        subslot: u16,
+    },
 }
 
 /// The output C-SDU held verbatim plus the validity of the frame it came from.
