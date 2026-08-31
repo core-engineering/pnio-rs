@@ -16,22 +16,34 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum ChannelError {
+    /// `ChannelErrorType` 0x0001.
     ShortCircuit = 0x0001,
+    /// `ChannelErrorType` 0x0002.
     Undervoltage = 0x0002,
+    /// `ChannelErrorType` 0x0003.
     Overvoltage = 0x0003,
+    /// `ChannelErrorType` 0x0004.
     Overload = 0x0004,
+    /// `ChannelErrorType` 0x0005.
     Overtemperature = 0x0005,
+    /// `ChannelErrorType` 0x0006.
     LineBreak = 0x0006,
+    /// `ChannelErrorType` 0x0007.
     UpperLimitExceeded = 0x0007,
+    /// `ChannelErrorType` 0x0008.
     LowerLimitExceeded = 0x0008,
+    /// `ChannelErrorType` 0x0009.
     Error = 0x0009,
 }
 
 impl ChannelError {
+    /// The wire `ChannelErrorType` code.
     pub fn code(self) -> u16 {
         self as u16
     }
 
+    /// Inverse of [`ChannelError::code`]; `None` if `c` is not one of the codes this
+    /// store knows.
     pub fn from_code(c: u16) -> Option<ChannelError> {
         match c {
             0x0001 => Some(ChannelError::ShortCircuit),
@@ -76,8 +88,12 @@ impl ChannelError {
 /// How severe a raised diagnosis is; maps to `ChannelProperties.maintenance`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
+    /// Maps to [`Maintenance::Fault`]; the only severity that sets
+    /// [`DiagStore::problem_indicator`].
     Fault,
+    /// Maps to [`Maintenance::Required`].
     MaintenanceRequired,
+    /// Maps to [`Maintenance::Demanded`].
     MaintenanceDemanded,
 }
 
@@ -87,20 +103,32 @@ pub const WHOLE_SUBMODULE: u16 = 0x8000;
 /// One channel diagnosis, as raised or cleared by the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnosis {
+    /// Slot the diagnosis applies to.
     pub slot: Slot,
+    /// Channel number, or [`WHOLE_SUBMODULE`] for the whole submodule.
     pub channel: u16,
+    /// Which error is being raised or cleared.
     pub error: ChannelError,
+    /// How severe it is.
     pub severity: Severity,
+    /// Not meaningful as input: [`DiagStore::raise`] overwrites it from the
+    /// submodule's own declared direction.
     pub direction: Direction,
 }
 
 /// What the store needs to know about one submodule to build notifications.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmoduleInfo {
+    /// Slot the submodule is plugged into.
     pub slot: Slot,
+    /// Subslot (always `1` for the submodules [`DiagStore::from_model`] derives).
     pub subslot: u16,
+    /// The slot's module identity number.
     pub module_ident: u32,
+    /// The submodule's identity number.
     pub submodule_ident: u32,
+    /// Its data direction, used to fill `ChannelProperties.direction` on every
+    /// notification built for it.
     pub direction: Direction,
 }
 
@@ -112,6 +140,7 @@ pub struct DiagStore {
 }
 
 impl DiagStore {
+    /// An empty store (no active diagnoses) that knows about `submodules`.
     pub fn new(submodules: Vec<SubmoduleInfo>) -> Self {
         DiagStore {
             submodules,
@@ -152,6 +181,7 @@ impl DiagStore {
         self.submodules.iter().find(|s| s.slot == slot)
     }
 
+    /// Whether `slot` is one of the submodules this store was built with.
     pub fn knows(&self, slot: Slot) -> bool {
         self.info(slot).is_some()
     }
@@ -199,6 +229,7 @@ impl DiagStore {
         self.active.values().any(|d| d.severity == Severity::Fault)
     }
 
+    /// Every currently active diagnosis.
     pub fn active(&self) -> Vec<Diagnosis> {
         self.active.values().cloned().collect()
     }
