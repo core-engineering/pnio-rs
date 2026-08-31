@@ -267,7 +267,7 @@ facade (`docs/gsdml.md`, `docs/bench-pnet-device.md` §6g):
 ## From Plan 5 (`alarm` / `diag` / `im`)
 
 Recorded at close-out (spec §2 "Out") while implementing the alarm channel, channel diagnosis
-and I&M0-3 (`docs/superpowers/specs/2026-08-30-pnio-alarm-diag-im-design.md`):
+and I&M0-3 (`docs/design/2026-08-30-pnio-alarm-diag-im-design.md`):
 
 - **Process alarms** (`AlarmType 0x0002`, `MayIssueProcessAlarm`, OB40): the `alarm::rta` codec
   parses/builds the generic `AlarmNotification` block regardless of `AlarmType`, but there is no

@@ -157,7 +157,7 @@ const RTA_TIMEOUT_UNIT: Duration = Duration::from_millis(100);
 /// transport, and PDUs sent out (DCP responses are not counted; only RPC sends are).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StepReport {
-    /// DCP frames drained from the Ethernet transport.
+    /// Frames drained from the Ethernet transport this step (DCP and alarm frames alike).
     pub eth_frames: usize,
     /// RPC datagrams drained from the UDP transport.
     pub rpc_datagrams: usize,

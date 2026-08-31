@@ -91,7 +91,8 @@ pub enum ApiError {
     /// Error from the underlying [`Device`] (e.g. a failed transport call).
     #[error("device error: {0}")]
     Device(#[from] DeviceError),
-    /// I/O error opening the interface or binding the RPC socket ([`IoDevice::start`]).
+    /// I/O error while starting: reading the interface MAC, opening the raw socket, binding
+    /// the RPC socket, or spawning the acyclic thread.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

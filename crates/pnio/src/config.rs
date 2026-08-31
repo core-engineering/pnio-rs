@@ -34,9 +34,9 @@ pub enum Direction {
 pub struct SubmoduleSpec {
     /// Slot this submodule is plugged into.
     pub slot: Slot,
-    /// Name reported in the model/GSDML; auto-generated (`in<slot>`/`out<slot>`) by
-    /// [`DeviceConfigBuilder::input`]/[`DeviceConfigBuilder::output`], or given
-    /// explicitly to [`DeviceConfigBuilder::submodule`].
+    /// Name used for the GSDML module/submodule texts — auto-generated (`in<slot>`/`out<slot>`)
+    /// by [`DeviceConfigBuilder::input`]/[`DeviceConfigBuilder::output`], or given explicitly to
+    /// [`DeviceConfigBuilder::submodule`]. Not carried on the wire (the device model has no name).
     pub name: String,
     /// Input fields (device → controller), in declaration order.
     pub inputs: Vec<FieldType>,
