@@ -10,10 +10,15 @@ use thiserror::Error;
 /// The 5 supported process types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldType {
+    /// Siemens `BOOL`: one bit, packed 8 per byte, LSB-first.
     Bool,
+    /// Siemens `INT`: 16-bit signed, big-endian.
     Int,
+    /// Siemens `WORD`: 16-bit unsigned, big-endian.
     Word,
+    /// Siemens `DINT`: 32-bit signed, big-endian.
     Dint,
+    /// Siemens `REAL`: IEEE-754 32-bit float, big-endian.
     Real,
 }
 
@@ -31,10 +36,15 @@ impl FieldType {
 /// Typed process value, encoded/decoded through the codecs below.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
+    /// A [`FieldType::Bool`] value.
     Bool(bool),
+    /// A [`FieldType::Int`] value.
     Int(i16),
+    /// A [`FieldType::Word`] value.
     Word(u16),
+    /// A [`FieldType::Dint`] value.
     Dint(i32),
+    /// A [`FieldType::Real`] value.
     Real(f32),
 }
 
@@ -88,37 +98,62 @@ impl Value {
 /// Encoding/decoding errors.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CodecError {
+    /// The destination/source buffer is shorter than the type being
+    /// encoded/decoded needs.
     #[error("buffer too short: need {need}, have {have}")]
-    TooShort { need: usize, have: usize },
+    TooShort {
+        /// Bytes required.
+        need: usize,
+        /// Bytes actually available.
+        have: usize,
+    },
+    /// `bit` (in [`get_bit`]/[`set_bit`]) falls outside the buffer.
     #[error("bit index {bit} out of range for {bytes}-byte buffer")]
-    BitOutOfRange { bit: usize, bytes: usize },
+    BitOutOfRange {
+        /// The requested bit index.
+        bit: usize,
+        /// The buffer's length in bytes.
+        bytes: usize,
+    },
 }
 
+/// Encodes an `i16` as 2 big-endian bytes.
 pub fn encode_i16(v: i16) -> [u8; 2] {
     v.to_be_bytes()
 }
+/// Encodes a `u16` as 2 big-endian bytes.
 pub fn encode_u16(v: u16) -> [u8; 2] {
     v.to_be_bytes()
 }
+/// Encodes an `i32` as 4 big-endian bytes.
 pub fn encode_i32(v: i32) -> [u8; 4] {
     v.to_be_bytes()
 }
+/// Encodes an `f32` (IEEE-754) as 4 big-endian bytes.
 pub fn encode_f32(v: f32) -> [u8; 4] {
     v.to_be_bytes()
 }
 
+/// Decodes an `i16` from the first 2 big-endian bytes of `b`.
+/// Errors: [`CodecError::TooShort`] if `b` has fewer than 2 bytes.
 pub fn decode_i16(b: &[u8]) -> Result<i16, CodecError> {
     let a = take::<2>(b)?;
     Ok(i16::from_be_bytes(a))
 }
+/// Decodes a `u16` from the first 2 big-endian bytes of `b`.
+/// Errors: [`CodecError::TooShort`] if `b` has fewer than 2 bytes.
 pub fn decode_u16(b: &[u8]) -> Result<u16, CodecError> {
     let a = take::<2>(b)?;
     Ok(u16::from_be_bytes(a))
 }
+/// Decodes an `i32` from the first 4 big-endian bytes of `b`.
+/// Errors: [`CodecError::TooShort`] if `b` has fewer than 4 bytes.
 pub fn decode_i32(b: &[u8]) -> Result<i32, CodecError> {
     let a = take::<4>(b)?;
     Ok(i32::from_be_bytes(a))
 }
+/// Decodes an `f32` (IEEE-754) from the first 4 big-endian bytes of `b`.
+/// Errors: [`CodecError::TooShort`] if `b` has fewer than 4 bytes.
 pub fn decode_f32(b: &[u8]) -> Result<f32, CodecError> {
     let a = take::<4>(b)?;
     Ok(f32::from_be_bytes(a))
