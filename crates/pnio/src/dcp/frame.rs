@@ -9,13 +9,18 @@ pub const DCP_MULTICAST_MAC: MacAddr = MacAddr([0x01, 0x0e, 0xcf, 0x00, 0x00, 0x
 /// PROFINET RT FrameID values used by DCP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameId {
+    /// `0xfefe`: Identify request (multicast).
     IdentifyRequest,
+    /// `0xfeff`: Identify response (unicast).
     IdentifyResponse,
+    /// `0xfefd`: Get/Set (request or response).
     GetSet,
+    /// `0xfefc`: Hello (device announcing itself, unsolicited).
     Hello,
 }
 
 impl FrameId {
+    /// Decodes a FrameID; `None` for a value that is not a DCP FrameID.
     pub fn from_u16(v: u16) -> Option<FrameId> {
         match v {
             0xfefe => Some(FrameId::IdentifyRequest),
@@ -26,6 +31,7 @@ impl FrameId {
         }
     }
 
+    /// Encodes back to the wire FrameID value.
     pub fn to_u16(self) -> u16 {
         match self {
             FrameId::IdentifyRequest => 0xfefe,
@@ -36,15 +42,21 @@ impl FrameId {
     }
 }
 
+/// DCP header `ServiceID` byte: which operation this frame carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceId {
+    /// `3`: Get a record.
     Get,
+    /// `4`: Set a record.
     Set,
+    /// `5`: Identify (discovery).
     Identify,
+    /// `6`: Hello (unsolicited device announcement).
     Hello,
 }
 
 impl ServiceId {
+    /// Decodes the `ServiceID` byte; unrecognized values are [`DcpError::BadServiceId`].
     pub fn from_u8(v: u8) -> Result<ServiceId, DcpError> {
         match v {
             3 => Ok(ServiceId::Get),
@@ -54,6 +66,7 @@ impl ServiceId {
             other => Err(DcpError::BadServiceId(other)),
         }
     }
+    /// Encodes back to the wire `ServiceID` byte.
     pub fn to_u8(self) -> u8 {
         match self {
             ServiceId::Get => 3,
@@ -64,13 +77,17 @@ impl ServiceId {
     }
 }
 
+/// DCP header `ServiceType` byte: bit 0 of the low nibble distinguishes request from response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceType {
+    /// `0`: this is a request.
     Request,
+    /// `1`: this is a successful response.
     ResponseSuccess,
 }
 
 impl ServiceType {
+    /// Decodes the `ServiceType` byte; unrecognized values are [`DcpError::BadServiceType`].
     pub fn from_u8(v: u8) -> Result<ServiceType, DcpError> {
         match v {
             0 => Ok(ServiceType::Request),
@@ -78,6 +95,7 @@ impl ServiceType {
             other => Err(DcpError::BadServiceType(other)),
         }
     }
+    /// Encodes back to the wire `ServiceType` byte.
     pub fn to_u8(self) -> u8 {
         match self {
             ServiceType::Request => 0,
@@ -89,10 +107,16 @@ impl ServiceType {
 /// The 10-byte DCP acyclic header that follows the FrameID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DcpHeader {
+    /// Which operation this frame carries.
     pub service_id: ServiceId,
+    /// Request or response.
     pub service_type: ServiceType,
+    /// Transaction id, echoed by the response that answers this request.
     pub xid: u32,
+    /// On a request: how long the responder should randomize its reply delay over, to
+    /// avoid a flood of simultaneous multicast responses. Unused/zero on a response.
     pub response_delay: u16,
+    /// Bytes of TLV block data that follow this header (`DCPDataLength`).
     pub data_length: u16,
 }
 
@@ -123,6 +147,8 @@ impl DcpHeader {
         Ok((header, &buf[10..need]))
     }
 
+    /// Serializes the 10-byte header. Inverse of [`DcpHeader::parse`] (the caller
+    /// appends the TLV block bytes separately).
     pub fn write(&self, out: &mut Vec<u8>) {
         out.push(self.service_id.to_u8());
         out.push(self.service_type.to_u8());

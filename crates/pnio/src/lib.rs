@@ -52,7 +52,6 @@ pub mod capture;
 pub mod cm;
 pub mod config;
 pub mod data;
-#[allow(missing_docs)]
 pub mod dcp;
 pub mod device;
 pub mod diag;

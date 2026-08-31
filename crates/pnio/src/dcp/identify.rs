@@ -8,6 +8,7 @@ use crate::eth::{EthHeader, MacAddr, ETHERTYPE_PROFINET};
 /// Filter criteria extracted from an incoming Identify request.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IdentifyFilter {
+    /// NameOfStation filter block (option 2, suboption 2) value, if present.
     pub name_of_station: Option<String>,
     /// AllSelector block (option 0xff, suboption 0xff) present.
     pub all_selector: bool,
@@ -36,16 +37,28 @@ pub fn parse_identify_request(block_bytes: &[u8]) -> Result<IdentifyFilter, DcpE
 /// Static device identity advertised in Identify responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceProperties {
+    /// `NameOfStation` (option 2, suboption 2).
     pub name_of_station: String,
+    /// `TypeOfStation` (option 2, suboption 1); a human-readable device type string.
     pub type_of_station: String,
+    /// `DeviceVendorValue` half of DeviceID (option 2, suboption 3).
     pub vendor_id: u16,
+    /// `DeviceID` half of DeviceID (option 2, suboption 3).
     pub device_id: u16,
+    /// `DeviceRole` (option 2, suboption 4); bitmask, e.g. IO-Device.
     pub device_role: u16,
+    /// `DeviceInstance` (option 2, suboption 7).
     pub device_instance: u16,
+    /// `DeviceOptions` (option 2, suboption 5): the list of DCP option/suboption pairs
+    /// (as raw bytes) this device supports, 2 bytes per entry.
     pub device_options: Vec<u8>,
+    /// IP address (part of IPParameter, option 1 suboption 2).
     pub ip: [u8; 4],
+    /// Subnet mask (part of IPParameter, option 1 suboption 2).
     pub subnet: [u8; 4],
+    /// Default gateway (part of IPParameter, option 1 suboption 2).
     pub gateway: [u8; 4],
+    /// IPParameter `BlockInfo`: whether/how the IP is set (`0x0001` = set/valid on the bench).
     pub ip_block_info: u16,
 }
 

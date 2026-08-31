@@ -2,11 +2,19 @@
 
 use crate::dcp::DcpError;
 
+/// One DCP TLV block: `Option`/`Suboption`/`DCPBlockLength`, an optional 2-byte
+/// `BlockInfo`, and the value bytes — even-length padding is handled transparently
+/// by [`parse_blocks`]/[`write_blocks`] and not represented here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DcpBlock {
+    /// The block's `Option` byte (e.g. `2` = DeviceProperties, `1` = IPParameter).
     pub option: u8,
+    /// The block's `Suboption` byte, meaning depends on `option`.
     pub suboption: u8,
+    /// The 2-byte `BlockInfo` prefix, present on response/Get blocks; `None` on a
+    /// request filter block, which has no `BlockInfo`.
     pub block_info: Option<u16>,
+    /// The block's payload, excluding any `BlockInfo` and the trailing pad byte.
     pub value: Vec<u8>,
 }
 

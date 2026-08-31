@@ -19,12 +19,21 @@ use thiserror::Error;
 /// Errors from parsing/serializing DCP frames.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DcpError {
+    /// Fewer bytes available than the DCP header or a TLV block needs.
     #[error("buffer too short: need {need}, have {have}")]
-    TooShort { need: usize, have: usize },
+    TooShort {
+        /// Bytes the parse needs.
+        need: usize,
+        /// Bytes actually available.
+        have: usize,
+    },
+    /// The DCP header's `ServiceID` byte is not one this crate knows; see [`ServiceId`].
     #[error("unknown DCP service id {0}")]
     BadServiceId(u8),
+    /// The DCP header's `ServiceType` byte is not one this crate knows; see [`ServiceType`].
     #[error("unknown DCP service type {0}")]
     BadServiceType(u8),
+    /// A TLV block's structure violates a rule this crate enforces (e.g. odd padding, bad length).
     #[error("malformed DCP frame: {0}")]
     Malformed(&'static str),
 }
@@ -34,7 +43,10 @@ use crate::eth::{EthHeader, MacAddr, ETHERTYPE_PROFINET};
 /// Identity + address this device answers DCP for.
 #[derive(Debug, Clone)]
 pub struct DcpConfig {
+    /// This device's Ethernet MAC address, used as the response's source and in the
+    /// IdentifyRequest name match.
     pub mac: MacAddr,
+    /// The identity this device answers Identify/Get/Set with.
     pub properties: DeviceProperties,
 }
 

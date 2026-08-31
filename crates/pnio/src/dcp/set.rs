@@ -15,18 +15,28 @@ use crate::eth::{EthHeader, MacAddr, ETHERTYPE_PROFINET};
 pub enum SetBlock {
     /// IP option (1), suboption 2 (IPParameter): the qualifier and requested triple.
     IpSuite {
+        /// `BlockQualifier`: whether the change should be temporary or persist across reboot.
         qualifier: u16,
+        /// Requested IP address.
         ip: [u8; 4],
+        /// Requested subnet mask.
         subnet: [u8; 4],
+        /// Requested default gateway.
         gateway: [u8; 4],
     },
     /// Any other option/suboption we don't implement.
-    Other { option: u8, suboption: u8 },
+    Other {
+        /// The block's `Option` byte.
+        option: u8,
+        /// The block's `Suboption` byte.
+        suboption: u8,
+    },
 }
 
 /// A parsed DCP Set request: the ordered list of blocks it carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetRequest {
+    /// The request's blocks, in request order.
     pub blocks: Vec<SetBlock>,
 }
 
@@ -34,11 +44,18 @@ pub struct SetRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SetBlockError {
+    /// The block was applied (or, for this stack, already matched the current value).
     Ok = 0x00,
+    /// The requested `Option` is not supported at all.
     OptionNotSupported = 0x01,
+    /// The `Option` is known but this `Suboption` is not supported.
     SuboptionNotSupported = 0x02,
+    /// The suboption is supported but has no value configured yet.
     SuboptionNotSet = 0x03,
+    /// A resource needed to apply the change is unavailable.
     ResourceError = 0x04,
+    /// The requested value differs from the current one and this stack refuses to
+    /// change it (this crate's `decide_set` never actually reconfigures the interface).
     SetNotPossible = 0x05,
 }
 
