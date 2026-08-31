@@ -23,8 +23,13 @@ use thiserror::Error;
 /// (if any) should be scheduled.
 #[derive(Debug, Clone)]
 pub struct StartOptions {
+    /// Network interface to open (e.g. `"eth0"`); its MAC is read from
+    /// `/sys/class/net/<iface>/address`.
     pub iface: String,
+    /// Our IPv4 address (big-endian octets), advertised in the DCP identity.
     pub ip: [u8; 4],
+    /// RT thread scheduling; `None` means no RT thread is started, so no cyclic I/O is
+    /// exchanged even once the AR reaches [`ArState::Data`].
     pub rt: Option<RtOptions>,
     /// CPUs for the acyclic thread (and anything the application spawns from it).
     pub app_cpus: Option<Vec<usize>>,
@@ -37,30 +42,56 @@ pub struct StartOptions {
 /// the image not being laid out yet, and the lower layers' own errors wrapped through.
 #[derive(Debug, Error)]
 pub enum ApiError {
+    /// No submodule is declared at this slot in the [`DeviceConfig`]'s field table.
     #[error("slot {0:?} is not declared")]
     UnknownSlot(Slot),
+    /// `index` is not a declared field of the slot's field table.
     #[error("slot {slot} index {index} out of range (len {len})")]
-    IndexOutOfRange { slot: u16, index: usize, len: usize },
+    IndexOutOfRange {
+        /// Slot number looked up.
+        slot: u16,
+        /// Field index requested.
+        index: usize,
+        /// Number of fields actually declared for this slot/direction.
+        len: usize,
+    },
+    /// The field at `slot`/`index` is declared with a different [`FieldType`] than
+    /// the one requested.
     #[error("slot {slot} index {index} is {declared:?}, not {requested:?}")]
     TypeMismatch {
+        /// Slot number looked up.
         slot: u16,
+        /// Field index looked up.
         index: usize,
+        /// The field's type as declared in the config.
         declared: FieldType,
+        /// The type the caller asked for.
         requested: FieldType,
     },
+    /// The slot is declared, but not in the direction the accessor needs (e.g.
+    /// reading an input slot, or writing an output slot).
     #[error("slot {slot} has no {expected:?} data")]
-    WrongDirection { slot: u16, expected: Direction },
+    WrongDirection {
+        /// Slot number looked up.
+        slot: u16,
+        /// The slot's actual declared direction.
+        expected: Direction,
+    },
     /// Can still occur for a few microseconds after [`IoDevice::ar_state`] first
     /// reports [`ArState::Data`] — see that method's doc. Poll [`IoDevice::ready`]
     /// instead of `ar_state() == Data` to avoid it.
     #[error("no I/O layout yet: the AR has not reached Data")]
     NoLayoutYet,
+    /// Error from the underlying [`IoImage`] (slot/subslot bounds, cell lookup).
     #[error(transparent)]
     Image(ImageError),
+    /// Value/wire codec error ([`Value::decode`]/[`Value::encode`]).
     #[error(transparent)]
     Codec(#[from] CodecError),
+    /// Error from the underlying [`Device`] (e.g. a failed transport call).
     #[error("device error: {0}")]
     Device(#[from] DeviceError),
+    /// I/O error opening the interface or binding the RPC socket ([`IoDevice::start`]).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -271,6 +302,7 @@ impl IoDevice {
         })
     }
 
+    /// The [`DeviceConfig`] this device was started with.
     pub fn config(&self) -> &DeviceConfig {
         &self.cfg
     }
@@ -312,6 +344,9 @@ impl IoDevice {
     pub fn ready(&self) -> bool {
         self.ar_state() == ArState::Data && !self.image.cells().is_empty()
     }
+    /// The reason for the most recent AR state change, or `None` if the AR has never
+    /// aborted (or the last change was a fresh connect to [`ArState::Data`], which
+    /// carries no reason).
     pub fn last_abort(&self) -> Option<AbortReason> {
         self.shared
             .state
@@ -328,15 +363,22 @@ impl IoDevice {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+    /// The image's current [`Validity`] (data status / freshness of the last cycle).
     pub fn validity(&self) -> Validity {
         self.image.validity()
     }
+    /// Whether the outputs were updated within the RT thread's consumer watchdog
+    /// window — see [`Validity::freshness`].
     pub fn freshness(&self) -> Freshness {
         self.image.validity().freshness()
     }
+    /// A snapshot of the RT thread's running counters (frames sent/received,
+    /// watchdog trips, jitter).
     pub fn stats(&self) -> StatsSnapshot {
         self.stats.snapshot()
     }
+    /// The shared [`RtStats`] handle backing [`IoDevice::stats`], for callers that
+    /// want to hold onto it directly instead of polling snapshots.
     pub fn rt_stats(&self) -> Arc<RtStats> {
         self.stats.clone()
     }
@@ -389,6 +431,10 @@ impl IoDevice {
     }
 
     // ----- controller -> device -----
+    /// Reads one output field (controller -> device) by (slot, index), decoded to its
+    /// declared [`Value`] variant. Errors: [`ApiError::UnknownSlot`],
+    /// [`ApiError::WrongDirection`], [`ApiError::IndexOutOfRange`],
+    /// [`ApiError::NoLayoutYet`].
     pub fn read(&self, slot: Slot, index: usize) -> Result<Value, ApiError> {
         let f = self.field(slot, Direction::Output, index, None)?;
         let r = self.image.read_outputs(slot.0, 1, |b, _| {
@@ -396,30 +442,40 @@ impl IoDevice {
         })?;
         Ok(r?)
     }
+    /// Like [`IoDevice::read`], requiring the field to be declared [`FieldType::Bool`]
+    /// (else [`ApiError::TypeMismatch`]).
     pub fn read_bool(&self, s: Slot, i: usize) -> Result<bool, ApiError> {
         self.typed(s, i, FieldType::Bool).map(|v| match v {
             Value::Bool(b) => b,
             _ => unreachable!(),
         })
     }
+    /// Like [`IoDevice::read`], requiring the field to be declared [`FieldType::Int`]
+    /// (else [`ApiError::TypeMismatch`]).
     pub fn read_int(&self, s: Slot, i: usize) -> Result<i16, ApiError> {
         self.typed(s, i, FieldType::Int).map(|v| match v {
             Value::Int(x) => x,
             _ => unreachable!(),
         })
     }
+    /// Like [`IoDevice::read`], requiring the field to be declared [`FieldType::Word`]
+    /// (else [`ApiError::TypeMismatch`]).
     pub fn read_word(&self, s: Slot, i: usize) -> Result<u16, ApiError> {
         self.typed(s, i, FieldType::Word).map(|v| match v {
             Value::Word(x) => x,
             _ => unreachable!(),
         })
     }
+    /// Like [`IoDevice::read`], requiring the field to be declared [`FieldType::Dint`]
+    /// (else [`ApiError::TypeMismatch`]).
     pub fn read_dint(&self, s: Slot, i: usize) -> Result<i32, ApiError> {
         self.typed(s, i, FieldType::Dint).map(|v| match v {
             Value::Dint(x) => x,
             _ => unreachable!(),
         })
     }
+    /// Like [`IoDevice::read`], requiring the field to be declared [`FieldType::Real`]
+    /// (else [`ApiError::TypeMismatch`]).
     pub fn read_real(&self, s: Slot, i: usize) -> Result<f32, ApiError> {
         self.typed(s, i, FieldType::Real).map(|v| match v {
             Value::Real(x) => x,
@@ -459,21 +515,31 @@ impl IoDevice {
     }
 
     // ----- device -> controller -----
+    /// Writes one input field (device -> controller) by (slot, index) and publishes
+    /// it immediately (single-field [`IoDevice::with_inputs`]). Errors:
+    /// [`ApiError::UnknownSlot`], [`ApiError::WrongDirection`],
+    /// [`ApiError::IndexOutOfRange`], [`ApiError::TypeMismatch`] if `v`'s type doesn't
+    /// match the declared field, [`ApiError::NoLayoutYet`].
     pub fn write(&self, slot: Slot, index: usize, v: Value) -> Result<(), ApiError> {
         self.with_inputs(slot, |w| w.set(index, v))
     }
+    /// [`IoDevice::write`] with a [`Value::Bool`].
     pub fn write_bool(&self, s: Slot, i: usize, v: bool) -> Result<(), ApiError> {
         self.write(s, i, Value::Bool(v))
     }
+    /// [`IoDevice::write`] with a [`Value::Int`].
     pub fn write_int(&self, s: Slot, i: usize, v: i16) -> Result<(), ApiError> {
         self.write(s, i, Value::Int(v))
     }
+    /// [`IoDevice::write`] with a [`Value::Word`].
     pub fn write_word(&self, s: Slot, i: usize, v: u16) -> Result<(), ApiError> {
         self.write(s, i, Value::Word(v))
     }
+    /// [`IoDevice::write`] with a [`Value::Dint`].
     pub fn write_dint(&self, s: Slot, i: usize, v: i32) -> Result<(), ApiError> {
         self.write(s, i, Value::Dint(v))
     }
+    /// [`IoDevice::write`] with a [`Value::Real`].
     pub fn write_real(&self, s: Slot, i: usize, v: f32) -> Result<(), ApiError> {
         self.write(s, i, Value::Real(v))
     }
@@ -613,6 +679,10 @@ impl IoDevice {
         self.diag.rx_no_channel.load(Ordering::Relaxed)
     }
 
+    /// Signals the acyclic thread to stop and joins it. Before exiting, the thread
+    /// calls [`crate::device::Device::shutdown`] (ERR-RTA "AR removed" plus an AR
+    /// abort, which stops the RT runner) if an AR is up. A panic in the acyclic thread
+    /// is logged rather than propagated, and treated as a clean stop (`Ok(())`).
     pub fn stop(self) -> Result<(), DeviceError> {
         self.stop.store(true, Ordering::Relaxed);
         let h = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -671,12 +741,16 @@ fn run_publishing_params<E: EthTransport, R: RpcTransport>(
 
 /// A consistent copy of one output slot's bytes, decoded on demand.
 pub struct SlotSnapshot {
+    /// Slot this snapshot was taken from.
     pub slot: Slot,
     bytes: Vec<u8>,
+    /// The image's [`Validity`] as of the cycle this snapshot was read in.
     pub validity: Validity,
     fields: Arc<[FieldRef]>,
 }
 impl SlotSnapshot {
+    /// Decodes the field at `index` from the snapshot's bytes.
+    /// Errors: [`ApiError::IndexOutOfRange`], [`ApiError::Codec`].
     pub fn get(&self, index: usize) -> Result<Value, ApiError> {
         let f = *self.fields.get(index).ok_or(ApiError::IndexOutOfRange {
             slot: self.slot.0,
@@ -689,36 +763,42 @@ impl SlotSnapshot {
             f.bit as usize,
         )?)
     }
+    /// [`SlotSnapshot::get`] requiring [`FieldType::Real`] (else [`ApiError::TypeMismatch`]).
     pub fn real(&self, i: usize) -> Result<f32, ApiError> {
         match self.get(i)? {
             Value::Real(v) => Ok(v),
             v => Err(self.mismatch(i, FieldType::Real, v)),
         }
     }
+    /// [`SlotSnapshot::get`] requiring [`FieldType::Bool`] (else [`ApiError::TypeMismatch`]).
     pub fn bool(&self, i: usize) -> Result<bool, ApiError> {
         match self.get(i)? {
             Value::Bool(v) => Ok(v),
             v => Err(self.mismatch(i, FieldType::Bool, v)),
         }
     }
+    /// [`SlotSnapshot::get`] requiring [`FieldType::Int`] (else [`ApiError::TypeMismatch`]).
     pub fn int(&self, i: usize) -> Result<i16, ApiError> {
         match self.get(i)? {
             Value::Int(v) => Ok(v),
             v => Err(self.mismatch(i, FieldType::Int, v)),
         }
     }
+    /// [`SlotSnapshot::get`] requiring [`FieldType::Word`] (else [`ApiError::TypeMismatch`]).
     pub fn word(&self, i: usize) -> Result<u16, ApiError> {
         match self.get(i)? {
             Value::Word(v) => Ok(v),
             v => Err(self.mismatch(i, FieldType::Word, v)),
         }
     }
+    /// [`SlotSnapshot::get`] requiring [`FieldType::Dint`] (else [`ApiError::TypeMismatch`]).
     pub fn dint(&self, i: usize) -> Result<i32, ApiError> {
         match self.get(i)? {
             Value::Dint(v) => Ok(v),
             v => Err(self.mismatch(i, FieldType::Dint, v)),
         }
     }
+    /// The slot's raw output bytes, undecoded.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -740,6 +820,9 @@ pub struct SlotWriter<'a> {
     bytes: &'a mut Vec<u8>,
 }
 impl SlotWriter<'_> {
+    /// Encodes `v` into the working buffer at `index`, without publishing it — see
+    /// [`IoDevice::with_inputs`]. Errors: [`ApiError::IndexOutOfRange`],
+    /// [`ApiError::TypeMismatch`] if `v`'s type doesn't match the declared field.
     pub fn set(&mut self, index: usize, v: Value) -> Result<(), ApiError> {
         let f = *self.fields.get(index).ok_or(ApiError::IndexOutOfRange {
             slot: self.slot.0,
@@ -757,18 +840,23 @@ impl SlotWriter<'_> {
         v.encode(&mut self.bytes[f.byte as usize..], f.bit as usize)?;
         Ok(())
     }
+    /// [`SlotWriter::set`] with a [`Value::Bool`].
     pub fn bool(&mut self, i: usize, v: bool) -> Result<(), ApiError> {
         self.set(i, Value::Bool(v))
     }
+    /// [`SlotWriter::set`] with a [`Value::Int`].
     pub fn int(&mut self, i: usize, v: i16) -> Result<(), ApiError> {
         self.set(i, Value::Int(v))
     }
+    /// [`SlotWriter::set`] with a [`Value::Word`].
     pub fn word(&mut self, i: usize, v: u16) -> Result<(), ApiError> {
         self.set(i, Value::Word(v))
     }
+    /// [`SlotWriter::set`] with a [`Value::Dint`].
     pub fn dint(&mut self, i: usize, v: i32) -> Result<(), ApiError> {
         self.set(i, Value::Dint(v))
     }
+    /// [`SlotWriter::set`] with a [`Value::Real`].
     pub fn real(&mut self, i: usize, v: f32) -> Result<(), ApiError> {
         self.set(i, Value::Real(v))
     }
