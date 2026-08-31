@@ -1020,7 +1020,8 @@ effect. Loading our responder on HIL needs a second host on the segment — open
 
 Procedure for the Plan 5 acceptance criteria (spec §6, `docs/superpowers/specs/2026-08-30-pnio-alarm-diag-im-design.md`):
 the six checks below, to be run once against a real S7-1500 with our own GSDML. This section is
-the checklist and the exact commands only — **results are filled in after the HIL session**, in
+the checklist and the exact commands; results filled in from the **2026-08-31 session** (X1, 500 µs,
+DGS-1008P in line, binary md5 `05e869f2` = `main` 3508a34, capture `captures/plan5-20260830/plan5-hil-20260831.pcapng`).
 the empty table at the end.
 
 ### Setup
@@ -1103,12 +1104,12 @@ the empty table at the end.
 
 | Check | Expected | Observed | Verdict |
 |---|---|---|---|
-| 1. Diagnosis in/out | Diagnostic buffer entries + red/green device + `0x15`/`0x35` data status | | |
-| 2. I&M1-3 write + persistence | `0xAFF1` Write OK, survives a restart with the same `--im-store` | | |
-| 3. I&M0 read | `0xAFF0` OK on DAP/both interface subslots/modules, fields = builder values | | |
-| 4. Device stop | ERR-RTA on the wire, CPU logs the failure within ~10 ms, no watchdog wait | | |
-| 5. Replay on reconnect | Diagnosis re-announced and visible in the CPU after STOP→RUN/cable pull | | |
-| 6. RT non-regression | 10-minute run, active diagnosis, `VERDICT: PASS`, 0 missed ticks | | |
+| 1. Diagnosis in/out | Diagnostic buffer entries + red/green device + `0x15`/`0x35` data status | Notification → ACK-RTA 0.13 ms → Alarm-Ack 3 ms; buffer «Wire break on Input channel 0, pnio-dev / in1_1» incoming, device red; data status 38× `Ok` then `Problem` for the rest of the run; on stop: Disappears acked in 3 ms, buffer «Wire break» outgoing | ✅ |
+| 2. I&M1-3 write + persistence | `0xAFF1` Write OK, survives a restart with the same `--im-store` | **No Write at all** from the CPU at any of the three AR start-ups (initial, cable pull, HW download with a changed Plant designation): Connect → PrmEnd → AppReady, no record. TIA's *Module information* shows the project values, not the device's; `im.bin` never created. Hypothesis: TIA honours `Writeable_IM_Records` only for `PNIO_Version ≥ V2.31` (we declare V2.3) — retest with the V2.31+ profile | ❌ (controller side) |
+| 3. I&M0 read | `0xAFF0` OK on DAP/both interface subslots/modules, fields = builder values | Reads on slots 4,3,2,1 then DAP 0/1, 60-byte records OK; TIA shows Hardware 1, Firmware V 0.1.0, Article number «pnio sample device» (`typed_bringup`'s default = station type — differs from `gen_gsdml`'s `PNIO-SAMPLE`, examples to align). The interface subslots were not read this time; TIA's PROFINET-interface page instead polled `0xF841`/`0xF842`/`0xF820`/`0xF00C` every second (290 «invalid index» answers, harmless) | ✅ (nuance) |
+| 4. Device stop | ERR-RTA on the wire, CPU logs the failure within ~10 ms, no watchdog wait | SIGINT → Disappears (acked) → ERR-RTA «AR removed» 203 ms later; CPU answers ERR-RTA «alarm.ind(err)» **+0.65 ms**, its last cyclic frame +0.3 ms; buffer: «Wire break» outgoing 17.771, «IO device failure – Connection abort by IO device» 17.975 (204 ms = our clear→stop delay), «IO device not found» +2.6 s (DCP re-probe). Also on the wire: the Disappears was sent **twice, 37 µs apart** (`retries=1`, `unexpected_rx=1`) — `Device::step` dates the send with a `now` taken before the poll wait, so the retry deadline is born expired (fix: refresh `now` after `wait_any_readable`) | ✅ (+1 bug found) |
+| 5. Replay on reconnect | Diagnosis re-announced and visible in the CPU after STOP→RUN/cable pull | Cable pull ~5 s: RT watchdog 06:58:33Z, our ERR-RTA code2 5, Idle; Connect 06:58:42Z, Diagnosis re-announced **+19 ms after AppReady**, acked (0.16 ms / 23 ms), data status `Problem` kept. HW download: CPU ERR-RTA «AR removed» → `ControllerErrRta` abort → reconnect 3 s later, replay again; buffer shows the outgoing/incoming Wire-break pair at each reconnect | ✅ |
+| 6. RT non-regression | 10-minute run, active diagnosis, `VERDICT: PASS`, 0 missed ticks | 1470 s at **500 µs** with the diagnosis active: tick lateness p50 0 / p99 14 / p99.99 22 / max 66.2 µs, cycle work max 122 µs, rx interval p99.99 529 / max 641 µs, tx 2 914 044, 0 missed ticks, 0 rx dropped; the printed `VERDICT: FAIL` is the single, deliberate watchdog expiration of check 5 | ✅ |
 
 ## 7. Next steps
 Plan 3 (`cm`/AR), Plan 4 (`rt`, cyclic exchange), Plan 7 (1 ms determinism) and **Plan 7bis

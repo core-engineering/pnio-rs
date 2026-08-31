@@ -451,11 +451,18 @@ impl DeviceConfigBuilder {
 /// The I&M0 `OrderID` a device gets when the builder was given no [`Im0`]: its
 /// `station_type`, kept to ASCII (the record's charset) and to the field's 20 bytes.
 fn order_id_from_station_type(station_type: &str) -> String {
-    station_type
+    let id: String = station_type
         .chars()
         .filter(char::is_ascii)
         .take(20)
-        .collect()
+        .collect();
+    if id.trim().is_empty() {
+        // An empty or entirely non-ASCII station type would put an all-spaces OrderID on the
+        // wire and in the GSDML; fall back to the identity `Im0::default()` carries.
+        Im0::default().order_id
+    } else {
+        id
+    }
 }
 
 /// `layout` plus the size guard (computed in `u32` so an oversized declaration is
@@ -954,5 +961,19 @@ mod tests {
             .find(|o| o.slot == 1)
             .unwrap();
         assert_eq!((s1.data_off, s1.data_len, s1.iops_off), (3, 64, 67));
+    }
+}
+
+#[cfg(test)]
+mod order_id_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn empty_or_non_ascii_station_type_falls_back_to_the_default_order_id() {
+        assert_eq!(order_id_from_station_type(""), Im0::default().order_id);
+        assert_eq!(order_id_from_station_type("   "), Im0::default().order_id);
+        assert_eq!(order_id_from_station_type("éèà"), Im0::default().order_id);
+        assert_eq!(order_id_from_station_type("Foo"), "Foo");
+        assert_eq!(order_id_from_station_type(&"x".repeat(30)), "x".repeat(20));
     }
 }

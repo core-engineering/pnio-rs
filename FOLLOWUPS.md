@@ -352,3 +352,28 @@ and I&M0-3 (`docs/superpowers/specs/2026-08-30-pnio-alarm-diag-im-design.md`):
   channel on a `Data` notify (`crates/pnio/src/device/mod.rs`), so `err_rta_code2` can compute a
   code for these reasons but `abort_with_err_rta_in`'s `self.alarm.as_mut()` guard is `None` at
   that point and no frame is sent — there is no channel yet to send it on.
+
+### HIL 2026-08-31 findings (`docs/bench-pnet-device.md` §6i)
+- **TIA V21 never wrote I&M1-3** to our device (three AR start-ups, Plant designation set and
+  changed, hardware downloaded) although the GSDML declares `Writeable_IM_Records="1 2 3"`. The
+  attribute is a GSDML ≥ V2.31 feature and we declare `PNIO_Version="V2.3"` — TIA most likely
+  ignores it below V2.31. The I&M1-3 Write path (`cm::records::write_im_record`, `ImStore`) is
+  therefore unverified on hardware; retest as soon as the V2.31+ profile lands.
+- **`Device::step` dates the alarm send with a stale `now`** (`crates/pnio/src/device/mod.rs`):
+  the caller's `Instant::now()` is taken before `wait_any_readable` (up to 200 ms), so a
+  notification enqueued in that step gets a retry deadline that is already expired at the next
+  step — the CPU received the DiagnosisDisappears twice, 37 µs apart (`retries=1`,
+  `unexpected_rx=1`; harmless, the CPU deduplicated). Fix: refresh `now` after the poll wait
+  (and use it for `cm.tick`/`alarm.on_tick` too); add a test with a mock clock or a sleeping poll.
+- **`typed_bringup`'s I&M0 OrderID differs from `gen_gsdml`'s**: the example does not set `.im0()`,
+  so the wire carries the station type («pnio sample device») while the GSDML says
+  `PNIO-SAMPLE`; TIA displays the wire value. Give both examples the same `Im0` (or a shared
+  sample-config helper).
+- **TIA's PROFINET-interface diagnostics page polls `0xF841` (RealIdentificationData), `0xF842`
+  (ExpectedIdentificationData), `0xF820` (ARData) and `0xF00C` every second** on subslot `0/0x8000`
+  and gets «invalid index» (290 times in one session, no functional effect). Implementing at least
+  `0xF841`/`0xF820` would make that page useful and stop the error churn.
+- The interface subslots `0/0x8000`/`0/0x8001` were **not** read for I&M0 in this session (only
+  DAP `0/1` and the four modules), so the "IM_Supported 0x000E everywhere" ruling is still only
+  backed by the p-net capture.
+
