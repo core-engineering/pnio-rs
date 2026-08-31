@@ -8,7 +8,7 @@ follows SemVer's 0.y.z rules (breaking changes bump the minor version).
 
 ## [0.1.0] — 2026-08-31
 
-First published version. A PROFINET RT IO-Device (Conformance Class A, RT class 1) in pure
+First published version (crates.io `pnio 0.1.0`, tag `v0.1.0`). A PROFINET RT IO-Device (Conformance Class A, RT class 1) in pure
 Rust, validated byte-exact against captures from an S7-1500 (1515-2 PN, TIA V21) and in
 hardware-in-the-loop at 1 ms and 500 µs on Linux `PREEMPT_RT`.
 

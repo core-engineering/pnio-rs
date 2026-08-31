@@ -1,9 +1,10 @@
 # pnio
 
 [![CI](https://github.com/core-engineering/pnio-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/core-engineering/pnio-rs/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/pnio.svg)](https://crates.io/crates/pnio)
+[![docs.rs](https://img.shields.io/docsrs/pnio)](https://docs.rs/pnio)
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 ![MSRV](https://img.shields.io/badge/MSRV-1.74-informational)
-![status](https://img.shields.io/badge/status-0.1%20pre--release-orange)
 
 A **PROFINET RT IO-Device** (Conformance Class A, RT class 1) in **pure Rust**, for Linux
 `PREEMPT_RT`. It lets an edge computer sit on a PLC's PROFINET IO system like any other
@@ -44,6 +45,8 @@ hardware‑in‑the‑loop: a 12 h 51 soak at 500 µs with 0 missed cycles, tick
 ## Quick Start
 
 ```bash
+cargo add pnio            # https://crates.io/crates/pnio — API docs: https://docs.rs/pnio
+# or, to hack on it:
 git clone https://github.com/core-engineering/pnio-rs.git
 cd pnio-rs
 cargo test                                   # unit suite + byte-exact capture replays
