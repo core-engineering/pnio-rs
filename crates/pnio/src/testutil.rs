@@ -50,6 +50,39 @@ pub fn golden_alarm(name: &str) -> Vec<u8> {
     parse_hex(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")))
 }
 
+/// An untagged DCP Set request frame: `EthHeader` (PROFINET EtherType) + FrameID
+/// `0xFEFD` + `DcpHeader { Set, Request, xid, response_delay 0, data_length }` + the
+/// blocks, whose `block_info` carries the request's `BlockQualifier`.
+pub fn dcp_set_frame(
+    dst: crate::eth::MacAddr,
+    src: crate::eth::MacAddr,
+    xid: u32,
+    blocks: &[crate::dcp::DcpBlock],
+) -> Vec<u8> {
+    use crate::dcp::block::blocks_encoded_len;
+    use crate::dcp::{write_blocks, DcpHeader, FrameId, ServiceId, ServiceType};
+    use crate::eth::{EthHeader, ETHERTYPE_PROFINET};
+    let mut f = Vec::with_capacity(64);
+    EthHeader {
+        dst,
+        src,
+        vlan: None,
+        ethertype: ETHERTYPE_PROFINET,
+    }
+    .write(&mut f);
+    f.extend_from_slice(&FrameId::GetSet.to_u16().to_be_bytes());
+    DcpHeader {
+        service_id: ServiceId::Set,
+        service_type: ServiceType::Request,
+        xid,
+        response_delay: 0,
+        data_length: blocks_encoded_len(blocks),
+    }
+    .write(&mut f);
+    write_blocks(blocks, &mut f);
+    f
+}
+
 /// Offset of the first PNIO block inside a Connect request PDU (RPC header 80 + NDR 20).
 pub const SYNTH_BLOCKS_OFF: usize = crate::rpc::RpcHeader::LEN + crate::rpc::NdrRequest::LEN;
 

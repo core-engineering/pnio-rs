@@ -13,7 +13,8 @@ pub use identify::{
 };
 pub use name::{validate_station_name, NameError};
 pub use set::{
-    build_set_response, decide_set, parse_set_request, SetBlock, SetBlockError, SetRequest,
+    build_set_response, decide_set, parse_set_request, reset_mode, Effect, SetBlock, SetBlockError,
+    SetDecision, SetRequest, QUALIFIER_PERMANENT,
 };
 
 use thiserror::Error;
@@ -41,6 +42,32 @@ pub enum DcpError {
 }
 
 use crate::eth::{EthHeader, MacAddr, ETHERTYPE_PROFINET};
+
+/// The device's identity on the wire: the single source of truth `Device` owns.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NetParams {
+    /// NameOfStation; empty until assigned (DCP Set or configuration).
+    pub name: String,
+    /// IP address; `0.0.0.0` until assigned.
+    pub ip: [u8; 4],
+    /// Subnet mask.
+    pub subnet: [u8; 4],
+    /// Default gateway.
+    pub gateway: [u8; 4],
+}
+
+impl NetParams {
+    /// No identity at all: empty name and IP `0.0.0.0`.
+    pub fn is_blank(&self) -> bool {
+        self.name.is_empty() && self.ip == [0; 4]
+    }
+
+    /// The subnet mask as a prefix length (number of set bits, e.g. 24 for
+    /// `255.255.255.0`).
+    pub fn prefix_len(&self) -> u8 {
+        self.subnet.iter().map(|b| b.count_ones() as u8).sum()
+    }
+}
 
 /// Identity + address this device answers DCP for.
 #[derive(Debug, Clone)]
@@ -104,7 +131,8 @@ pub fn handle_dcp_frame(frame: &[u8], cfg: &DcpConfig) -> Result<Option<Vec<u8>>
                 return Ok(None);
             }
             let req = parse_set_request(blocks)?;
-            let results = decide_set(&req, &cfg.properties);
+            // Effects are ignored here until `device::Device` owns the Set dispatch.
+            let results: Vec<_> = decide_set(&req).iter().map(SetDecision::tuple).collect();
             for (option, suboption, err) in &results {
                 log::info!("DCP Set block ({option}, {suboption}) -> {err:?}");
             }

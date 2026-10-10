@@ -1,13 +1,15 @@
-//! DCP Set: parse the IP-suite Set request, decide (guarded), build the response.
+//! DCP Set: parse the Set request (IP suite, NameOfStation, Signal, ResetToFactory),
+//! decide each block, build the response.
 //!
-//! The interface address is never changed by this stack (the bench edge is also a
-//! gateway) — `decide_set` only ever accepts a Set that matches the IP the device
-//! already has (spec §5.6); anything else is reported as refused, not applied.
+//! This module is the pure decision layer: [`decide_set`] validates each block and
+//! returns the [`Effect`] to apply when it is accepted. Applying it (pushing the IP to
+//! the interface, persisting the name, flashing the LED, resetting) belongs to
+//! `device::Device`, which turns an application failure into
+//! [`SetBlockError::SetNotPossible`].
 
 use crate::dcp::block::{blocks_encoded_len, parse_blocks, write_blocks, DcpBlock};
 use crate::dcp::frame::{DcpHeader, FrameId, ServiceId, ServiceType};
-use crate::dcp::identify::DeviceProperties;
-use crate::dcp::DcpError;
+use crate::dcp::{validate_station_name, DcpError};
 use crate::eth::{EthHeader, MacAddr, ETHERTYPE_PROFINET};
 
 /// One block from a Set request, decoded.
@@ -23,6 +25,26 @@ pub enum SetBlock {
         subnet: [u8; 4],
         /// Requested default gateway.
         gateway: [u8; 4],
+    },
+    /// DeviceProperties option (2), suboption 2 (NameOfStation): the requested name.
+    NameOfStation {
+        /// `BlockQualifier`: bit 0 ([`QUALIFIER_PERMANENT`]) set = persist across restarts.
+        qualifier: u16,
+        /// Requested NameOfStation (validated by [`decide_set`], not by the parser).
+        name: String,
+    },
+    /// Control option (5), suboption 3 (Signal): flash the identification LED.
+    Signal {
+        /// `BlockQualifier` (reserved for Signal; carried for completeness).
+        qualifier: u16,
+        /// `SignalValue`: `0x0100` = "Flash Once", the only value defined.
+        value: u16,
+    },
+    /// Control option (5), suboption 6 (ResetToFactory): no value, the mode sits in
+    /// the qualifier (see [`reset_mode`]).
+    ResetToFactory {
+        /// `BlockQualifier`: the reset mode shifted left by one (`mode << 1`).
+        qualifier: u16,
     },
     /// Any other option/suboption we don't implement.
     Other {
@@ -44,7 +66,7 @@ pub struct SetRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SetBlockError {
-    /// The block was applied (or, for this stack, already matched the current value).
+    /// The block was accepted (and, once `device::Device` applies the effect, applied).
     Ok = 0x00,
     /// The requested `Option` is not supported at all.
     OptionNotSupported = 0x01,
@@ -54,9 +76,88 @@ pub enum SetBlockError {
     SuboptionNotSet = 0x03,
     /// A resource needed to apply the change is unavailable.
     ResourceError = 0x04,
-    /// The requested value differs from the current one and this stack refuses to
-    /// change it (this crate's `decide_set` never actually reconfigures the interface).
+    /// The block was accepted but applying it failed (e.g. the interface refused the
+    /// address or the name could not be persisted); set by `device::Device`, never by
+    /// [`decide_set`].
     SetNotPossible = 0x05,
+}
+
+/// `BlockQualifier` bit 0: the change persists across restarts.
+pub const QUALIFIER_PERMANENT: u16 = 0x0001;
+
+/// The reset mode a ResetToFactory `BlockQualifier` carries: the mode sits above bit 0
+/// (`docs/pdev-golden-frames.md` §1.2: mode = `BlockQualifier >> 1`; modes 1-9 are
+/// defined, so bits 1-4 are kept). Mode 2 = `0x0004`, mode 4 = `0x0008`, mode 8 = `0x0010`.
+pub fn reset_mode(qualifier: u16) -> u8 {
+    ((qualifier >> 1) & 0xF) as u8
+}
+
+/// What `device::Device` must do for one accepted block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    /// Adopt a new NameOfStation.
+    SetName {
+        /// The validated name.
+        name: String,
+        /// Persist across restarts (`BlockQualifier` bit 0).
+        permanent: bool,
+    },
+    /// Adopt a new IP suite.
+    SetIp {
+        /// New IP address.
+        ip: [u8; 4],
+        /// New subnet mask.
+        subnet: [u8; 4],
+        /// New default gateway.
+        gateway: [u8; 4],
+        /// Persist across restarts (`BlockQualifier` bit 0).
+        permanent: bool,
+    },
+    /// Flash the identification LED ("Flash Once").
+    Signal,
+    /// Reset to factory settings in the given mode (2 or 4, see [`reset_mode`]).
+    Reset {
+        /// The decoded reset mode.
+        mode: u8,
+    },
+}
+
+/// One block's outcome: the Control/Response tuple plus the effect to apply when `Ok`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetDecision {
+    /// The request block's `Option` byte, echoed in the response.
+    pub option: u8,
+    /// The request block's `Suboption` byte, echoed in the response.
+    pub suboption: u8,
+    /// The `BlockError` to answer with.
+    pub error: SetBlockError,
+    /// The effect to apply; `Some` exactly when `error` is [`SetBlockError::Ok`].
+    pub effect: Option<Effect>,
+}
+
+impl SetDecision {
+    fn ok(option: u8, suboption: u8, effect: Effect) -> Self {
+        SetDecision {
+            option,
+            suboption,
+            error: SetBlockError::Ok,
+            effect: Some(effect),
+        }
+    }
+
+    fn err(option: u8, suboption: u8, error: SetBlockError) -> Self {
+        SetDecision {
+            option,
+            suboption,
+            error,
+            effect: None,
+        }
+    }
+
+    /// The `(option, suboption, error)` tuple [`build_set_response`] consumes.
+    pub fn tuple(&self) -> (u8, u8, SetBlockError) {
+        (self.option, self.suboption, self.error)
+    }
 }
 
 /// Parse the block bytes of a Set request. Set request blocks carry a 2-byte
@@ -87,32 +188,75 @@ pub fn parse_set_request(block_bytes: &[u8]) -> Result<SetRequest, DcpError> {
                     gateway,
                 });
             }
+            (2, 2) => {
+                let name = String::from_utf8(b.value.clone())
+                    .map_err(|_| DcpError::Malformed("NameOfStation is not UTF-8"))?;
+                out.push(SetBlock::NameOfStation { qualifier, name });
+            }
+            (5, 3) => {
+                if b.value.len() != 2 {
+                    return Err(DcpError::Malformed("Signal value must be 2 bytes"));
+                }
+                out.push(SetBlock::Signal {
+                    qualifier,
+                    value: u16::from_be_bytes([b.value[0], b.value[1]]),
+                });
+            }
+            (5, 6) => out.push(SetBlock::ResetToFactory { qualifier }),
             (option, suboption) => out.push(SetBlock::Other { option, suboption }),
         }
     }
     Ok(SetRequest { blocks: out })
 }
 
-/// Decide the outcome of each block in a Set request against the device's current
-/// IP suite. The interface is **never** modified: `Set Ok` means the whole requested
-/// suite (ip, subnet **and** gateway) already equals the configured one; any
-/// difference in any of the three is refused with `SetNotPossible`. Unsupported
-/// options are refused with `SuboptionNotSupported`.
-pub fn decide_set(req: &SetRequest, current: &DeviceProperties) -> Vec<(u8, u8, SetBlockError)> {
+/// Decide each block of a Set request. Pure: validation only — the effects are applied
+/// (and the IP pushed to the interface, the file written, the AR aborted) by
+/// `device::Device`, which also turns an application failure into `SetNotPossible`.
+///
+/// NameOfStation failing [`validate_station_name`] and a Signal other than "Flash Once"
+/// are refused with `SuboptionNotSet`; a ResetToFactory mode other than 2 or 4 and any
+/// unimplemented option/suboption with `SuboptionNotSupported`. Any IP suite is accepted.
+pub fn decide_set(req: &SetRequest) -> Vec<SetDecision> {
     req.blocks
         .iter()
         .map(|b| match b {
+            SetBlock::NameOfStation { qualifier, name } => match validate_station_name(name) {
+                Ok(()) => SetDecision::ok(
+                    2,
+                    2,
+                    Effect::SetName {
+                        name: name.clone(),
+                        permanent: qualifier & QUALIFIER_PERMANENT != 0,
+                    },
+                ),
+                Err(e) => {
+                    log::warn!("DCP Set NameOfStation {name:?} refused: {e}");
+                    SetDecision::err(2, 2, SetBlockError::SuboptionNotSet)
+                }
+            },
             SetBlock::IpSuite {
+                qualifier,
                 ip,
                 subnet,
                 gateway,
-                ..
-            } if *ip == current.ip && *subnet == current.subnet && *gateway == current.gateway => {
-                (1, 2, SetBlockError::Ok)
-            }
-            SetBlock::IpSuite { .. } => (1, 2, SetBlockError::SetNotPossible),
+            } => SetDecision::ok(
+                1,
+                2,
+                Effect::SetIp {
+                    ip: *ip,
+                    subnet: *subnet,
+                    gateway: *gateway,
+                    permanent: qualifier & QUALIFIER_PERMANENT != 0,
+                },
+            ),
+            SetBlock::Signal { value: 0x0100, .. } => SetDecision::ok(5, 3, Effect::Signal),
+            SetBlock::Signal { .. } => SetDecision::err(5, 3, SetBlockError::SuboptionNotSet),
+            SetBlock::ResetToFactory { qualifier } => match reset_mode(*qualifier) {
+                mode @ (2 | 4) => SetDecision::ok(5, 6, Effect::Reset { mode }),
+                _ => SetDecision::err(5, 6, SetBlockError::SuboptionNotSupported),
+            },
             SetBlock::Other { option, suboption } => {
-                (*option, *suboption, SetBlockError::SuboptionNotSupported)
+                SetDecision::err(*option, *suboption, SetBlockError::SuboptionNotSupported)
             }
         })
         .collect()
@@ -161,8 +305,10 @@ pub fn build_set_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dcp::{handle_dcp_frame, DcpConfig, DeviceProperties};
-    use crate::eth::MacAddr;
+    use crate::dcp::{
+        handle_dcp_frame, DcpBlock, DcpConfig, DcpHeader, DeviceProperties, NetParams,
+    };
+    use crate::eth::{EthHeader, MacAddr};
     use crate::testutil::{golden, VLAN_PAYLOAD_OFF};
 
     fn cfg(ip: [u8; 4]) -> DcpConfig {
@@ -215,17 +361,6 @@ mod tests {
     }
 
     #[test]
-    fn different_ip_is_refused_not_applied() {
-        let resp = handle_dcp_frame(&golden("dcp_set_req"), &cfg([172, 16, 2, 99]))
-            .unwrap()
-            .unwrap();
-        // same frame, BlockError = SetNotPossible (0x05) at the last value byte
-        let mut expected = golden("dcp_set_res");
-        expected[32] = 0x05;
-        assert_eq!(resp, expected);
-    }
-
-    #[test]
     fn unsupported_option_gets_suboption_not_supported() {
         let req = SetRequest {
             blocks: vec![SetBlock::Other {
@@ -234,31 +369,12 @@ mod tests {
             }],
         };
         assert_eq!(
-            decide_set(&req, &cfg([1, 2, 3, 4]).properties),
+            decide_set(&req)
+                .iter()
+                .map(SetDecision::tuple)
+                .collect::<Vec<_>>(),
             vec![(2, 2, SetBlockError::SuboptionNotSupported)]
         );
-    }
-
-    #[test]
-    fn matching_ip_but_other_subnet_is_refused() {
-        let resp = handle_dcp_frame(
-            &golden("dcp_set_req"),
-            &cfg_full([172, 16, 2, 10], [255, 255, 0, 0], [172, 16, 2, 10]),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(resp[32], 0x05);
-    }
-
-    #[test]
-    fn matching_ip_but_other_gateway_is_refused() {
-        let resp = handle_dcp_frame(
-            &golden("dcp_set_req"),
-            &cfg_full([172, 16, 2, 10], [255, 255, 255, 0], [172, 16, 2, 1]),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(resp[32], 0x05);
     }
 
     #[test]
@@ -266,5 +382,182 @@ mod tests {
         let mut f = golden("dcp_set_req");
         f[VLAN_PAYLOAD_OFF + 2] = 3; // ServiceID Get
         assert_eq!(handle_dcp_frame(&f, &cfg([172, 16, 2, 10])).unwrap(), None);
+    }
+
+    /// The DCP blocks of a Set request frame, tagged or not: Ethernet header (14 or
+    /// 18 bytes) + FrameID 2 + DCP header 10, sliced to `DCPDataLength` so the
+    /// Ethernet minimum-size padding of a captured frame is not read as blocks.
+    fn blocks_of(frame: &[u8]) -> &[u8] {
+        let (_, off) = EthHeader::parse(frame).unwrap();
+        let (_, blocks) = DcpHeader::parse(&frame[off + 2..]).unwrap();
+        blocks
+    }
+
+    // synthetic — replace by the Task 2 golden (`golden_in("dcp", name)`).
+    // docs/pdev-golden-frames.md §1: NameOfStation (2/2) qualifier 0x0001 = permanent;
+    // Signal (5/3) qualifier 0 + SignalValue 0x0100 "Flash Once"; ResetToFactory (5/6)
+    // BlockQualifier = mode << 1 (mode 2 → 0x0004, mode 4 → 0x0008), no value.
+    fn tia_set(name: &str) -> Vec<u8> {
+        let block = |option, suboption, qualifier, value: &[u8]| DcpBlock {
+            option,
+            suboption,
+            block_info: Some(qualifier),
+            value: value.to_vec(),
+        };
+        let b = match name {
+            "set_name_req" => block(2, 2, 0x0001, b"pnio-dev-b"),
+            "signal_req" => block(5, 3, 0x0000, &[0x01, 0x00]),
+            "reset_keep_im_req" => block(5, 6, 0x0004, &[]),
+            "reset_all_req" => block(5, 6, 0x0008, &[]),
+            other => panic!("no synthetic DCP request {other}"),
+        };
+        crate::testutil::dcp_set_frame(
+            MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]),
+            MacAddr([0xec, 0x1c, 0x5d, 0x61, 0xe7, 0x3f]),
+            0x0300_0200,
+            &[b],
+        )
+    }
+
+    #[test]
+    fn parses_set_name_request() {
+        let req = parse_set_request(blocks_of(&tia_set("set_name_req"))).unwrap();
+        assert_eq!(
+            req.blocks,
+            vec![SetBlock::NameOfStation {
+                qualifier: QUALIFIER_PERMANENT,
+                name: "pnio-dev-b".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_signal_and_reset_requests() {
+        let s = parse_set_request(blocks_of(&tia_set("signal_req"))).unwrap();
+        assert!(matches!(
+            s.blocks[0],
+            SetBlock::Signal { value: 0x0100, .. }
+        ));
+        let keep = parse_set_request(blocks_of(&tia_set("reset_keep_im_req"))).unwrap();
+        let all = parse_set_request(blocks_of(&tia_set("reset_all_req"))).unwrap();
+        let SetBlock::ResetToFactory { qualifier: q_keep } = keep.blocks[0] else {
+            panic!()
+        };
+        let SetBlock::ResetToFactory { qualifier: q_all } = all.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(reset_mode(q_keep), 2);
+        assert_eq!(reset_mode(q_all), 4);
+    }
+
+    #[test]
+    fn reset_mode_reads_bits_1_to_4() {
+        assert_eq!(reset_mode(0x0004), 2);
+        assert_eq!(reset_mode(0x0008), 4);
+        assert_eq!(reset_mode(0x0010), 8); // mode 8 survives the decode (no truncation to 0)
+        assert_eq!(reset_mode(0x0012), 9);
+        assert_eq!(reset_mode(0x0005), 2); // bit 0 is not part of the mode
+    }
+
+    #[test]
+    fn decides_every_block_kind() {
+        let req = SetRequest {
+            blocks: vec![
+                SetBlock::NameOfStation {
+                    qualifier: 1,
+                    name: "ok-name".into(),
+                },
+                SetBlock::NameOfStation {
+                    qualifier: 0,
+                    name: "Bad".into(),
+                },
+                SetBlock::IpSuite {
+                    qualifier: 0,
+                    ip: [10, 0, 0, 2],
+                    subnet: [255, 255, 0, 0],
+                    gateway: [10, 0, 0, 1],
+                },
+                SetBlock::Signal {
+                    qualifier: 0,
+                    value: 0x0100,
+                },
+                SetBlock::Signal {
+                    qualifier: 0,
+                    value: 0x0200,
+                },
+                SetBlock::ResetToFactory { qualifier: 2 << 1 },
+                SetBlock::ResetToFactory { qualifier: 8 << 1 },
+                SetBlock::Other {
+                    option: 2,
+                    suboption: 9,
+                },
+            ],
+        };
+        let d = decide_set(&req);
+        assert_eq!(d[0].error, SetBlockError::Ok);
+        assert_eq!(
+            d[0].effect,
+            Some(Effect::SetName {
+                name: "ok-name".into(),
+                permanent: true
+            })
+        );
+        assert_eq!((d[0].option, d[0].suboption), (2, 2));
+        assert_eq!(d[1].error, SetBlockError::SuboptionNotSet);
+        assert_eq!(d[1].effect, None);
+        assert_eq!(
+            d[2].effect,
+            Some(Effect::SetIp {
+                ip: [10, 0, 0, 2],
+                subnet: [255, 255, 0, 0],
+                gateway: [10, 0, 0, 1],
+                permanent: false
+            })
+        );
+        assert_eq!(d[3].effect, Some(Effect::Signal));
+        assert_eq!(d[4].error, SetBlockError::SuboptionNotSet);
+        assert_eq!(d[5].effect, Some(Effect::Reset { mode: 2 }));
+        assert_eq!(
+            reset_mode(8 << 1),
+            8,
+            "refused because mode 8 is unsupported, not because it decoded to 0"
+        );
+        assert_eq!(d[6].error, SetBlockError::SuboptionNotSupported);
+        assert_eq!(
+            (d[7].option, d[7].suboption, d[7].error),
+            (2, 9, SetBlockError::SuboptionNotSupported)
+        );
+    }
+
+    #[test]
+    fn any_ip_suite_is_accepted_now() {
+        let req = SetRequest {
+            blocks: vec![SetBlock::IpSuite {
+                qualifier: 1,
+                ip: [0; 4],
+                subnet: [0; 4],
+                gateway: [0; 4],
+            }],
+        };
+        assert_eq!(decide_set(&req)[0].error, SetBlockError::Ok);
+    }
+
+    #[test]
+    fn net_params_helpers() {
+        let p = NetParams {
+            name: String::new(),
+            ip: [0; 4],
+            subnet: [0; 4],
+            gateway: [0; 4],
+        };
+        assert!(p.is_blank());
+        let q = NetParams {
+            name: "x".into(),
+            ip: [172, 16, 2, 10],
+            subnet: [255, 255, 255, 0],
+            gateway: [172, 16, 2, 10],
+        };
+        assert!(!q.is_blank());
+        assert_eq!(q.prefix_len(), 24);
     }
 }
