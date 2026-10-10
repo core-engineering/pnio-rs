@@ -2,13 +2,18 @@
 //! submodule and turns raise/clear events into `AlarmNotification`s (Diagnosis /
 //! DiagnosisDisappears) plus the aggregate problem indicator. Pure: no I/O, no
 //! clock — the device loop drives it.
+//!
+//! Besides the application `ChannelDiagnosis` entries it holds one port-level
+//! entry, the DAP port's remote mismatch ([`DiagStore::set_port_mismatch`]),
+//! sent as an `ExtChannelDiagnosis` (USI `0x8002`).
 
 use crate::alarm::{
-    AlarmNotification, AlarmSpecifier, AlarmType, ChannelDiagnosis, ChannelProperties, Maintenance,
-    Specifier, UserData, USI_CHANNEL_DIAG,
+    AlarmNotification, AlarmSpecifier, AlarmType, ChannelDiagnosis, ChannelProperties,
+    ExtChannelDiagnosis, Maintenance, Specifier, UserData, USI_CHANNEL_DIAG, USI_EXT_CHANNEL_DIAG,
 };
 use crate::cm::DeviceModel;
 use crate::config::{Direction, Slot};
+use crate::pdev::Mismatch;
 use std::collections::BTreeMap;
 
 /// `ChannelDiagnosis.error_type` codes this store knows how to raise/clear
@@ -100,6 +105,15 @@ pub enum Severity {
 /// `ChannelDiagnosis.channel` value meaning "the whole submodule", not one channel.
 pub const WHOLE_SUBMODULE: u16 = 0x8000;
 
+/// `ChannelErrorType` for the port's remote-mismatch diagnoses ("Remote mismatch",
+/// pinned in docs/pdev-golden-frames.md §2.10).
+pub const PORT_ERROR_TYPE: u16 = 0x8001;
+
+/// Slot of the DAP port submodule [`DiagStore::with_port`] looks up.
+const PORT_SLOT: u16 = 0;
+/// Subslot of the DAP port submodule [`DiagStore::with_port`] looks up.
+const PORT_SUBSLOT: u16 = 0x8001;
+
 /// One channel diagnosis, as raised or cleared by the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnosis {
@@ -137,6 +151,9 @@ pub struct SubmoduleInfo {
 pub struct DiagStore {
     submodules: Vec<SubmoduleInfo>,
     active: BTreeMap<(u16, u16, u16), Diagnosis>,
+    /// The DAP port submodule and its current remote mismatch, once registered
+    /// by [`DiagStore::with_port`].
+    port: Option<(SubmoduleInfo, Option<Mismatch>)>,
 }
 
 impl DiagStore {
@@ -145,6 +162,83 @@ impl DiagStore {
         DiagStore {
             submodules,
             active: BTreeMap::new(),
+            port: None,
+        }
+    }
+
+    /// Register the DAP port submodule so port diagnoses can be built
+    /// (module/submodule idents from the model's slot 0 / subslot 0x8001). If the
+    /// model has no such submodule the store stays port-less and
+    /// [`DiagStore::set_port_mismatch`] produces nothing.
+    pub fn with_port(mut self, model: &DeviceModel) -> Self {
+        self.port = model
+            .slots
+            .iter()
+            .find(|slot| slot.slot == PORT_SLOT)
+            .and_then(|slot| {
+                let sm = slot
+                    .submodules
+                    .iter()
+                    .find(|sm| sm.subslot == PORT_SUBSLOT)?;
+                Some(SubmoduleInfo {
+                    slot: Slot(PORT_SLOT),
+                    subslot: PORT_SUBSLOT,
+                    module_ident: slot.module_ident,
+                    submodule_ident: sm.submodule_ident,
+                    direction: Direction::InputOutput,
+                })
+            })
+            .map(|info| (info, None));
+        self
+    }
+
+    /// Set the port's mismatch state; returns the notification(s) implied:
+    /// Appears on a new mismatch, Disappears on `None`, Disappears (old) then
+    /// Appears (new) on a changed one, nothing when unchanged. Without a port
+    /// registered by [`DiagStore::with_port`] it returns nothing (and logs).
+    pub fn set_port_mismatch(&mut self, m: Option<Mismatch>) -> Vec<AlarmNotification> {
+        let Some((info, current)) = self.port.clone() else {
+            if let Some(m) = m {
+                log::warn!(
+                    "port mismatch {m:?} ignored: no DAP port submodule \
+                     (slot 0 / subslot 0x8001) registered"
+                );
+            }
+            return Vec::new();
+        };
+        if current == m {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(2);
+        if let Some(old) = current {
+            self.set_port_state(None);
+            out.push(self.build_port_notification(
+                &info,
+                old,
+                AlarmType::DiagnosisDisappears,
+                Specifier::Disappears,
+            ));
+        }
+        if let Some(new) = m {
+            self.set_port_state(Some(new));
+            out.push(self.build_port_notification(
+                &info,
+                new,
+                AlarmType::Diagnosis,
+                Specifier::Appears,
+            ));
+        }
+        out
+    }
+
+    /// The port's current remote mismatch (`None` also when no port is registered).
+    pub fn port_mismatch(&self) -> Option<Mismatch> {
+        self.port.as_ref().and_then(|(_, m)| *m)
+    }
+
+    fn set_port_state(&mut self, m: Option<Mismatch>) {
+        if let Some((_, current)) = self.port.as_mut() {
+            *current = m;
         }
     }
 
@@ -224,26 +318,88 @@ impl DiagStore {
         Some(self.build_notification(&info, &removed, AlarmType::DiagnosisDisappears, specifier))
     }
 
-    /// True if any active diagnosis has `Severity::Fault`.
+    /// True if any active diagnosis has `Severity::Fault`, or a port mismatch is
+    /// set (always a fault).
     pub fn problem_indicator(&self) -> bool {
         self.active.values().any(|d| d.severity == Severity::Fault)
+            || self.port_mismatch().is_some()
     }
 
-    /// Every currently active diagnosis.
+    /// Every currently active application diagnosis (the port's remote mismatch
+    /// is not a [`ChannelError`]; see [`DiagStore::port_mismatch`]).
     pub fn active(&self) -> Vec<Diagnosis> {
         self.active.values().cloned().collect()
     }
 
-    /// One `Appears` notification per currently active diagnosis, for replaying
-    /// state to a newly connected controller.
+    /// One `Appears` notification per currently active diagnosis (the port's
+    /// remote mismatch included, last), for replaying state to a newly connected
+    /// controller.
     pub fn replay(&self) -> Vec<AlarmNotification> {
-        self.active
+        let mut out: Vec<AlarmNotification> = self
+            .active
             .values()
             .filter_map(|d| {
                 let info = self.info(d.slot)?;
                 Some(self.build_notification(info, d, AlarmType::Diagnosis, Specifier::Appears))
             })
-            .collect()
+            .collect();
+        if let Some((info, Some(m))) = &self.port {
+            out.push(self.build_port_notification(
+                info,
+                *m,
+                AlarmType::Diagnosis,
+                Specifier::Appears,
+            ));
+        }
+        out
+    }
+
+    /// Whether any diagnosis — application or port — is active on the AR.
+    fn ar_diag(&self) -> bool {
+        !self.active.is_empty() || self.port_mismatch().is_some()
+    }
+
+    /// The port's remote-mismatch `ExtChannelDiagnosis` (docs/pdev-golden-frames.md
+    /// §2.10): whole submodule, `ChannelErrorType` [`PORT_ERROR_TYPE`],
+    /// `ExtChannelErrorType` from `m`, direction 0 (manufacturer specific), Fault.
+    /// The `AlarmSpecifier` flags reflect the store's state as already updated.
+    fn build_port_notification(
+        &self,
+        info: &SubmoduleInfo,
+        m: Mismatch,
+        alarm_type: AlarmType,
+        specifier: Specifier,
+    ) -> AlarmNotification {
+        let port_diag = self.port_mismatch().is_some();
+        AlarmNotification {
+            alarm_type,
+            api: 0,
+            slot: info.slot.0,
+            subslot: info.subslot,
+            module_ident: info.module_ident,
+            submodule_ident: info.submodule_ident,
+            specifier: AlarmSpecifier {
+                sequence: 0,
+                channel_diag: port_diag,
+                manufacturer_diag: false,
+                submodule_diag: port_diag,
+                ar_diag: self.ar_diag(),
+            },
+            usi: USI_EXT_CHANNEL_DIAG,
+            data: UserData::ExtChannel(ExtChannelDiagnosis {
+                channel: WHOLE_SUBMODULE,
+                properties: ChannelProperties {
+                    type_: 0,
+                    accumulative: false,
+                    maintenance: Maintenance::Fault,
+                    specifier,
+                    direction: 0,
+                },
+                error_type: PORT_ERROR_TYPE,
+                ext_error_type: m.ext_error_type(),
+                ext_add_value: 0,
+            }),
+        }
     }
 
     fn build_notification(
@@ -254,7 +410,7 @@ impl DiagStore {
         specifier: Specifier,
     ) -> AlarmNotification {
         let channel_diag = self.active.keys().any(|&(slot, _, _)| slot == d.slot.0);
-        let ar_diag = !self.active.is_empty();
+        let ar_diag = self.ar_diag();
         let maintenance = match d.severity {
             Severity::Fault => Maintenance::Fault,
             Severity::MaintenanceRequired => Maintenance::Required,
@@ -300,6 +456,7 @@ mod tests {
     use super::*;
     use crate::alarm::*;
     use crate::config::{Direction, Slot};
+    use crate::eth::MacAddr;
 
     fn store() -> DiagStore {
         DiagStore::new(vec![
@@ -492,6 +649,113 @@ mod tests {
             ),
             (1, 2, 3)
         );
+    }
+
+    #[test]
+    fn port_mismatch_appears_changes_and_disappears_as_ext_channel_diag() {
+        use crate::pdev::Mismatch;
+        let model = DeviceModel::pnet_sample(MacAddr([0; 6]));
+        let mut s = DiagStore::from_model(&model).with_port(&model);
+        assert!(s.set_port_mismatch(None).is_empty());
+        let n = s.set_port_mismatch(Some(Mismatch::Port));
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].alarm_type, AlarmType::Diagnosis);
+        assert_eq!((n[0].slot, n[0].subslot), (0, 0x8001));
+        assert_eq!(n[0].usi, USI_EXT_CHANNEL_DIAG);
+        let UserData::ExtChannel(d) = &n[0].data else {
+            panic!()
+        };
+        assert_eq!(d.channel, WHOLE_SUBMODULE);
+        assert_eq!(d.error_type, PORT_ERROR_TYPE);
+        assert_eq!(d.ext_error_type, Mismatch::Port.ext_error_type());
+        assert!(s.problem_indicator());
+        assert!(
+            s.set_port_mismatch(Some(Mismatch::Port)).is_empty(),
+            "no churn"
+        );
+        let n = s.set_port_mismatch(Some(Mismatch::Chassis));
+        assert_eq!(n.len(), 2, "old disappears, new appears");
+        assert_eq!(n[0].alarm_type, AlarmType::DiagnosisDisappears);
+        assert_eq!(n[1].alarm_type, AlarmType::Diagnosis);
+        assert_eq!(s.replay().len(), 1);
+        let n = s.set_port_mismatch(None);
+        assert_eq!(n[0].alarm_type, AlarmType::DiagnosisDisappears);
+        assert!(!s.problem_indicator());
+        assert!(s.replay().is_empty());
+        assert!(
+            s.active().is_empty(),
+            "the port entry is not an application ChannelError"
+        );
+    }
+
+    #[test]
+    fn port_mismatch_without_with_port_is_ignored() {
+        let model = DeviceModel::pnet_sample(MacAddr([0; 6]));
+        let mut s = DiagStore::from_model(&model);
+        assert!(s
+            .set_port_mismatch(Some(crate::pdev::Mismatch::NoPeer))
+            .is_empty());
+    }
+
+    /// The port diagnosis on the wire: the full AlarmNotification block body as
+    /// `build_frame` encodes it (docs/pdev-golden-frames.md §2.10), and back.
+    #[test]
+    fn port_mismatch_notification_encodes_ext_channel_diag_bytes() {
+        use crate::pdev::Mismatch;
+        let model = DeviceModel::pnet_sample(MacAddr([0; 6]));
+        let mut s = DiagStore::from_model(&model).with_port(&model);
+        let frame_of = |n: &AlarmNotification| {
+            let pdu = RtaPdu {
+                priority: Priority::Low,
+                header: RtaHeader {
+                    dst_ref: 1,
+                    src_ref: 2,
+                    pdu_type: PduType::Data,
+                    tack: true,
+                    send_seq: 0,
+                    ack_seq: SEQ_NONE,
+                },
+                body: RtaBody::Data(RtaData::Notification(n.clone())),
+            };
+            let f = build_frame(MacAddr([1; 6]), MacAddr([2; 6]), &pdu);
+            assert_eq!(parse_frame(&f).unwrap(), pdu, "round-trips");
+            f
+        };
+        // BlockHeader (0x0002 low, BlockLength 36, v1.0) + AlarmNotification body.
+        let header = |alarm_type: u8, alarm_spec: [u8; 2]| {
+            let mut v = vec![0x00, 0x02, 0x00, 0x24, 0x01, 0x00];
+            v.extend_from_slice(&[0x00, alarm_type]); // AlarmType
+            v.extend_from_slice(&[0, 0, 0, 0]); // API 0
+            v.extend_from_slice(&[0x00, 0x00, 0x80, 0x01]); // slot 0, subslot 0x8001
+            v.extend_from_slice(&[0, 0, 0, 0x01, 0, 0, 0x80, 0x01]); // module 0x1, submodule 0x8001
+            v.extend_from_slice(&alarm_spec);
+            v.extend_from_slice(&[0x80, 0x02]); // USI ExtChannelDiagnosis
+            v
+        };
+
+        let n = s.set_port_mismatch(Some(Mismatch::NoPeer));
+        let mut want = header(0x01, [0xA8, 0x00]); // channel+submodule+AR diag
+        want.extend_from_slice(&[
+            0x80, 0x00, // ChannelNumber: whole submodule
+            0x08, 0x00, // ChannelProperties: type 0, Fault, Appears, direction 0
+            0x80, 0x01, // ChannelErrorType: Remote mismatch
+            0x80, 0x05, // ExtChannelErrorType: no peer detected
+            0x00, 0x00, 0x00, 0x00, // ExtChannelAddValue
+        ]);
+        let f = frame_of(&n[0]);
+        assert_eq!(&f[f.len() - want.len()..], &want[..]);
+
+        let n = s.set_port_mismatch(None);
+        let mut want = header(0x0C, [0x00, 0x00]); // DiagnosisDisappears, nothing left
+        want.extend_from_slice(&[
+            0x80, 0x00, //
+            0x10, 0x00, // ChannelProperties: Fault, Disappears, direction 0
+            0x80, 0x01, //
+            0x80, 0x05, //
+            0x00, 0x00, 0x00, 0x00,
+        ]);
+        let f = frame_of(&n[0]);
+        assert_eq!(&f[f.len() - want.len()..], &want[..]);
     }
 
     #[test]
