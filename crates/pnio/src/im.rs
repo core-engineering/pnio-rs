@@ -474,7 +474,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pnio-imclear-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut s = ImStore::load(Some(dir.join("im")));
-        s.write(INDEX_IM1, &im1_record("FUNCTION", "LOCATION")).unwrap();
+        s.write(INDEX_IM1, &im1_record("FUNCTION", "LOCATION"))
+            .unwrap();
         assert_eq!(s.tag_function().trim(), "FUNCTION");
         s.clear();
         assert_eq!(s.tag_function().trim(), "");
