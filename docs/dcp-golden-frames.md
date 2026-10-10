@@ -1,5 +1,7 @@
 # DCP — Reference Golden Frames (ground truth)
 
+> Set-NameOfStation / Signal / Reset-to-factory frames: see [`pdev-golden-frames.md`](pdev-golden-frames.md) (provisional until the capture campaign).
+
 Real frames captured on bench: **S7-1500 CPU 1515-2 PN (FW V2.9)** = IO-Controller
 ↔ PLCSIM `i-device` instance. Capture `captures/dcp-identify.pcapng`, cross-decoded
 with Wireshark/tshark 4.6.6 (`pn_dcp` dissector). Used as **byte-exact test vectors**

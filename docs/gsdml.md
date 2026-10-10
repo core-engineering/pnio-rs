@@ -175,6 +175,8 @@ XSD results on `crates/pnio/testdata/gsdml/sample-16real-32bool.xml` (lxml 6, TI
 
 TIA GSD checker import: pending (manual import). Uninstall the old `pnio-dev` GSD first.
 
+**H1 outcome** (TIA writes I&M1-3 once `PNIO_Version="V2.31"`): _to be filled at HIL (plan Task 15)._
+
 ## Identity caveat
 
 The default identity — `vendor_id = 0xFFFF`, `device_id = 0x0001` — is a **development value,
@@ -210,7 +212,14 @@ let cfg = DeviceConfig::builder("pnio-dev")
     .output(Slot(3), &[FieldType::Real; 16])
     .build()?;
 
-let dev = IoDevice::start(cfg, StartOptions { iface, ip, rt, app_cpus })?;
+let dev = IoDevice::start(cfg, StartOptions {
+    iface, ip, rt, app_cpus,
+    im_store: None,
+    net_store: None,      // Some(path) persists a DCP-assigned name/IP
+    apply_ip: true,
+    lldp: true,
+    on_signal: None,
+})?;
 while !dev.ready() {
     std::thread::sleep(Duration::from_millis(5));
 }

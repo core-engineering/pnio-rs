@@ -6,9 +6,36 @@ follows SemVer's 0.y.z rules (breaking changes bump the minor version).
 
 ## [Unreleased]
 
-### Changed
+Plan 8 (PDEV / LLDP / DCP Set). Implemented; **bench validation (capture campaign, HIL) pending**:
+wire facts are provisional (dissector-sourced) in `docs/pdev-golden-frames.md`.
 
-- MSRV raised from 1.74 to 1.77: `thiserror` 2.0.21 requires rustc 1.77.
+### Added
+- GSDML V2.31 profile: `PNIO_Version="V2.31"`, `LLDP_NoD_Supported`, `ResetToFactoryModes="2 4"`,
+  `CertificationInfo`, interface `SupportedProtocols="LLDP"`.
+- `dcp`: Set-NameOfStation, Signal and Reset-to-factory (modes 2 and 4); `dcp::name` validation;
+  `NetParams`, `NetStore` (text file), `IpConfigurator` (`IpCommand` / `NoopIp` / `MockIp`).
+- `eth`: `EthProto` and `AfPacketTransport::open_with`.
+- `lldp`: LLDPDU codec (PROFINET and IEEE 802.3 TLVs), `LldpError`.
+- `pdev`: single-port state and peer tracking with TTL; `pdev::records` for PDPortDataReal
+  (`0x802A`), PDInterfaceDataReal (`0x8080`), PDPortDataCheck (`0x802B`), PDPortDataAdjust
+  (`0x802F`), PDInterfaceAdjust (`0x8071`), PDRealData (`0xF841`), PDExpectedData (`0xF842`).
+- `diag`: remote-mismatch ExtChannelDiagnosis (ChannelErrorType `0x8001`, USI `0x8002`).
+- `cm`: per-record Write statuses, `Cm::set_station_name`, `AbortReason::{DcpSet, ResetToFactory}`.
+- `device`: DCP effects, LLDP socket, PDEV tick, hooks, TTL-0 LLDPDU at shutdown.
+- `api`: `StartOptions { net_store, apply_ip, lldp, on_signal }`, `start_with(.., hooks)`,
+  `IoDevice::{net_params, signal_count, peer, port_mismatch}`.
+- `typed_bringup`: `--net-store`, `--no-apply-ip`, `--no-lldp`.
+
+### Changed
+- `StartOptions` has four new fields (breaking for struct literals); `DeviceSetup` gained
+  `net_store` and `iface`; `Device::new_with(.., hooks, now)`.
+- `dcp::decide_set` signature; `cm::build_write_res(req, statuses)` signature; `start_with`
+  signature (takes `DeviceHooks`); new `Action::WriteAccepted`.
+- Non-OK I&M writes now reach the wire (per-record Write status).
+
+### Fixed
+- TIA's `0xF841` / `0xF842` probes no longer answer "invalid index".
+- DCP Set-IP no longer requires the suite to equal the configured one.
 
 ## [0.1.0] — 2026-08-31
 

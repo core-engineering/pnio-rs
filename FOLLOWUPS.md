@@ -377,3 +377,32 @@ and I&M0-3 (`docs/design/2026-08-30-pnio-alarm-diag-im-design.md`):
   DAP `0/1` and the four modules), so the "IM_Supported 0x000E everywhere" ruling is still only
   backed by the p-net capture.
 
+
+## From Plan 8 (PDEV / LLDP / DCP Set)
+
+Out of scope per spec §2 (`docs/design/2026-10-10-pnio-pdev-lldp-dcp-design.md`):
+
+- SNMP (LLDP-MIB), MRP, PTP / IRT, `PDIRData`, `PDSyncData`, delay measurement.
+- Process alarms, plug/pull alarms, `ModuleDiffBlock` (unchanged from Plan 5).
+- Record indices `0xF820` (ARData), `0xF00C`, diagnosis record reads (`0x800A..`, `0xF80C`).
+- Rejecting Write records on unknown indices (the lenient ACK is kept, spec §5.5).
+- DCP ResetToFactory mode 8 (device restart) and modes 1 / 3 (answered `SuboptionNotSupported`).
+- A second physical port: `pdev` is written for one port (subslot `0x8001`); the record builders
+  take the port state as a parameter.
+- Applying `AdjustLinkState` and `AdjustMAUType`: stored and read back, never acted on.
+
+Found during implementation:
+
+- **Capture campaign + goldens (plan Task 2) and HIL (Task 15) pending**: every PDEV/LLDP/DCP-Set
+  wire fact is dissector-sourced (`docs/pdev-golden-frames.md`) until then; the `gsdml.md` "H1
+  outcome" line is to be filled at HIL.
+- **`tests/pdev_replay.rs` pending the goldens** (plan Task 14 Steps 1-2).
+- **PDExpectedData alignment**: if TIA's PDPortDataCheck is not 4-byte aligned, revisit the
+  `0xF842` builder.
+- **`device/mod.rs` is 2651 lines**: split the tests and the DCP-Set / PDEV glue out.
+- **An LLDP socket recv error aborts the acyclic loop** (same policy as the PROFINET socket).
+- **`as_text` text-vs-hex**: binary ids that happen to be all printable render as text.
+- **`attach_filter` doc**: the BPF programs are PROFINET-only (not valid for the LLDP socket).
+- **Facade test** asserting `net_params` / `signal_count` / `peer` / `port_mismatch` after a DCP Signal.
+- **`IoDevice::stop` doc is stale** (does not mention the TTL-0 LLDPDU).
+- **`typed_bringup`: the POSIX `on_signal` handler name clashes** with the `StartOptions::on_signal` hook naming.

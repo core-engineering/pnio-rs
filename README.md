@@ -77,6 +77,10 @@ let dev = IoDevice::start(cfg, StartOptions {
     rt: Some(RtOptions { iface: "eno2".into(), cpu_pin: Some(3), rt_priority: Some(80), lock_memory: true }),
     app_cpus: Some(vec![0, 1, 2]),
     im_store: Some("/var/lib/pnio/im.bin".into()),   // persists the I&M1-3 written by TIA
+    net_store: Some("/var/lib/pnio/net.txt".into()), // persists the name/IP assigned by DCP Set
+    apply_ip: true,                                  // push a DCP-assigned IP to the interface (cap_net_admin)
+    lldp: true,                                      // LLDP neighbourhood + PDEV records (EtherType 0x88CC)
+    on_signal: None,                                 // optional "flash the LED" callback for DCP Signal
 }).expect("start (needs cap_net_raw/cap_net_admin/cap_sys_nice/cap_ipc_lock)");
 
 while !dev.ready() {
@@ -113,7 +117,10 @@ TIA import and XSD validation steps).
 | Area | Module | Status |
 |---|---|---|
 | L2 framing, `AF_PACKET` transport, BPF filters, mock | `eth` | ✅ |
-| DCP Identify (name / all), Set‑IP | `dcp` | ✅ — Set‑name, Signal, Reset‑to‑factory: see Limitations |
+| DCP Identify (name / all), Set‑IP | `dcp` | ✅ HIL (Identify, Set‑IP) |
+| DCP Set‑NameOfStation, Signal, Reset‑to‑factory (modes 2 and 4), `NetParams` + text‑file `NetStore`, IP applied via `IpConfigurator` | `dcp` | 🟡 implemented, **bench validation pending** |
+| LLDP codec + neighbourhood, PDEV records (`0x802A/B/F`, `0x8071`, `0x8080`, `0xF841/2`), remote‑mismatch diagnosis | `lldp`, `pdev`, `diag` | 🟡 implemented, **bench validation pending** — wire facts are dissector‑sourced until the capture campaign ([`docs/pdev-golden-frames.md`](docs/pdev-golden-frames.md)) |
+| GSDML V2.31 profile (`LLDP_NoD_Supported`, `CertificationInfo`, `ResetToFactoryModes`) | `gsdml` | 🟡 XSD‑checked; TIA import and I&M1‑3 write (H1) pending |
 | DCE‑RPC CL codec, UDP transport | `rpc` | ✅ |
 | AR state machine, records, reconnect | `cm` | ✅ HIL |
 | Cyclic exchange, watchdog, RT thread | `rt` | ✅ HIL — 500 µs / 1 ms, 0 missed ticks |
@@ -131,13 +138,14 @@ application samples, controller‑side abort detected in 0.65 ms on device stop.
 
 ## Limitations (0.1)
 
-- **No DCP Set‑NameOfStation, Signal (LED flash) or Reset‑to‑factory**: the station name comes
-  from the configuration; TIA's *Assign PROFINET device name* is not served yet.
 - **No process alarms** (OB40), manufacturer‑specific diagnosis codes, plug/pull alarms,
   `ModuleDiffBlock`, or diagnosis record reads (`0x800x`, `0xF8xx` — answered "invalid index").
-- **I&M1‑3 writes were never issued by TIA V21** to this device (GSDML `PNIO_Version="V2.3"`);
-  the write path is unit‑tested only.
-- **RT class 1 only**: no IRT, no MRP, no LLDP/PTP topology (the V2.31+ GSDML profile).
+- **PDEV / LLDP / DCP Set are implemented, bench validation pending**: the byte layouts come
+  from the Wireshark dissector, not from a capture, until the capture campaign and the HIL run.
+  Whether TIA V21 now writes I&M1‑3 under `PNIO_Version="V2.31"` is still to be confirmed.
+- **No SNMP, no MRP, no PTP/IRT, single port** (subslot `0x8001`); DCP Reset‑to‑factory modes 1, 3
+  and 8 are refused, `AdjustLinkState`/`AdjustMAUType` are stored but never applied.
+- **RT class 1 only** (no IRT).
 - **Linux only**, single AR, development Vendor ID — **not PI‑certified**.
 
 ## Architecture
