@@ -63,7 +63,8 @@ impl NetParams {
     }
 
     /// The subnet mask as a prefix length (number of set bits, e.g. 24 for
-    /// `255.255.255.0`).
+    /// `255.255.255.0`). Assumes a contiguous mask, which `decide_set` guarantees for
+    /// any suite it accepts (a non-contiguous one would be misread).
     pub fn prefix_len(&self) -> u8 {
         self.subnet.iter().map(|b| b.count_ones() as u8).sum()
     }

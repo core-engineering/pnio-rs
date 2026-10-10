@@ -189,8 +189,10 @@ pub fn parse_set_request(block_bytes: &[u8]) -> Result<SetRequest, DcpError> {
                 });
             }
             (2, 2) => {
-                let name = String::from_utf8(b.value.clone())
-                    .map_err(|_| DcpError::Malformed("NameOfStation is not UTF-8"))?;
+                // Lossy: a non-UTF-8 byte becomes U+FFFD, which `validate_station_name`
+                // rejects, so the block is answered `SuboptionNotSet` instead of the
+                // whole request being dropped.
+                let name = String::from_utf8_lossy(&b.value).into_owned();
                 out.push(SetBlock::NameOfStation { qualifier, name });
             }
             (5, 3) => {
@@ -213,9 +215,10 @@ pub fn parse_set_request(block_bytes: &[u8]) -> Result<SetRequest, DcpError> {
 /// (and the IP pushed to the interface, the file written, the AR aborted) by
 /// `device::Device`, which also turns an application failure into `SetNotPossible`.
 ///
-/// NameOfStation failing [`validate_station_name`] and a Signal other than "Flash Once"
-/// are refused with `SuboptionNotSet`; a ResetToFactory mode other than 2 or 4 and any
-/// unimplemented option/suboption with `SuboptionNotSupported`. Any IP suite is accepted.
+/// NameOfStation failing [`validate_station_name`], an IP suite whose subnet mask is not
+/// contiguous and a Signal other than "Flash Once" are refused with `SuboptionNotSet`; a
+/// ResetToFactory mode other than 2 or 4 and any unimplemented option/suboption with
+/// `SuboptionNotSupported`. Any other IP suite (including all-zero) is accepted.
 pub fn decide_set(req: &SetRequest) -> Vec<SetDecision> {
     req.blocks
         .iter()
@@ -234,6 +237,10 @@ pub fn decide_set(req: &SetRequest) -> Vec<SetDecision> {
                     SetDecision::err(2, 2, SetBlockError::SuboptionNotSet)
                 }
             },
+            SetBlock::IpSuite { subnet, .. } if !is_contiguous_mask(*subnet) => {
+                log::warn!("DCP Set IP refused: non-contiguous subnet mask {subnet:?}");
+                SetDecision::err(1, 2, SetBlockError::SuboptionNotSet)
+            }
             SetBlock::IpSuite {
                 qualifier,
                 ip,
@@ -260,6 +267,12 @@ pub fn decide_set(req: &SetRequest) -> Vec<SetDecision> {
             }
         })
         .collect()
+}
+
+/// A subnet mask is well formed when its set bits are all leading (`/0` to `/32`).
+fn is_contiguous_mask(subnet: [u8; 4]) -> bool {
+    let m = u32::from_be_bytes(subnet);
+    m.leading_ones() + m.trailing_zeros() == 32
 }
 
 /// Build the full Ethernet frame of a Set response (untagged, no BlockInfo on the
@@ -494,38 +507,124 @@ mod tests {
             ],
         };
         let d = decide_set(&req);
-        assert_eq!(d[0].error, SetBlockError::Ok);
+        let tuples: Vec<_> = d.iter().map(SetDecision::tuple).collect();
         assert_eq!(
-            d[0].effect,
-            Some(Effect::SetName {
-                name: "ok-name".into(),
-                permanent: true
-            })
+            tuples,
+            vec![
+                (2, 2, SetBlockError::Ok),
+                (2, 2, SetBlockError::SuboptionNotSet),
+                (1, 2, SetBlockError::Ok),
+                (5, 3, SetBlockError::Ok),
+                (5, 3, SetBlockError::SuboptionNotSet),
+                (5, 6, SetBlockError::Ok),
+                (5, 6, SetBlockError::SuboptionNotSupported),
+                (2, 9, SetBlockError::SuboptionNotSupported),
+            ]
         );
-        assert_eq!((d[0].option, d[0].suboption), (2, 2));
-        assert_eq!(d[1].error, SetBlockError::SuboptionNotSet);
-        assert_eq!(d[1].effect, None);
+        let effects: Vec<_> = d.iter().map(|x| x.effect.clone()).collect();
         assert_eq!(
-            d[2].effect,
-            Some(Effect::SetIp {
-                ip: [10, 0, 0, 2],
-                subnet: [255, 255, 0, 0],
-                gateway: [10, 0, 0, 1],
-                permanent: false
-            })
+            effects,
+            vec![
+                Some(Effect::SetName {
+                    name: "ok-name".into(),
+                    permanent: true
+                }),
+                None,
+                Some(Effect::SetIp {
+                    ip: [10, 0, 0, 2],
+                    subnet: [255, 255, 0, 0],
+                    gateway: [10, 0, 0, 1],
+                    permanent: false
+                }),
+                Some(Effect::Signal),
+                None,
+                Some(Effect::Reset { mode: 2 }),
+                None,
+                None,
+            ]
         );
-        assert_eq!(d[3].effect, Some(Effect::Signal));
-        assert_eq!(d[4].error, SetBlockError::SuboptionNotSet);
-        assert_eq!(d[5].effect, Some(Effect::Reset { mode: 2 }));
         assert_eq!(
             reset_mode(8 << 1),
             8,
             "refused because mode 8 is unsupported, not because it decoded to 0"
         );
-        assert_eq!(d[6].error, SetBlockError::SuboptionNotSupported);
+    }
+
+    /// A synthetic Set request carrying `blocks` (qualifier in `block_info`).
+    fn set_frame(blocks: &[DcpBlock]) -> Vec<u8> {
+        crate::testutil::dcp_set_frame(
+            MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xf8]),
+            MacAddr([0xec, 0x1c, 0x5d, 0x61, 0xe7, 0x3f]),
+            0x0300_0201,
+            blocks,
+        )
+    }
+
+    #[test]
+    fn non_utf8_name_is_refused_and_the_other_blocks_still_answered() {
+        let f = set_frame(&[
+            DcpBlock {
+                option: 2,
+                suboption: 2,
+                block_info: Some(QUALIFIER_PERMANENT),
+                value: vec![b'd', b'e', b'v', 0xff],
+            },
+            DcpBlock {
+                option: 5,
+                suboption: 3,
+                block_info: Some(0),
+                value: vec![0x01, 0x00],
+            },
+        ]);
+        let req = parse_set_request(blocks_of(&f)).unwrap();
+        let d = decide_set(&req);
         assert_eq!(
-            (d[7].option, d[7].suboption, d[7].error),
-            (2, 9, SetBlockError::SuboptionNotSupported)
+            d.iter().map(SetDecision::tuple).collect::<Vec<_>>(),
+            vec![
+                (2, 2, SetBlockError::SuboptionNotSet),
+                (5, 3, SetBlockError::Ok)
+            ]
+        );
+        assert_eq!(d[0].effect, None);
+        assert_eq!(d[1].effect, Some(Effect::Signal));
+        // the dispatch answers instead of dropping the request
+        let resp = handle_dcp_frame(&f, &cfg([172, 16, 2, 10])).unwrap();
+        assert!(resp.is_some());
+    }
+
+    #[test]
+    fn non_contiguous_subnet_is_refused() {
+        let suite = |subnet| SetBlock::IpSuite {
+            qualifier: 0,
+            ip: [10, 0, 0, 2],
+            subnet,
+            gateway: [10, 0, 0, 1],
+        };
+        let req = SetRequest {
+            blocks: vec![
+                suite([255, 0, 255, 0]),
+                suite([255, 255, 255, 255]),
+                suite([255, 255, 255, 128]),
+            ],
+        };
+        let d = decide_set(&req);
+        assert_eq!(d[0].tuple(), (1, 2, SetBlockError::SuboptionNotSet));
+        assert_eq!(d[0].effect, None);
+        assert_eq!(d[1].error, SetBlockError::Ok);
+        assert_eq!(d[2].error, SetBlockError::Ok);
+    }
+
+    #[test]
+    fn signal_with_one_byte_value_is_malformed() {
+        let f = set_frame(&[DcpBlock {
+            option: 5,
+            suboption: 3,
+            block_info: Some(0),
+            value: vec![0x01],
+        }]);
+        assert_eq!(
+            parse_set_request(blocks_of(&f)),
+            Err(DcpError::Malformed("Signal value must be 2 bytes"))
         );
     }
 
