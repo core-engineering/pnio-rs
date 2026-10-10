@@ -390,6 +390,8 @@ impl DeviceConfig {
             rt,
             im0,
             im_store: None,
+            net_store: None,
+            iface: String::new(),
         }
     }
 }

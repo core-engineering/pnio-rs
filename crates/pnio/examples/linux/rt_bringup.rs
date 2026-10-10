@@ -166,6 +166,8 @@ pub fn main() {
         }),
         im0: Im0::default(),
         im_store: None,
+        net_store: None,
+        iface: String::new(),
     };
     let eth = AfPacketTransport::open(&a.iface).expect("AF_PACKET (need cap_net_raw)");
     eth.attach_filter(&pnio::eth::bpf::acyclic_filter())

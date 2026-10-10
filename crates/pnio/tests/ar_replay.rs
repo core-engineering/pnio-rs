@@ -38,6 +38,8 @@ fn reference_exchange_replays_byte_exact() {
         rt: None,
         im0: Im0::default(),
         im_store: None,
+        net_store: None,
+        iface: String::new(),
     };
     let eth = MockTransport::new();
     let rpc = MockRpcTransport::new();

@@ -86,9 +86,49 @@ pub struct DcpConfig {
     pub properties: DeviceProperties,
 }
 
-/// Handle one received Ethernet frame. Returns the response frame to send, or
-/// `None` if the frame is not a DCP request this device should answer.
+/// What a received frame asks of the device, once classified against a [`DcpConfig`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DcpRequest {
+    /// An Identify this device must answer with this ready-made frame.
+    Identify {
+        /// The Identify response, ready to send.
+        reply: Vec<u8>,
+    },
+    /// A Set request: the decisions per block; the caller applies the effects and answers.
+    Set {
+        /// The requester's MAC (the response's destination).
+        src: MacAddr,
+        /// The request's `Xid`, echoed in the response.
+        xid: u32,
+        /// One decision per request block, in request order.
+        decisions: Vec<SetDecision>,
+    },
+}
+
+/// Handle one received Ethernet frame without side effects. Returns the response
+/// frame to send (Identify: its reply; Set: the response built from the decisions,
+/// effects *not* applied), or `None` if the frame is not a DCP request this device
+/// should answer. `device::Device` uses [`classify`] instead, to apply Set effects.
 pub fn handle_dcp_frame(frame: &[u8], cfg: &DcpConfig) -> Result<Option<Vec<u8>>, DcpError> {
+    Ok(match classify(frame, cfg)? {
+        Some(DcpRequest::Identify { reply }) => Some(reply),
+        Some(DcpRequest::Set {
+            src,
+            xid,
+            decisions,
+        }) => {
+            let results: Vec<_> = decisions.iter().map(SetDecision::tuple).collect();
+            Some(build_set_response(src, cfg.mac, xid, &results))
+        }
+        None => None,
+    })
+}
+
+/// Classify one received Ethernet frame against `cfg`: an Identify this device
+/// matches comes back with its reply; a Set request comes back with the per-block
+/// [`SetDecision`]s (the caller applies the effects and answers); anything else is
+/// `None`.
+pub fn classify(frame: &[u8], cfg: &DcpConfig) -> Result<Option<DcpRequest>, DcpError> {
     let (eth, payload_off) =
         EthHeader::parse(frame).map_err(|_| DcpError::Malformed("bad Ethernet header"))?;
     if eth.ethertype != ETHERTYPE_PROFINET {
@@ -117,12 +157,9 @@ pub fn handle_dcp_frame(frame: &[u8], cfg: &DcpConfig) -> Result<Option<Vec<u8>>
                 filter.all_selector
             };
             if respond {
-                Ok(Some(build_identify_response(
-                    eth.src,
-                    cfg.mac,
-                    header.xid,
-                    &cfg.properties,
-                )))
+                Ok(Some(DcpRequest::Identify {
+                    reply: build_identify_response(eth.src, cfg.mac, header.xid, &cfg.properties),
+                }))
             } else {
                 Ok(None)
             }
@@ -138,14 +175,20 @@ pub fn handle_dcp_frame(frame: &[u8], cfg: &DcpConfig) -> Result<Option<Vec<u8>>
                 return Ok(None);
             }
             let req = parse_set_request(blocks)?;
-            // Effects are ignored here until `device::Device` owns the Set dispatch.
-            let results: Vec<_> = decide_set(&req).iter().map(SetDecision::tuple).collect();
-            for (option, suboption, err) in &results {
-                log::info!("DCP Set block ({option}, {suboption}) -> {err:?}");
+            let decisions = decide_set(&req);
+            for d in &decisions {
+                log::info!(
+                    "DCP Set block ({}, {}) -> {:?}",
+                    d.option,
+                    d.suboption,
+                    d.error
+                );
             }
-            Ok(Some(build_set_response(
-                eth.src, cfg.mac, header.xid, &results,
-            )))
+            Ok(Some(DcpRequest::Set {
+                src: eth.src,
+                xid: header.xid,
+                decisions,
+            }))
         }
         _ => Ok(None),
     }

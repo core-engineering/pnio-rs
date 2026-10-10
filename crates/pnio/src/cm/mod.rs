@@ -245,6 +245,11 @@ impl Cm {
         &self.im
     }
 
+    /// The I&M1-3 store, for ResetToFactory.
+    pub fn im_store_mut(&mut self) -> &mut ImStore {
+        &mut self.im
+    }
+
     /// Rename the device for the PNIO side: the record model's station name and the
     /// ARServerBlock of the next Connect (an established AR keeps its cached Connect
     /// response).

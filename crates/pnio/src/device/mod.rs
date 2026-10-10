@@ -1,10 +1,11 @@
-//! The acyclic loop: services the DCP (Ethernet) and RPC (UDP) sockets, drives
-//! [`Cm`] with what they produce, and executes its outputs. Log-and-drop
-//! for parse errors (spec §8); only transport I/O failures abort the loop.
+//! The acyclic loop: services the DCP (Ethernet) and RPC (UDP) sockets and the
+//! optional LLDP one, drives [`Cm`] and the [`Pdev`] with what they produce, and
+//! executes their outputs. Log-and-drop for parse errors (spec §8); only transport
+//! I/O failures abort the loop.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,11 +17,17 @@ use crate::alarm::{
 use crate::cm::model::DeviceModel;
 use crate::cm::{AbortReason, ArParams, ArState, Cm, CmOutput, PnioStatus};
 use crate::config::Slot;
-use crate::dcp::{handle_dcp_frame, DcpConfig};
+use crate::dcp::{
+    build_set_response, classify, DcpConfig, DcpRequest, Effect, IpConfigurator, NetParams,
+    NetStore, NoopIp, SetBlockError, SetDecision,
+};
 use crate::diag::{ChannelError, DiagStore, Diagnosis};
 use crate::eth::poll::wait_any_readable;
+use crate::eth::MacAddr;
 use crate::eth::{EthTransport, TransportError};
 use crate::im::{Im0, ImStore};
+use crate::lldp::Peer;
+use crate::pdev::{LinkProbe, Mismatch, MockLink, Pdev, PdevAction};
 use crate::rpc::{RpcError, RpcTransport, Uuid};
 use crate::rt::{IoImage, RtStats};
 #[cfg(target_os = "linux")]
@@ -67,6 +74,53 @@ pub struct DeviceSetup {
     /// Backing file for the writable I&M1-3 records; `None` keeps them in memory
     /// only (blank at startup, lost on restart).
     pub im_store: Option<PathBuf>,
+    /// Backing file of the DCP-assigned identity (NameOfStation + IP suite); `None` =
+    /// RAM only. When the file holds an identity it wins over [`DeviceSetup::dcp`]'s at
+    /// startup; it is only created by the first permanent DCP Set or a ResetToFactory.
+    pub net_store: Option<PathBuf>,
+    /// The interface an [`IpConfigurator`] reconfigures; empty when none applies.
+    pub iface: String,
+}
+
+/// Injectable side effects (defaults: no-op IP, always-up link, no LLDP transport, no
+/// hook). [`Device::new`] installs the defaults; [`Device::new_with`] takes them.
+pub struct DeviceHooks {
+    /// Pushes a DCP-assigned IP suite to the operating system.
+    pub ip: Box<dyn IpConfigurator>,
+    /// The port's link state (moved into the [`Pdev`]).
+    pub link: Box<dyn LinkProbe>,
+    /// The LLDP transport (an `AF_PACKET` socket on EtherType `0x88CC` in production).
+    /// `None` = no LLDP and no PDEV: PDEV records answer "invalid index", as before
+    /// Plan 8.
+    pub lldp: Option<Box<dyn EthTransport>>,
+    /// Called on every accepted DCP Signal ("flash the LED once"), from the acyclic
+    /// loop's thread.
+    pub on_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl Default for DeviceHooks {
+    fn default() -> Self {
+        DeviceHooks {
+            ip: Box::new(NoopIp),
+            link: Box::new(MockLink(AtomicBool::new(true))),
+            lldp: None,
+            on_signal: None,
+        }
+    }
+}
+
+/// The device identity and port view, published by the acyclic loop for the
+/// application (read through [`Device::device_shared`]).
+#[derive(Debug, Default)]
+pub struct DeviceShared {
+    /// The current identity (NameOfStation + IP suite).
+    pub net: Mutex<NetParams>,
+    /// Accepted DCP Signal requests since start.
+    pub signal_count: AtomicU32,
+    /// The current LLDP neighbour, if any.
+    pub peer: Mutex<Option<Peer>>,
+    /// The current remote (expected-vs-actual peer) mismatch, if any.
+    pub port_mismatch: Mutex<Option<Mismatch>>,
 }
 
 /// One diagnosis change the application asks the acyclic loop to apply. Queued in
@@ -167,7 +221,7 @@ pub struct StepReport {
     pub sent: usize,
 }
 
-/// Transport I/O failures from `step`/`run`. Parse errors from `handle_dcp_frame` or
+/// Transport I/O failures from `step`/`run`. Parse errors from [`classify`] or
 /// `Cm::handle_datagram` never reach here — those are logged and dropped in place.
 #[derive(Debug, Error)]
 pub enum DeviceError {
@@ -181,8 +235,10 @@ pub enum DeviceError {
 
 /// Owns both transports and the `Cm` state machine, and runs the single-threaded
 /// acyclic loop: wait for readiness, drain both sockets (DCP frames through
-/// [`handle_dcp_frame`], RPC datagrams through [`Cm::handle_datagram`]), then let
-/// `Cm::tick` drive its timers, dispatching every PDU/notification each step produces.
+/// [`classify`], RPC datagrams through [`Cm::handle_datagram`]) plus the optional
+/// LLDP one, then let `Cm::tick` and the [`Pdev`] drive their timers, dispatching
+/// every PDU/notification each step produces. It owns the device identity
+/// ([`NetParams`]) and applies DCP Set effects (name, IP, signal, reset-to-factory).
 pub struct Device<E: EthTransport, R: RpcTransport> {
     setup: DeviceSetup,
     eth: E,
@@ -219,6 +275,19 @@ pub struct Device<E: EthTransport, R: RpcTransport> {
     /// otherwise a stale abort (e.g. the controller's ERR-RTA) drained in the same
     /// `step` as its reconnect would tear down the AR that reconnect just built.
     alarm_epoch: u64,
+    /// The current identity: the single source of truth DCP, the ARServerBlock, LLDP
+    /// and [`DeviceShared`] are fed from (see `apply_net`).
+    net: NetParams,
+    /// Where permanent DCP Sets and ResetToFactory persist [`Device::net`].
+    net_store: NetStore,
+    /// Pushes DCP-assigned IP suites to the OS (on `setup.iface`).
+    ip: Box<dyn IpConfigurator>,
+    /// Called on every accepted DCP Signal.
+    on_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// The LLDP socket; `None` = no LLDP and no PDEV.
+    lldp_eth: Option<Box<dyn EthTransport>>,
+    /// Identity and port view published for the application.
+    shared: Arc<DeviceShared>,
     /// The currently running RT thread, if any (Linux-only: the runner itself is
     /// only ever built on Linux).
     #[cfg(target_os = "linux")]
@@ -230,14 +299,49 @@ pub struct Device<E: EthTransport, R: RpcTransport> {
 }
 
 impl<E: EthTransport, R: RpcTransport> Device<E, R> {
-    /// Builds a `Device` from its static [`DeviceSetup`] and the two transports; the
-    /// AR starts `Idle`, the I/O image starts empty, and no RT thread runs until the
-    /// AR reaches `Data`.
+    /// Builds a `Device` from its static [`DeviceSetup`] and the two transports, with
+    /// the default [`DeviceHooks`] (no IP changes, no LLDP, no PDEV); the AR starts
+    /// `Idle`, the I/O image starts empty, and no RT thread runs until the AR reaches
+    /// `Data`.
     pub fn new(setup: DeviceSetup, eth: E, rpc: R) -> Device<E, R> {
+        Self::new_with(setup, eth, rpc, DeviceHooks::default(), Instant::now())
+    }
+
+    /// [`Device::new`] with explicit side effects: the IP configurator, the link probe,
+    /// the LLDP transport (which also installs the [`Pdev`]: no LLDP socket, no PDEV)
+    /// and the Signal hook. The startup identity is the [`DeviceSetup::net_store`]
+    /// file's when it holds one, else [`DeviceSetup::dcp`]'s; the first LLDPDU is due
+    /// at `now`.
+    pub fn new_with(
+        setup: DeviceSetup,
+        eth: E,
+        rpc: R,
+        hooks: DeviceHooks,
+        now: Instant,
+    ) -> Device<E, R> {
+        let DeviceHooks {
+            ip,
+            link,
+            lldp,
+            on_signal,
+        } = hooks;
+        let net_store = NetStore::new(setup.net_store.clone());
+        let props = &setup.dcp.properties;
+        let net = net_store.load().unwrap_or_else(|| NetParams {
+            name: props.name_of_station.clone(),
+            ip: props.ip,
+            subnet: props.subnet,
+            gateway: props.gateway,
+        });
         let mut cm = Cm::new(setup.model.clone(), setup.activity_seed);
         cm.set_im(setup.im0.clone(), ImStore::load(setup.im_store.clone()));
-        let diag = DiagStore::from_model(&setup.model);
-        Device {
+        if lldp.is_some() {
+            // No LLDP socket = no PDEV: PDEV records answer "invalid index" as before,
+            // which keeps the pre-Plan 8 device tests byte-identical.
+            cm.set_pdev(Some(Pdev::new(setup.dcp.mac.0, link, now)));
+        }
+        let diag = DiagStore::from_model(&setup.model).with_port(&setup.model);
+        let mut dev = Device {
             setup,
             eth,
             rpc,
@@ -251,11 +355,56 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             alarm: None,
             next_alarm_id: 0,
             alarm_epoch: 0,
+            net: NetParams::default(),
+            net_store,
+            ip,
+            on_signal,
+            lldp_eth: lldp,
+            shared: Arc::new(DeviceShared::default()),
             #[cfg(target_os = "linux")]
             runner: None,
             #[cfg(target_os = "linux")]
             runner_factory: Box::new(RtRunner::spawn),
-        }
+        };
+        dev.apply_net(net, now);
+        dev
+    }
+
+    /// The current identity (NameOfStation + IP suite).
+    pub fn net_params(&self) -> NetParams {
+        self.net.clone()
+    }
+
+    /// Accepted DCP Signal requests since start.
+    pub fn signal_count(&self) -> u32 {
+        self.shared.signal_count.load(Ordering::Relaxed)
+    }
+
+    /// The current LLDP neighbour (`None` without a PDEV, i.e. without an LLDP socket).
+    pub fn peer(&self) -> Option<Peer> {
+        self.cm.pdev().and_then(|p| p.peer().cloned())
+    }
+
+    /// The current remote (expected-vs-actual peer) mismatch, if any.
+    pub fn port_mismatch(&self) -> Option<Mismatch> {
+        self.diag.port_mismatch()
+    }
+
+    /// The identity and port view the loop publishes, for reading from another thread.
+    pub fn device_shared(&self) -> Arc<DeviceShared> {
+        self.shared.clone()
+    }
+
+    /// The connection manager (test/embedding hook).
+    #[doc(hidden)]
+    pub fn cm(&self) -> &Cm {
+        &self.cm
+    }
+
+    /// The connection manager, mutably (test/embedding hook).
+    #[doc(hidden)]
+    pub fn cm_mut(&mut self) -> &mut Cm {
+        &mut self.cm
     }
 
     /// The AR's current state.
@@ -361,30 +510,48 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         self.abort_with_err_rta_in(reason, now, &mut report)
     }
 
-    /// Tells the controller the device is going away: ERR-RTA "AR removed" on the
-    /// alarm channel plus an AR abort, so it sees the loss in milliseconds instead of
-    /// waiting for its own watchdog. A no-op with no AR up.
+    /// Tells the neighbours and the controller the device is going away: a TTL-0
+    /// LLDPDU (best effort, sent with or without an AR), the engineering records
+    /// cleared, then ERR-RTA "AR removed" on the alarm channel plus an AR abort, so the
+    /// controller sees the loss in milliseconds instead of waiting for its own
+    /// watchdog. The AR part is a no-op with no AR up.
     pub fn shutdown(&mut self, now: Instant) -> Result<(), DeviceError> {
+        if let (Some(t), Some(p)) = (&self.lldp_eth, self.cm.pdev()) {
+            if let Err(e) = t.send(&p.shutdown_frame()) {
+                log::warn!("LLDP shutdown PDU not sent: {e}");
+            }
+        }
+        let a = self
+            .cm
+            .pdev_mut()
+            .map(|p| p.clear_engineering())
+            .unwrap_or_default();
+        self.apply_pdev_actions(a, now)?;
         if self.cm.state() == ArState::Idle {
             return Ok(());
         }
         self.abort_with_err_rta(AbortReason::Shutdown, now)
     }
 
-    /// One loop iteration: wait for readiness (capped by both `wait` and `Cm`'s next
-    /// timer deadline), drain every pending DCP frame and RPC datagram, then let
-    /// `Cm::tick` drive its timers. Parse errors are logged and dropped; transport I/O
-    /// errors abort with `DeviceError`.
+    /// One loop iteration: wait for readiness (capped by `wait` and the next timer
+    /// deadline of `Cm`, the alarm channel and the PDEV), drain every pending DCP frame,
+    /// LLDP frame and RPC datagram, then let `Cm::tick` and `Pdev::tick` drive their
+    /// timers. Parse errors are logged and dropped; transport I/O errors abort with
+    /// `DeviceError` (LLDP *send* failures are only logged).
     pub fn step(
         &mut self,
         now: Instant,
         wait: Option<Duration>,
     ) -> Result<StepReport, DeviceError> {
         let alarm_deadline = self.alarm.as_ref().and_then(|ch| ch.next_deadline());
-        let deadline = match (self.cm.next_deadline(), alarm_deadline) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        let deadline = [
+            self.cm.next_deadline(),
+            alarm_deadline,
+            self.cm.pdev().and_then(|p| p.next_deadline()),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let deadline_wait = deadline.map(|d| d.saturating_duration_since(now));
         let effective_wait = match (wait, deadline_wait) {
             (Some(w), Some(d)) => Some(w.min(d)),
@@ -401,6 +568,9 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         // that drive time by hand stay deterministic.
         let now = if let (Some(eth_fd), Some(rpc_fd)) = (self.eth.raw_fd(), self.rpc.raw_fd()) {
             let mut fds = vec![eth_fd, rpc_fd];
+            if let Some(fd) = self.lldp_eth.as_ref().and_then(|t| t.raw_fd()) {
+                fds.push(fd);
+            }
             #[cfg(target_os = "linux")]
             if let Some(runner) = &self.runner {
                 fds.push(runner.event_fd());
@@ -449,13 +619,41 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
                 }
                 continue;
             }
-            match handle_dcp_frame(&frame, &self.setup.dcp) {
-                Ok(Some(resp)) => self.eth.send(&resp)?,
+            match classify(&frame, &self.setup.dcp) {
+                Ok(Some(DcpRequest::Identify { reply })) => self.eth.send(&reply)?,
+                Ok(Some(DcpRequest::Set { .. }))
+                    if frame.get(..6) != Some(&self.setup.dcp.mac.0[..]) =>
+                {
+                    // Set is unicast: one seen here for another MAC (a promiscuous
+                    // socket) must neither be applied nor answered.
+                    log::trace!("DCP Set addressed to another station; dropping");
+                }
+                Ok(Some(DcpRequest::Set {
+                    src,
+                    xid,
+                    decisions,
+                })) => self.handle_set(src, xid, decisions, now, &mut pending, &mut report)?,
                 Ok(None) => {}
                 Err(e) => log::warn!("dropping unparsable DCP frame: {e}"),
             }
         }
         self.publish_alarm_stats();
+
+        // (1b) LLDP: frames first (the transport borrow), then the PDEV actions.
+        let mut lldp_frames = Vec::new();
+        if let Some(t) = &self.lldp_eth {
+            while let Some(f) = t.recv(Some(Duration::ZERO))? {
+                lldp_frames.push(f);
+            }
+        }
+        for f in lldp_frames {
+            let actions = self
+                .cm
+                .pdev_mut()
+                .map(|p| p.on_rx(&f, now))
+                .unwrap_or_default();
+            self.apply_pdev_actions_in(actions, now, &mut pending);
+        }
 
         // (2) The application's diagnosis commands.
         self.drain_diag_queue(now, &mut pending);
@@ -477,6 +675,10 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         let out = self.cm.tick(now);
         self.dispatch(out, now, &mut report)?;
 
+        // (5b) PDEV timers: periodic/immediate LLDPDU, neighbour expiry, no-peer grace.
+        let actions = self.cm.pdev_mut().map(|p| p.tick(now)).unwrap_or_default();
+        self.apply_pdev_actions_in(actions, now, &mut pending);
+
         // (6) RTA timers.
         if let Some(ch) = &mut self.alarm {
             let a = ch.on_tick(now);
@@ -492,6 +694,195 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         }
 
         Ok(report)
+    }
+
+    /// Make `net` the identity everywhere it is answered: DCP Identify/Set, the next
+    /// Connect's ARServerBlock, LLDP (an immediate LLDPDU), [`DeviceShared`].
+    fn apply_net(&mut self, net: NetParams, now: Instant) {
+        let p = &mut self.setup.dcp.properties;
+        p.name_of_station = net.name.clone();
+        p.ip = net.ip;
+        p.subnet = net.subnet;
+        p.gateway = net.gateway;
+        p.ip_block_info = if net.ip == [0; 4] { 0 } else { 1 };
+        self.cm.set_station_name(&net.name);
+        if let Some(pdev) = self.cm.pdev_mut() {
+            pdev.set_identity(&net, now);
+        }
+        *self.shared.net.lock().unwrap_or_else(|e| e.into_inner()) = net.clone();
+        self.net = net;
+    }
+
+    /// Runs the effects of one DCP Set request, in the spec §5.1 order: apply (IP via
+    /// the [`IpConfigurator`], name in memory) → persist if permanent → send the
+    /// response → abort the AR if the name or IP changed → immediate LLDPDU (from
+    /// `apply_net` → `Pdev::set_identity`, sent at stage 5b of the same step).
+    ///
+    /// A Set to the current name/IP is answered Ok with no persistence and no abort. A
+    /// failing [`IpConfigurator`] turns its block (Set-IP or ResetToFactory) into
+    /// `SetNotPossible` with nothing applied for it.
+    fn handle_set(
+        &mut self,
+        src: MacAddr,
+        xid: u32,
+        decisions: Vec<SetDecision>,
+        now: Instant,
+        pending: &mut Vec<(u64, Vec<AlarmAction>)>,
+        report: &mut StepReport,
+    ) -> Result<(), DeviceError> {
+        let mut results = Vec::with_capacity(decisions.len());
+        let mut new_net = self.net.clone();
+        let mut persist = false;
+        let mut identity_changed = false;
+        let mut reset: Option<(usize, u8)> = None; // (index in `results`, mode)
+        for d in &decisions {
+            let mut err = d.error;
+            if let (SetBlockError::Ok, Some(effect)) = (d.error, &d.effect) {
+                match effect {
+                    Effect::SetName { name, permanent } => {
+                        if *name != new_net.name {
+                            new_net.name = name.clone();
+                            identity_changed = true;
+                        }
+                        persist |= *permanent;
+                    }
+                    Effect::SetIp {
+                        ip,
+                        subnet,
+                        gateway,
+                        permanent,
+                    } => {
+                        let candidate = NetParams {
+                            name: new_net.name.clone(),
+                            ip: *ip,
+                            subnet: *subnet,
+                            gateway: *gateway,
+                        };
+                        match self.ip.apply(&self.setup.iface, &candidate) {
+                            Ok(()) => {
+                                if (candidate.ip, candidate.subnet, candidate.gateway)
+                                    != (new_net.ip, new_net.subnet, new_net.gateway)
+                                {
+                                    identity_changed = true;
+                                }
+                                new_net = candidate;
+                                persist |= *permanent;
+                            }
+                            Err(e) => {
+                                log::error!("applying IP suite: {e}");
+                                err = SetBlockError::SetNotPossible;
+                            }
+                        }
+                    }
+                    Effect::Signal => {
+                        self.shared.signal_count.fetch_add(1, Ordering::Relaxed);
+                        log::info!("DCP Signal: flash requested");
+                        if let Some(h) = &self.on_signal {
+                            h();
+                        }
+                    }
+                    Effect::Reset { mode } => reset = Some((results.len(), *mode)),
+                }
+            }
+            results.push((d.option, d.suboption, err));
+        }
+        if let Some((i, mode)) = reset {
+            let blank = NetParams::default();
+            match self.ip.apply(&self.setup.iface, &blank) {
+                Ok(()) => {
+                    log::warn!("DCP ResetToFactory mode {mode}");
+                    new_net = blank;
+                    identity_changed = true;
+                    persist = true;
+                    let a = self
+                        .cm
+                        .pdev_mut()
+                        .map(|p| p.clear_engineering())
+                        .unwrap_or_default();
+                    self.apply_pdev_actions_in(a, now, pending);
+                    if mode == 4 {
+                        self.cm.im_store_mut().clear();
+                    }
+                }
+                Err(e) => {
+                    // spec §9: the reset is refused whole — nothing applied, nothing persisted.
+                    log::error!("ResetToFactory: clearing the IP suite failed: {e}");
+                    results[i].2 = SetBlockError::SetNotPossible;
+                    reset = None;
+                }
+            }
+        }
+        if identity_changed {
+            self.apply_net(new_net.clone(), now);
+            if persist {
+                self.net_store.save(&new_net);
+            }
+        }
+        self.eth
+            .send(&build_set_response(src, self.setup.dcp.mac, xid, &results))?;
+        if identity_changed && self.cm.state() != ArState::Idle {
+            let reason = if reset.is_some() {
+                AbortReason::ResetToFactory
+            } else {
+                AbortReason::DcpSet
+            };
+            self.abort_with_err_rta_in(reason, now, report)?;
+        }
+        Ok(())
+    }
+
+    /// Apply PDEV actions outside a `step`'s alarm batching (dispatch, shutdown, tests):
+    /// LLDP frames go out, diagnosis changes become alarms sent immediately.
+    pub(crate) fn apply_pdev_actions(
+        &mut self,
+        actions: Vec<PdevAction>,
+        now: Instant,
+    ) -> Result<(), DeviceError> {
+        let mut pending = Vec::new();
+        self.apply_pdev_actions_in(actions, now, &mut pending);
+        let mut report = StepReport::default();
+        for (epoch, batch) in pending {
+            self.apply_alarm_actions(batch, epoch, now, &mut report)?;
+        }
+        Ok(())
+    }
+
+    /// Performs PDEV actions: LLDP frames go out on the LLDP socket (a send failure is
+    /// logged, never fatal), a mismatch change updates the port diagnosis, whose alarm
+    /// batches are collected into `pending`; then republishes the peer and mismatch.
+    fn apply_pdev_actions_in(
+        &mut self,
+        actions: Vec<PdevAction>,
+        now: Instant,
+        pending: &mut Vec<(u64, Vec<AlarmAction>)>,
+    ) {
+        for action in actions {
+            match action {
+                PdevAction::Send(frame) => {
+                    if let Some(t) = &self.lldp_eth {
+                        if let Err(e) = t.send(&frame) {
+                            log::warn!("LLDP send failed: {e}"); // never aborts the loop
+                        }
+                    }
+                }
+                PdevAction::Diag(m) => {
+                    for n in self.diag.set_port_mismatch(m) {
+                        let a = self.queue_notification(n, now);
+                        if !a.is_empty() {
+                            pending.push((self.alarm_epoch, a));
+                        }
+                    }
+                    self.publish_diag_state();
+                    *self
+                        .shared
+                        .port_mismatch
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = m;
+                }
+            }
+        }
+        *self.shared.peer.lock().unwrap_or_else(|e| e.into_inner()) =
+            self.cm.pdev().and_then(|p| p.peer().cloned());
     }
 
     /// Drains the application's [`DiagCommand`]s into the [`DiagStore`], turning each
@@ -707,10 +1098,21 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
                     #[cfg(target_os = "linux")]
                     self.stop_runner();
                     self.alarm = None;
+                    // The engineering records belong to the AR that wrote them. Cleared
+                    // after the channel is gone, so the mismatch disappearing is not
+                    // announced to a controller that no longer has the AR.
+                    let a = self
+                        .cm
+                        .pdev_mut()
+                        .map(|p| p.clear_engineering())
+                        .unwrap_or_default();
+                    self.apply_pdev_actions(a, now)?;
                 }
                 _ => {}
             }
         }
+        // A Check write's diagnosis change (and anything else the PDEV asked for).
+        self.apply_pdev_actions(out.pdev, now)?;
         Ok(())
     }
 }
@@ -841,16 +1243,21 @@ mod tests {
     use crate::cm::model::DeviceModel;
     use crate::cm::PnioStatus;
     use crate::config::{Direction, Slot};
+    use crate::dcp::{DcpBlock, MockIp, NetParams, SetBlockError};
     use crate::dcp::{DcpConfig, DeviceProperties};
     use crate::diag::{ChannelError, Diagnosis, Severity};
     use crate::eth::EthTransport;
     use crate::eth::{MacAddr, MockTransport};
+    use crate::im::INDEX_IM1;
+    use crate::pdev::{CheckRecord, ExpectedPeer, Mismatch, MockLink};
     use crate::rpc::{MockRpcTransport, Uuid};
     #[cfg(target_os = "linux")]
     use crate::rt::{Freshness, RtRunner};
     #[cfg(target_os = "linux")]
     use crate::testutil::golden_rt;
+    use crate::testutil::{dcp_set_frame, im1_record};
     use crate::testutil::{golden, golden_alarm, RPC_OFF};
+    use std::sync::atomic::AtomicU32;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -879,6 +1286,8 @@ mod tests {
             rt: None,
             im0: Im0::default(),
             im_store: None,
+            net_store: None,
+            iface: String::new(),
         }
     }
 
@@ -1500,6 +1909,511 @@ mod tests {
             dev.diag_shared().retries.load(Ordering::Relaxed),
             0,
             "no retry counted"
+        );
+    }
+
+    fn hooks() -> (DeviceHooks, SharedEth, Arc<Mutex<Vec<NetParams>>>) {
+        let lldp = SharedEth::new();
+        let ip = MockIp::default();
+        let calls = ip.calls.clone();
+        let h = DeviceHooks {
+            ip: Box::new(ip),
+            link: Box::new(MockLink(true.into())),
+            lldp: Some(Box::new(lldp.clone())),
+            on_signal: None,
+        };
+        (h, lldp, calls)
+    }
+
+    /// An untagged DCP Set request from the CPU to this device, xid `0x1234`: Ethernet
+    /// header + FrameID `0xFEFD` + `DcpHeader { Set, Request, xid, 0, data_length }` +
+    /// `write_blocks(&blocks, ..)`, each block's `block_info` = its `BlockQualifier`
+    /// (`testutil::dcp_set_frame`, written out in Task 4).
+    // synthetic — replace by the Task 2 golden
+    fn set_frame(blocks: Vec<DcpBlock>) -> Vec<u8> {
+        dcp_set_frame(MAC, CPU_MAC, 0x1234, &blocks)
+    }
+
+    /// The Control/Response blocks of the last DCP Set response sent (untagged, built by
+    /// `build_set_response`: blocks start at 14 + 2 + 10 = 26); each value is
+    /// `[option, suboption, BlockError]`.
+    fn set_response_blocks(eth: &SharedEth) -> Vec<DcpBlock> {
+        let resp = eth
+            .sent()
+            .into_iter()
+            .rev()
+            .find(|f| f.len() > 16 && f[12..14] == [0x88, 0x92] && f[14..16] == [0xfe, 0xfd])
+            .expect("a DCP Set response");
+        crate::dcp::parse_blocks(&resp[26..], false).unwrap()
+    }
+
+    /// An Identify request from the CPU filtering on `name` (NameOfStation, 2/2), or an
+    /// AllSelector (0xff/0xff) for `None` — the frame shape of `dcp::dispatch_tests::req_frame`
+    /// (private to that module, so rebuilt here from the public codec).
+    // synthetic — replace by the Task 2 golden
+    fn identify_frame(name: Option<&str>) -> Vec<u8> {
+        use crate::dcp::{
+            write_blocks, DcpHeader, FrameId, ServiceId, ServiceType, DCP_MULTICAST_MAC,
+        };
+        use crate::eth::{EthHeader, ETHERTYPE_PROFINET};
+        let block = match name {
+            Some(n) => DcpBlock {
+                option: 2,
+                suboption: 2,
+                block_info: None,
+                value: n.as_bytes().to_vec(),
+            },
+            None => DcpBlock {
+                option: 0xff,
+                suboption: 0xff,
+                block_info: None,
+                value: vec![],
+            },
+        };
+        let mut blocks = Vec::new();
+        write_blocks(&[block], &mut blocks);
+        let mut f = Vec::new();
+        EthHeader {
+            dst: DCP_MULTICAST_MAC,
+            src: CPU_MAC,
+            vlan: None,
+            ethertype: ETHERTYPE_PROFINET,
+        }
+        .write(&mut f);
+        f.extend_from_slice(&FrameId::IdentifyRequest.to_u16().to_be_bytes());
+        DcpHeader {
+            service_id: ServiceId::Identify,
+            service_type: ServiceType::Request,
+            xid: 0x0300_0152,
+            response_delay: 1,
+            data_length: blocks.len() as u16,
+        }
+        .write(&mut f);
+        f.extend_from_slice(&blocks);
+        f
+    }
+
+    /// Identify responses (FrameID `0xFEFF`) sent so far, oldest first.
+    fn identify_responses(eth: &SharedEth) -> Vec<Vec<u8>> {
+        eth.sent()
+            .into_iter()
+            .filter(|f| f.len() > 16 && f[12..14] == [0x88, 0x92] && f[14..16] == [0xfe, 0xff])
+            .collect()
+    }
+
+    #[test]
+    fn lldp_is_sent_at_start_and_the_peer_is_published() {
+        let (h, lldp, _) = hooks();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), SharedEth::new(), MockRpcTransport::new(), h, t0);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        assert_eq!(lldp.sent().len(), 1);
+        let frame =
+            crate::lldp::build_device_pdu("plc", [0xec; 6], "port-001.plc", 20).frame(CPU_MAC);
+        lldp.push_rx(frame);
+        dev.step(t0 + Duration::from_millis(10), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(dev.peer().unwrap().chassis_id, "plc");
+    }
+
+    #[test]
+    fn check_mismatch_raises_then_clears_a_diagnosis_alarm() {
+        let (h, lldp, _) = hooks();
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), eth.clone(), MockRpcTransport::new(), h, t0);
+        feed_bring_up(&dev, None, None);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.state(), ArState::Data);
+        // Peer "plc"/port-002, then a Check expecting port-001 → Port mismatch → Diagnosis alarm on 0x8001.
+        lldp.push_rx(
+            crate::lldp::build_device_pdu("plc", [0xec; 6], "port-002.plc", 20).frame(CPU_MAC),
+        );
+        let t1 = t0 + Duration::from_millis(1);
+        dev.step(t1, Some(Duration::ZERO)).unwrap();
+        let check = CheckRecord {
+            peers: vec![ExpectedPeer {
+                port_id: "port-001.plc".into(),
+                chassis_id: "plc".into(),
+            }],
+            mau_type: None,
+            raw: vec![],
+        };
+        let acts = dev.cm_mut().pdev_mut().unwrap().set_check(Some(check), t1);
+        dev.apply_pdev_actions(acts, t1).unwrap();
+        let alarm = eth
+            .sent()
+            .into_iter()
+            .rev()
+            .find(|f| is_alarm_frame(f))
+            .expect("a Diagnosis alarm was sent");
+        let pdu = parse_frame(&alarm).unwrap();
+        let RtaBody::Data(RtaData::Notification(n)) = pdu.body else {
+            panic!("expected an AlarmNotification, got {:?}", pdu.body)
+        };
+        assert_eq!(n.alarm_type, AlarmType::Diagnosis);
+        assert_eq!((n.slot, n.subslot), (0, 0x8001));
+        assert_eq!(n.usi, 0x8002);
+        let crate::alarm::UserData::ExtChannel(d) = &n.data else {
+            panic!("expected ExtChannelDiagnosis")
+        };
+        assert_eq!(
+            (d.error_type, d.ext_error_type),
+            (0x8001, Mismatch::Port.ext_error_type())
+        );
+        assert!(dev.problem_indicator());
+        assert_eq!(dev.port_mismatch(), Some(Mismatch::Port));
+        lldp.push_rx(
+            crate::lldp::build_device_pdu("plc", [0xec; 6], "port-001.plc", 20).frame(CPU_MAC),
+        );
+        dev.step(t0 + Duration::from_millis(3), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(dev.port_mismatch(), None);
+        assert!(!dev.problem_indicator());
+    }
+
+    #[test]
+    fn set_name_applies_persists_aborts_and_updates_identify() {
+        let dir = std::env::temp_dir().join(format!("pnio-dev-net-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = setup();
+        s.net_store = Some(dir.join("net"));
+        let (h, lldp, calls) = hooks();
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(s, eth.clone(), MockRpcTransport::new(), h, t0);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        dev.on_state_change(move |st, why| s2.lock().unwrap().push((st, why)));
+        feed_bring_up(&dev, None, None);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        let before = lldp.sent().len();
+        eth.push_rx(set_frame(vec![DcpBlock {
+            option: 2,
+            suboption: 2,
+            block_info: Some(1),
+            value: b"renamed".to_vec(),
+        }]));
+        dev.step(t0 + Duration::from_millis(1), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(dev.net_params().name, "renamed");
+        assert_eq!(dev.state(), ArState::Idle);
+        assert_eq!(
+            seen.lock().unwrap().last(),
+            Some(&(ArState::Idle, Some(AbortReason::DcpSet)))
+        );
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "name-only set does not touch the interface"
+        );
+        assert!(std::fs::read_to_string(dir.join("net"))
+            .unwrap()
+            .contains("name=renamed"));
+        assert!(lldp.sent().len() > before, "immediate LLDPDU after rename");
+        let blocks = set_response_blocks(&eth);
+        assert_eq!(blocks.len(), 1, "one Control/Response block");
+        assert_eq!(blocks[0].value, vec![2, 2, SetBlockError::Ok as u8]);
+        // Identify answers the new name, and no longer the old one.
+        let n = identify_responses(&eth).len();
+        eth.push_rx(identify_frame(Some("renamed")));
+        dev.step(t0 + Duration::from_millis(2), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(identify_responses(&eth).len(), n + 1);
+        eth.push_rx(identify_frame(Some("rt-labs-dev")));
+        dev.step(t0 + Duration::from_millis(3), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(identify_responses(&eth).len(), n + 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn set_name_and_ip_in_one_request_applies_both_with_one_abort() {
+        let (h, _, calls) = hooks();
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), eth.clone(), MockRpcTransport::new(), h, t0);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        dev.on_state_change(move |st, why| s2.lock().unwrap().push((st, why)));
+        feed_bring_up(&dev, None, None);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        eth.push_rx(set_frame(vec![
+            DcpBlock {
+                option: 2,
+                suboption: 2,
+                block_info: Some(1),
+                value: b"both".to_vec(),
+            },
+            DcpBlock {
+                option: 1,
+                suboption: 2,
+                block_info: Some(1),
+                value: vec![10, 0, 0, 5, 255, 0, 0, 0, 10, 0, 0, 1],
+            },
+        ]));
+        dev.step(t0 + Duration::from_millis(1), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(dev.net_params().name, "both");
+        assert_eq!(dev.net_params().ip, [10, 0, 0, 5]);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(dev.state(), ArState::Idle);
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(st, _)| *st == ArState::Idle)
+                .count(),
+            1,
+            "one abort"
+        );
+        let blocks = set_response_blocks(&eth);
+        assert_eq!(blocks.len(), 2, "two Control/Response blocks");
+        assert_eq!(blocks[0].value, vec![2, 2, SetBlockError::Ok as u8]);
+        assert_eq!(blocks[1].value, vec![1, 2, SetBlockError::Ok as u8]);
+    }
+
+    #[test]
+    fn ip_apply_failure_answers_set_not_possible_and_keeps_the_old_ip() {
+        let lldp = SharedEth::new();
+        let h = DeviceHooks {
+            ip: Box::new(MockIp {
+                fail: true,
+                ..Default::default()
+            }),
+            link: Box::new(MockLink(true.into())),
+            lldp: Some(Box::new(lldp)),
+            on_signal: None,
+        };
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), eth.clone(), MockRpcTransport::new(), h, t0);
+        let old = dev.net_params();
+        eth.push_rx(set_frame(vec![DcpBlock {
+            option: 1,
+            suboption: 2,
+            block_info: Some(1),
+            value: vec![10, 0, 0, 5, 255, 0, 0, 0, 0, 0, 0, 0],
+        }]));
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.net_params(), old);
+        assert_eq!(
+            set_response_blocks(&eth)[0].value,
+            vec![1, 2, SetBlockError::SetNotPossible as u8]
+        );
+    }
+
+    #[test]
+    fn signal_counts_and_calls_the_hook() {
+        let hit = Arc::new(AtomicU32::new(0));
+        let h2 = hit.clone();
+        let h = DeviceHooks {
+            on_signal: Some(Arc::new(move || {
+                h2.fetch_add(1, Ordering::Relaxed);
+            })),
+            ..DeviceHooks::default()
+        };
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), eth.clone(), MockRpcTransport::new(), h, t0);
+        eth.push_rx(set_frame(vec![DcpBlock {
+            option: 5,
+            suboption: 3,
+            block_info: Some(0),
+            value: vec![0x01, 0x00],
+        }]));
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.signal_count(), 1);
+        assert_eq!(hit.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            set_response_blocks(&eth)[0].value,
+            vec![5, 3, SetBlockError::Ok as u8]
+        );
+    }
+
+    #[test]
+    fn reset_mode_4_blanks_identity_and_im_and_aborts() {
+        let dir = std::env::temp_dir().join(format!("pnio-dev-reset-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = setup();
+        s.net_store = Some(dir.join("net"));
+        s.im_store = Some(dir.join("im"));
+        let (h, _, calls) = hooks();
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(s, eth.clone(), MockRpcTransport::new(), h, t0);
+        feed_bring_up(&dev, None, None);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        dev.cm_mut()
+            .im_store_mut()
+            .write(INDEX_IM1, &im1_record("F", "L"))
+            .unwrap();
+        eth.push_rx(set_frame(vec![DcpBlock {
+            option: 5,
+            suboption: 6,
+            block_info: Some(4 << 1),
+            value: vec![],
+        }]));
+        dev.step(t0 + Duration::from_millis(1), Some(Duration::ZERO))
+            .unwrap();
+        assert!(dev.net_params().is_blank());
+        assert_eq!(dev.state(), ArState::Idle);
+        assert_eq!(calls.lock().unwrap().last().unwrap().ip, [0; 4]);
+        assert_eq!(dev.cm().im_store().tag_function().trim(), "");
+        assert!(std::fs::read_to_string(dir.join("net"))
+            .unwrap()
+            .contains("name=\n"));
+        assert_eq!(
+            set_response_blocks(&eth)[0].value,
+            vec![5, 6, SetBlockError::Ok as u8]
+        );
+        // Identify-all is answered, with a blank NameOfStation.
+        eth.push_rx(identify_frame(None));
+        dev.step(t0 + Duration::from_millis(2), Some(Duration::ZERO))
+            .unwrap();
+        let resp = identify_responses(&eth)
+            .pop()
+            .expect("Identify-all is answered");
+        let (_, blocks) = crate::dcp::DcpHeader::parse(&resp[16..]).unwrap();
+        let blocks = crate::dcp::parse_blocks(blocks, true).unwrap();
+        assert!(blocks
+            .iter()
+            .filter(|b| (b.option, b.suboption) == (2, 2))
+            .all(|b| b.value.is_empty()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reset_with_a_failing_ip_configurator_answers_set_not_possible_and_resets_nothing() {
+        let lldp = SharedEth::new();
+        let h = DeviceHooks {
+            ip: Box::new(MockIp {
+                fail: true,
+                ..Default::default()
+            }),
+            link: Box::new(MockLink(true.into())),
+            lldp: Some(Box::new(lldp)),
+            on_signal: None,
+        };
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), eth.clone(), MockRpcTransport::new(), h, t0);
+        feed_bring_up(&dev, None, None);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        let old = dev.net_params();
+        eth.push_rx(set_frame(vec![DcpBlock {
+            option: 5,
+            suboption: 6,
+            block_info: Some(4 << 1),
+            value: vec![],
+        }]));
+        dev.step(t0 + Duration::from_millis(1), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(dev.net_params(), old);
+        assert_eq!(dev.state(), ArState::Data, "nothing applied, so no abort");
+        assert_eq!(
+            set_response_blocks(&eth)[0].value,
+            vec![5, 6, SetBlockError::SetNotPossible as u8]
+        );
+    }
+
+    #[test]
+    fn ar_abort_clears_engineering() {
+        let (h, _, _) = hooks();
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), eth.clone(), MockRpcTransport::new(), h, t0);
+        feed_bring_up(&dev, None, None);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        let check = CheckRecord {
+            peers: vec![ExpectedPeer {
+                port_id: "port-001.plc".into(),
+                chassis_id: "plc".into(),
+            }],
+            mau_type: None,
+            raw: vec![],
+        };
+        let p = dev.cm_mut().pdev_mut().unwrap();
+        p.set_adjust(Some(vec![1, 2, 3]));
+        let _ = p.set_check(Some(check), t0);
+        // The controller aborts (Plan 5 pattern: its ERR-RTA on the alarm channel).
+        eth.push_rx(cpu_alarm("alarm_err_rta_cpu_removed"));
+        dev.step(t0 + Duration::from_millis(1), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(dev.state(), ArState::Idle);
+        let p = dev.cm().pdev().unwrap();
+        assert!(p.adjust().is_none());
+        assert!(p.check().is_none());
+    }
+
+    #[test]
+    fn shutdown_sends_ttl_zero_and_clears_engineering_with_or_without_an_ar() {
+        let (h, lldp, _) = hooks();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), SharedEth::new(), MockRpcTransport::new(), h, t0);
+        feed_bring_up(&dev, None, None);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        dev.cm_mut()
+            .pdev_mut()
+            .unwrap()
+            .set_adjust(Some(vec![1, 2, 3]));
+        dev.shutdown(t0 + Duration::from_secs(1)).unwrap();
+        assert_eq!(dev.state(), ArState::Idle);
+        assert!(dev.cm().pdev().unwrap().adjust().is_none());
+        fn ttl(f: &[u8]) -> u16 {
+            crate::lldp::parse_frame(f).unwrap().1.ttl
+        }
+        assert_eq!(ttl(lldp.sent().last().unwrap()), 0);
+        // From Idle (no AR) the shutdown PDU still goes out.
+        let n = lldp.sent().len();
+        dev.shutdown(t0 + Duration::from_secs(2)).unwrap();
+        assert_eq!(lldp.sent().len(), n + 1);
+        assert_eq!(ttl(lldp.sent().last().unwrap()), 0);
+    }
+
+    // ---- beyond the brief ----
+
+    /// Set effects are real now: a socket that also sees other stations' traffic
+    /// (promiscuous mode, e.g. a capture running on the interface) must not apply a
+    /// Set meant for another device — nor answer it.
+    #[test]
+    fn set_addressed_to_another_station_is_ignored() {
+        let (h, _, calls) = hooks();
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), eth.clone(), MockRpcTransport::new(), h, t0);
+        feed_bring_up(&dev, None, None);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        let other = MacAddr([0x8c, 0xf3, 0x19, 0xcd, 0x19, 0xff]);
+        // synthetic — replace by the Task 2 golden
+        eth.push_rx(dcp_set_frame(
+            other,
+            CPU_MAC,
+            0x1234,
+            &[
+                DcpBlock {
+                    option: 2,
+                    suboption: 2,
+                    block_info: Some(1),
+                    value: b"other".to_vec(),
+                },
+                DcpBlock {
+                    option: 1,
+                    suboption: 2,
+                    block_info: Some(1),
+                    value: vec![10, 0, 0, 5, 255, 0, 0, 0, 10, 0, 0, 1],
+                },
+            ],
+        ));
+        dev.step(t0 + Duration::from_millis(1), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(dev.net_params().name, "rt-labs-dev");
+        assert_eq!(dev.state(), ArState::Data);
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(
+            eth.sent()
+                .iter()
+                .all(|f| f.get(14..16) != Some(&[0xfe, 0xfd][..])),
+            "no Set response"
         );
     }
 }

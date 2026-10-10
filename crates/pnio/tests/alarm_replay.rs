@@ -98,6 +98,8 @@ fn pnet_setup() -> DeviceSetup {
             profile_specific_type: 0x5678,
         },
         im_store: None,
+        net_store: None,
+        iface: String::new(),
     }
 }
 
