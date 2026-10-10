@@ -171,7 +171,7 @@ Reset: mode 2 → `NetParams { name: "", ip: 0, subnet: 0, gateway: 0 }` applied
 
 ### 5.8 `api`
 
-- `StartOptions` + `net_store: Option<PathBuf>`, `apply_ip: bool` (default `true`; `false` swaps in a no-op `IpConfigurator`), `lldp: bool` (default `true`), `on_signal`.
+- `StartOptions` + `net_store: Option<PathBuf>`, `apply_ip: bool` (default `false` in the examples — needs root or `setcap cap_net_admin+ep` on the `ip` binary; `false` swaps in a no-op `IpConfigurator`), `lldp: bool` (default `true`), `on_signal`.
 - `IoDevice::start` opens the LLDP socket (`open_with(iface, EthProto::LLDP)`) when `lldp` is on and passes `DeviceHooks`. `start_with` takes a `DeviceHooks` so tests inject mocks.
 - `IoDevice` + `net_params() -> NetParams`, `signal_count() -> u32`, `peer() -> Option<Peer>` (snapshots through the existing shared-state pattern used for `ar_params()`).
 - `examples/linux/typed_bringup.rs`: `--net-store <path>`, prints the current name and the peer in its status line. `examples/gen_gsdml.rs`: unchanged interface, new output.
