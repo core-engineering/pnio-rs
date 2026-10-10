@@ -76,7 +76,9 @@ pub struct DeviceSetup {
     pub im_store: Option<PathBuf>,
     /// Backing file of the DCP-assigned identity (NameOfStation + IP suite); `None` =
     /// RAM only. When the file holds an identity it wins over [`DeviceSetup::dcp`]'s at
-    /// startup; it is only created by the first permanent DCP Set or a ResetToFactory.
+    /// startup. It is written (the whole identity) by every permanent DCP Set with an
+    /// accepted block, even one that changes nothing, and by every ResetToFactory; it
+    /// is only created by the first of those.
     pub net_store: Option<PathBuf>,
     /// The interface an [`IpConfigurator`] reconfigures; empty when none applies.
     pub iface: String,
@@ -511,25 +513,21 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
     }
 
     /// Tells the neighbours and the controller the device is going away: a TTL-0
-    /// LLDPDU (best effort, sent with or without an AR), the engineering records
-    /// cleared, then ERR-RTA "AR removed" on the alarm channel plus an AR abort, so the
-    /// controller sees the loss in milliseconds instead of waiting for its own
-    /// watchdog. The AR part is a no-op with no AR up.
+    /// LLDPDU (best effort, sent with or without an AR), then ERR-RTA "AR removed" on
+    /// the alarm channel plus an AR abort, so the controller sees the loss in
+    /// milliseconds instead of waiting for its own watchdog. The engineering records
+    /// are cleared silently either way: by the abort, or directly with no AR up.
     pub fn shutdown(&mut self, now: Instant) -> Result<(), DeviceError> {
         if let (Some(t), Some(p)) = (&self.lldp_eth, self.cm.pdev()) {
             if let Err(e) = t.send(&p.shutdown_frame()) {
                 log::warn!("LLDP shutdown PDU not sent: {e}");
             }
         }
-        let a = self
-            .cm
-            .pdev_mut()
-            .map(|p| p.clear_engineering())
-            .unwrap_or_default();
-        self.apply_pdev_actions(a, now)?;
         if self.cm.state() == ArState::Idle {
+            self.clear_engineering_silently();
             return Ok(());
         }
+        // The abort's `Idle` notify clears the engineering (see `dispatch`).
         self.abort_with_err_rta(AbortReason::Shutdown, now)
     }
 
@@ -718,9 +716,12 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
     /// response → abort the AR if the name or IP changed → immediate LLDPDU (from
     /// `apply_net` → `Pdev::set_identity`, sent at stage 5b of the same step).
     ///
-    /// A Set to the current name/IP is answered Ok with no persistence and no abort. A
-    /// failing [`IpConfigurator`] turns its block (Set-IP or ResetToFactory) into
-    /// `SetNotPossible` with nothing applied for it.
+    /// Persist-always: a permanent block answered Ok saves the whole identity, even
+    /// when it equals the current one (so a temporary Set followed by a permanent Set
+    /// of the same value ends up in the file). A Set to the current name/IP is
+    /// answered Ok without an abort. A failing [`IpConfigurator`] turns its block
+    /// (Set-IP or ResetToFactory) into `SetNotPossible` with nothing applied or
+    /// persisted for it.
     fn handle_set(
         &mut self,
         src: MacAddr,
@@ -814,9 +815,9 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         }
         if identity_changed {
             self.apply_net(new_net.clone(), now);
-            if persist {
-                self.net_store.save(&new_net);
-            }
+        }
+        if persist {
+            self.net_store.save(&new_net);
         }
         self.eth
             .send(&build_set_response(src, self.setup.dcp.mac, xid, &results))?;
@@ -831,7 +832,24 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         Ok(())
     }
 
-    /// Apply PDEV actions outside a `step`'s alarm batching (dispatch, shutdown, tests):
+    /// Forget the engineering records (`PDPortDataCheck`/`Adjust`, `PDInterfaceAdjust`)
+    /// and the remote mismatch they caused without announcing anything: the AR they
+    /// belong to is gone (or going), so no "disappears" alarm is sent. The port's
+    /// diagnosis entry is reset and the cleared state republished.
+    fn clear_engineering_silently(&mut self) {
+        if let Some(p) = self.cm.pdev_mut() {
+            let _ = p.clear_engineering(); // the Diag(None) is applied silently below
+        }
+        let _ = self.diag.set_port_mismatch(None);
+        self.publish_diag_state();
+        *self
+            .shared
+            .port_mismatch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = self.diag.port_mismatch();
+    }
+
+    /// Apply PDEV actions outside a `step`'s alarm batching (dispatch, tests):
     /// LLDP frames go out, diagnosis changes become alarms sent immediately.
     pub(crate) fn apply_pdev_actions(
         &mut self,
@@ -873,11 +891,13 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
                         }
                     }
                     self.publish_diag_state();
+                    // The store's view, not `m`: without a DAP port submodule the
+                    // store ignores the mismatch, and so must the published state.
                     *self
                         .shared
                         .port_mismatch
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = m;
+                        .unwrap_or_else(|e| e.into_inner()) = self.diag.port_mismatch();
                 }
             }
         }
@@ -1098,15 +1118,8 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
                     #[cfg(target_os = "linux")]
                     self.stop_runner();
                     self.alarm = None;
-                    // The engineering records belong to the AR that wrote them. Cleared
-                    // after the channel is gone, so the mismatch disappearing is not
-                    // announced to a controller that no longer has the AR.
-                    let a = self
-                        .cm
-                        .pdev_mut()
-                        .map(|p| p.clear_engineering())
-                        .unwrap_or_default();
-                    self.apply_pdev_actions(a, now)?;
+                    // The engineering records belong to the AR that wrote them.
+                    self.clear_engineering_silently();
                 }
                 _ => {}
             }
@@ -2063,6 +2076,11 @@ mod tests {
         );
         assert!(dev.problem_indicator());
         assert_eq!(dev.port_mismatch(), Some(Mismatch::Port));
+        // The controller acknowledges the Appears, so the Disappears goes out at once.
+        eth.push_rx(port_alarm_ack(AlarmType::Diagnosis));
+        dev.step(t0 + Duration::from_millis(2), Some(Duration::ZERO))
+            .unwrap();
+        assert!(!dev.alarm_in_flight());
         lldp.push_rx(
             crate::lldp::build_device_pdu("plc", [0xec; 6], "port-001.plc", 20).frame(CPU_MAC),
         );
@@ -2070,6 +2088,31 @@ mod tests {
             .unwrap();
         assert_eq!(dev.port_mismatch(), None);
         assert!(!dev.problem_indicator());
+        let alarm = eth
+            .sent()
+            .into_iter()
+            .rev()
+            .find(|f| is_alarm_frame(f))
+            .unwrap();
+        let RtaBody::Data(RtaData::Notification(n)) = parse_frame(&alarm).unwrap().body else {
+            panic!("expected the DiagnosisDisappears notification")
+        };
+        assert_eq!(n.alarm_type, AlarmType::DiagnosisDisappears);
+        assert_eq!((n.slot, n.subslot), (0, 0x8001));
+    }
+
+    /// The controller's AlarmAck for the port diagnosis in flight (slot 0 / subslot
+    /// 0x8001): the `alarm_diag_ack_cpu` golden (the CPU's first DATA on the channel)
+    /// retargeted to the port submodule and to `alarm_type`.
+    fn port_alarm_ack(alarm_type: AlarmType) -> Vec<u8> {
+        let mut pdu = parse_frame(&cpu_alarm("alarm_diag_ack_cpu")).unwrap();
+        let RtaBody::Data(RtaData::Ack(a)) = &mut pdu.body else {
+            panic!("expected an AlarmAck golden, got {:?}", pdu.body)
+        };
+        a.alarm_type = alarm_type;
+        a.slot = 0;
+        a.subslot = 0x8001;
+        crate::alarm::build_frame(MAC, CPU_MAC, &pdu)
     }
 
     #[test]
@@ -2128,10 +2171,14 @@ mod tests {
 
     #[test]
     fn set_name_and_ip_in_one_request_applies_both_with_one_abort() {
+        let dir = std::env::temp_dir().join(format!("pnio-dev-both-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = setup();
+        s.net_store = Some(dir.join("net"));
         let (h, _, calls) = hooks();
         let eth = SharedEth::new();
         let t0 = Instant::now();
-        let mut dev = Device::new_with(setup(), eth.clone(), MockRpcTransport::new(), h, t0);
+        let mut dev = Device::new_with(s, eth.clone(), MockRpcTransport::new(), h, t0);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let s2 = seen.clone();
         dev.on_state_change(move |st, why| s2.lock().unwrap().push((st, why)));
@@ -2170,6 +2217,94 @@ mod tests {
         assert_eq!(blocks.len(), 2, "two Control/Response blocks");
         assert_eq!(blocks[0].value, vec![2, 2, SetBlockError::Ok as u8]);
         assert_eq!(blocks[1].value, vec![1, 2, SetBlockError::Ok as u8]);
+        // One store write, holding both changes.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("net")).unwrap(),
+            "name=both\nip=10.0.0.5\nsubnet=255.0.0.0\ngateway=10.0.0.1\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A Set to the current name and IP suite: answered Ok, the suite is still pushed
+    /// to the interface, but the AR stays up — no abort, no ERR-RTA.
+    #[test]
+    fn set_to_the_current_name_and_ip_does_not_abort() {
+        let (h, _, calls) = hooks();
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), eth.clone(), MockRpcTransport::new(), h, t0);
+        feed_bring_up(&dev, None, None);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        let before = eth.sent().len();
+        eth.push_rx(set_frame(vec![
+            DcpBlock {
+                option: 2,
+                suboption: 2,
+                block_info: Some(0),
+                value: b"rt-labs-dev".to_vec(),
+            },
+            DcpBlock {
+                option: 1,
+                suboption: 2,
+                block_info: Some(0),
+                value: vec![172, 16, 2, 10, 255, 255, 255, 0, 172, 16, 2, 10],
+            },
+        ]));
+        dev.step(t0 + Duration::from_millis(1), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(dev.state(), ArState::Data);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert!(
+            eth.sent()[before..].iter().all(|f| !is_alarm_frame(f)),
+            "no ERR-RTA"
+        );
+        let blocks = set_response_blocks(&eth);
+        assert_eq!(blocks[0].value, vec![2, 2, SetBlockError::Ok as u8]);
+        assert_eq!(blocks[1].value, vec![1, 2, SetBlockError::Ok as u8]);
+    }
+
+    /// Persist-always: a permanent Set with Ok decisions saves the whole identity even
+    /// when nothing changes — a temporary rename followed by a permanent Set of that
+    /// same name must leave the name in the file (and not abort the AR).
+    #[test]
+    fn permanent_set_to_the_current_value_persists_without_abort() {
+        let dir = std::env::temp_dir().join(format!("pnio-dev-same-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = setup();
+        s.net_store = Some(dir.join("net"));
+        let (h, _, _) = hooks();
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(s, eth.clone(), MockRpcTransport::new(), h, t0);
+        let rename = |permanent: bool| {
+            set_frame(vec![DcpBlock {
+                option: 2,
+                suboption: 2,
+                block_info: Some(permanent as u16),
+                value: b"temp".to_vec(),
+            }])
+        };
+        eth.push_rx(rename(false));
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.net_params().name, "temp");
+        assert!(
+            !dir.join("net").exists(),
+            "a temporary Set persists nothing"
+        );
+        feed_bring_up(&dev, None, None);
+        dev.step(t0 + Duration::from_millis(1), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(dev.state(), ArState::Data);
+        let before = eth.sent().len();
+        eth.push_rx(rename(true));
+        dev.step(t0 + Duration::from_millis(2), Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(dev.state(), ArState::Data, "same value: no abort");
+        assert!(eth.sent()[before..].iter().all(|f| !is_alarm_frame(f)));
+        assert!(std::fs::read_to_string(dir.join("net"))
+            .unwrap()
+            .contains("name=temp\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2241,12 +2376,26 @@ mod tests {
         let eth = SharedEth::new();
         let t0 = Instant::now();
         let mut dev = Device::new_with(s, eth.clone(), MockRpcTransport::new(), h, t0);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        dev.on_state_change(move |st, why| s2.lock().unwrap().push((st, why)));
         feed_bring_up(&dev, None, None);
         dev.step(t0, Some(Duration::ZERO)).unwrap();
         dev.cm_mut()
             .im_store_mut()
             .write(INDEX_IM1, &im1_record("F", "L"))
             .unwrap();
+        let check = CheckRecord {
+            peers: vec![ExpectedPeer {
+                port_id: "port-001.plc".into(),
+                chassis_id: "plc".into(),
+            }],
+            mau_type: None,
+            raw: vec![],
+        };
+        let p = dev.cm_mut().pdev_mut().unwrap();
+        p.set_adjust(Some(vec![1, 2, 3]));
+        let _ = p.set_check(Some(check), t0);
         eth.push_rx(set_frame(vec![DcpBlock {
             option: 5,
             suboption: 6,
@@ -2257,6 +2406,13 @@ mod tests {
             .unwrap();
         assert!(dev.net_params().is_blank());
         assert_eq!(dev.state(), ArState::Idle);
+        assert_eq!(
+            seen.lock().unwrap().last(),
+            Some(&(ArState::Idle, Some(AbortReason::ResetToFactory)))
+        );
+        let p = dev.cm().pdev().unwrap();
+        assert!(p.check().is_none());
+        assert!(p.adjust().is_none());
         assert_eq!(calls.lock().unwrap().last().unwrap().ip, [0; 4]);
         assert_eq!(dev.cm().im_store().tag_function().trim(), "");
         assert!(std::fs::read_to_string(dir.join("net"))
@@ -2415,5 +2571,81 @@ mod tests {
                 .all(|f| f.get(14..16) != Some(&[0xfe, 0xfd][..])),
             "no Set response"
         );
+    }
+
+    /// Shutting down with the AR up and an acknowledged remote mismatch: the AR is
+    /// torn down without first announcing a "mismatch disappeared" the wire never saw
+    /// — the ERR-RTA is the only alarm frame the shutdown sends.
+    #[test]
+    fn shutdown_with_an_acknowledged_mismatch_sends_no_diagnosis_alarm() {
+        let (h, lldp, _) = hooks();
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), eth.clone(), MockRpcTransport::new(), h, t0);
+        feed_bring_up(&dev, None, None);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        lldp.push_rx(
+            crate::lldp::build_device_pdu("plc", [0xec; 6], "port-002.plc", 20).frame(CPU_MAC),
+        );
+        dev.step(t0 + Duration::from_millis(1), Some(Duration::ZERO))
+            .unwrap();
+        let check = CheckRecord {
+            peers: vec![ExpectedPeer {
+                port_id: "port-001.plc".into(),
+                chassis_id: "plc".into(),
+            }],
+            mau_type: None,
+            raw: vec![],
+        };
+        let acts = dev.cm_mut().pdev_mut().unwrap().set_check(Some(check), t0);
+        dev.apply_pdev_actions(acts, t0).unwrap();
+        assert_eq!(dev.port_mismatch(), Some(Mismatch::Port));
+        eth.push_rx(port_alarm_ack(AlarmType::Diagnosis));
+        dev.step(t0 + Duration::from_millis(2), Some(Duration::ZERO))
+            .unwrap();
+        assert!(!dev.alarm_in_flight(), "the Appears is acknowledged");
+        let before = eth.sent().len();
+        dev.shutdown(t0 + Duration::from_secs(1)).unwrap();
+        let alarms: Vec<_> = eth.sent()[before..]
+            .iter()
+            .filter(|f| is_alarm_frame(f))
+            .cloned()
+            .collect();
+        assert_eq!(alarms.len(), 1, "only the ERR-RTA");
+        assert!(matches!(
+            parse_frame(&alarms[0]).unwrap().body,
+            RtaBody::Err(_)
+        ));
+        assert_eq!(dev.state(), ArState::Idle);
+        assert_eq!(dev.port_mismatch(), None);
+        assert!(dev.cm().pdev().unwrap().check().is_none());
+    }
+
+    /// From `Idle`, `shutdown` clears a left-over mismatch silently and republishes it.
+    #[test]
+    fn idle_shutdown_clears_the_mismatch_and_publishes_it() {
+        let (h, lldp, _) = hooks();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), SharedEth::new(), MockRpcTransport::new(), h, t0);
+        lldp.push_rx(
+            crate::lldp::build_device_pdu("plc", [0xec; 6], "port-002.plc", 20).frame(CPU_MAC),
+        );
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        let check = CheckRecord {
+            peers: vec![ExpectedPeer {
+                port_id: "port-001.plc".into(),
+                chassis_id: "plc".into(),
+            }],
+            mau_type: None,
+            raw: vec![],
+        };
+        let acts = dev.cm_mut().pdev_mut().unwrap().set_check(Some(check), t0);
+        dev.apply_pdev_actions(acts, t0).unwrap();
+        let shared = dev.device_shared();
+        assert_eq!(*shared.port_mismatch.lock().unwrap(), Some(Mismatch::Port));
+        dev.shutdown(t0 + Duration::from_secs(1)).unwrap();
+        assert_eq!(dev.port_mismatch(), None);
+        assert_eq!(*shared.port_mismatch.lock().unwrap(), None);
+        assert!(!dev.problem_indicator());
     }
 }
