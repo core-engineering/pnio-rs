@@ -56,6 +56,7 @@ pub mod eth;
 pub mod gsdml;
 pub mod im;
 pub mod lldp;
+pub mod pdev;
 pub mod rpc;
 pub mod rt;
 #[cfg(test)]
