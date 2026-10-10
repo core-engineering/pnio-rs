@@ -1242,7 +1242,7 @@ pub fn build_device_pdu(name: &str, mac: [u8; 6], port_id: &str, ttl: u16) -> Ll
         pnio_delay: Some([0; 5]),
         pnio_port_status: Some((0, 0)),
         pnio_chassis_mac: Some(mac),
-        mac_phy: Some(MacPhy { autoneg: 0x03, pmd: 0x6c01, mau_type: 0x0010 }), // pmd: pinned value from the CPU capture if it differs
+        mac_phy: Some(MacPhy { autoneg: 0x03, pmd: 0x6c00, mau_type: 0x0010 }), // pmd: pinned in docs/pdev-golden-frames.md §3.3 (10/100 HD+FD)
         unknown_tlvs: 0,
     }
 }
@@ -1290,7 +1290,7 @@ impl Pdev {
     pub fn on_rx(&mut self, frame: &[u8], now: Instant) -> Vec<PdevAction>;
     pub fn tick(&mut self, now: Instant) -> Vec<PdevAction>;
     pub fn next_deadline(&self) -> Option<Instant>;
-    pub fn shutdown_frame(&self) -> Vec<u8>;                           // TTL 0
+    pub fn shutdown_frame(&self) -> Vec<u8>;                           // TTL 0; only Chassis ID, Port ID, TTL, End (docs/pdev-golden-frames.md §3.1)
     pub fn set_check(&mut self, c: Option<CheckRecord>, now: Instant) -> Vec<PdevAction>;
     pub fn set_adjust(&mut self, raw: Option<Vec<u8>>);
     pub fn set_iface_adjust(&mut self, raw: Option<Vec<u8>>);
@@ -1931,8 +1931,8 @@ Remove the now-dead "I&M write rejected" log loop in `handle_datagram` (statuses
 - Produces:
 
 ```rust
-/// `ChannelErrorType` for the port's remote-mismatch diagnoses ("Data transmission impossible").
-pub const PORT_ERROR_TYPE: u16 = 0x8000;
+/// `ChannelErrorType` for the port's remote-mismatch diagnoses ("Remote mismatch", pinned in docs/pdev-golden-frames.md §2.10).
+pub const PORT_ERROR_TYPE: u16 = 0x8001;
 impl DiagStore {
     /// Register the DAP port submodule so port diagnoses can be built (module/submodule idents from the model's slot 0 / subslot 0x8001).
     pub fn with_port(self, model: &DeviceModel) -> Self;

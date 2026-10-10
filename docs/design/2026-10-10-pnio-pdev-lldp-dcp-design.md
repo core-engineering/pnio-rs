@@ -76,9 +76,9 @@ NameOfStation syntax (IEC 61158-6-10 §4.3.1.4.15, DNS-label form): 1-240 bytes,
 Transmitted by the device, in order:
 1. Chassis ID (type 1), subtype 7 (locally assigned) = NameOfStation; if the name is empty, subtype 4 (MAC address).
 2. Port ID (type 2), subtype 7 = `port-001` **or** `port-001.<NameOfStation>` *(capture: mirror the 1515's format on X1; the same string is what `PDPortDataCheck.CheckPeers` carries, so the two must agree)*.
-3. TTL (type 3) = 20 s. Shutdown PDU on `stop()`: TTL 0.
+3. TTL (type 3) = 20 s. Shutdown PDU on `stop()`: TTL 0, carrying only Chassis ID, Port ID, TTL and End (the dissector flags any other TLV in a TTL-0 PDU).
 4. PROFINET TLVs (type 127, OUI `00-0E-CF`): subtype 1 `PNIO_Delay` (RxDelayLocal, RxDelayRemote, TxDelayLocal, TxDelayRemote, CableDelayLocal = 5 × u32, all 0), subtype 2 `PNIO_PortStatus` (RTClass2 u16 = 0, RTClass3 u16 = 0), subtype 5 `PNIO_ChassisMAC` (6 bytes).
-5. IEEE 802.3 TLV (type 127, OUI `00-12-0F`, subtype 1 MAC/PHY): autoneg support/status `0x03`, PMD advertised `0x6c01` *(verify)*, operational MAU type `0x0010` (100BASE-TX full duplex).
+5. IEEE 802.3 TLV (type 127, OUI `00-12-0F`, subtype 1 MAC/PHY): autoneg support/status `0x03`, PMD advertised `0x6C00` (10/100 HD+FD; `0x6c01` would also claim 1000BASE-T FD — pinned from the dissector, see `docs/pdev-golden-frames.md` §3.3), operational MAU type `0x0010` (100BASE-TX full duplex).
 6. End (type 0).
 
 Transmit period 5 s (TTL/4), plus one immediate LLDPDU after a name change. Received LLDPDUs: parsed leniently, unknown TLVs skipped; a PDU with TTL 0 removes the peer; a peer expires `ttl` seconds after its last PDU.
@@ -88,7 +88,7 @@ Transmit period 5 s (TTL/4), plus one immediate LLDPDU after a name change. Rece
 BlockType numbers below are from memory of the standard; every one of them is pinned from the Wireshark dissector in `docs/pdev-golden-frames.md` during task 0 before the record tasks start, and the document, not this list, is the reference.
 
 Read, on subslot `0x8001` (port) or `0x8000` (interface):
-- `0x802A` **PDPortDataReal** (BlockType `0x020F`): SlotNumber, SubslotNumber, LengthOwnPortID, OwnPortID (padded to 2), NumberOfPeers (0 or 1), per peer: LengthPeerPortID, PeerPortID, LengthPeerChassisID, PeerChassisID, LineDelay u32 = 0, PeerMACAddress; then MAUType u16, Reserved u16, DomainBoundary u32, MulticastBoundary u32, LinkState u16 (bits 0-7 port state: 1 up, 2 down; bits 8-15 link state: 0), Reserved u16, MediaType u32 = 1 (copper) *(verify field order against the dissector; BlockVersion 1.2 carries extra fields — use the version the dissector decodes without "unknown" remainder)*.
+- `0x802A` **PDPortDataReal** (BlockType `0x020F`): SlotNumber, SubslotNumber, LengthOwnPortID, OwnPortID (padded to 2), NumberOfPeers (0 or 1), per peer: LengthPeerPortID, PeerPortID, LengthPeerChassisID, PeerChassisID, LineDelay u32 = 0, PeerMACAddress; then MAUType u16, Reserved u16, DomainBoundary u32, MulticastBoundary u32, LinkState u16 (bits 0-7 port state: 1 up, 2 down; bits 8-15 link state: 0), Reserved u16, MediaType u32 = 1 (copper) *(field order and padding are pinned from the dissector in `docs/pdev-golden-frames.md` §2.3: BlockVersion 1.0 only; that document, not this sentence, is the layout reference)*.
 - `0x8080` **PDInterfaceDataReal** (BlockType `0x0240`): LengthOwnChassisID, OwnChassisID, MACAddress, IPAddress, Subnetmask, StandardGateway.
 - `0x802B` / `0x802F`: the stored Check / Adjust record, byte-identical to what was written; when nothing has been written the response carries no block (an engineered-but-empty port), never "invalid index".
 - `0xF841` **PDRealData** and `0xF842` **PDExpectedData**: `MultipleBlockHeader` (BlockType `0x0400`: API, SlotNumber, SubslotNumber) wrapping, respectively, PDPortDataReal + PDInterfaceDataReal, and PDPortDataCheck + PDPortDataAdjust, one header per (slot, subslot) *(capture: what TIA reads every second, `docs/bench-pnet-device.md:1109`)*.
@@ -102,7 +102,7 @@ MultipleWrite response: one `WriteRes` per record with its own `PnioStatus`; the
 
 ### 4.4 Remote-mismatch diagnosis
 
-Channel diagnosis on slot 0, subslot `0x8001`, ChannelNumber `0x8000` (submodule), ChannelProperties: type 0, direction 0, maintenance = Fault (severity bits 00 → *fault*), ChannelErrorType `0x8000` *Data transmission impossible*, USI `0x8002` **ExtChannelDiagnosis** with ExtChannelErrorType *(verify against the dissector's names and the TIA diagnostic-buffer text)*:
+Channel diagnosis on slot 0, subslot `0x8001`, ChannelNumber `0x8000` (submodule), ChannelProperties: type 0, direction 0, maintenance = Fault (severity bits 00 → *fault*), ChannelErrorType `0x8001` *Remote mismatch* (pinned from the dissector: `0x8000` *Data transmission impossible* carries link-down/MAUType ext codes instead — `docs/pdev-golden-frames.md` §2.10), USI `0x8002` **ExtChannelDiagnosis** with ExtChannelErrorType *(verify against the dissector's names and the TIA diagnostic-buffer text)*:
 - `0x8000` *Remote mismatch: peer name of station mismatch*
 - `0x8001` *Remote mismatch: peer name of port mismatch*
 - `0x8005` *Remote mismatch: no peer detected*
