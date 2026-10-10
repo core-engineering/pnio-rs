@@ -11,7 +11,7 @@ validate the result in TIA Portal, and what is deliberately not declared yet.
 
 One `DeviceAccessPointItem` ("DAP1") plus one `ModuleItem` per declared slot:
 
-- **DAP** (slot 0): `ModuleIdentNumber="0x00000001"`, `PNIO_Version="V2.3"` (see
+- **DAP** (slot 0): `ModuleIdentNumber="0x00000001"`, `PNIO_Version="V2.31"` (see
   [Validation](#validation) for why), `MinDeviceInterval` from `cfg.min_device_interval()`,
   `DNS_CompatibleName` = the station name, plus four more `DeviceAccessPointItem` attributes:
   two the v2.4 XSD actually requires — `CheckDeviceID_Allowed="true"` and
@@ -135,19 +135,16 @@ not sufficient**: TIA's own GSD checker applies additional, version-dependent ru
 schema conformance, so a file that validates cleanly against the XSD can still be rejected by
 TIA at import or compile time. Three checker/schema rules shaped this crate's rendering:
 
-- **`PNIO_Version="V2.3"`, not `"V2.4"`**. TIA's GSD checker (beyond the XSD) rejects a DAP
-  declaring `PNIO_Version="V2.4"` unless it also claims features this device does not
-  implement: for `PNIO_Version >= "V2.31"` it mandates `CertificationInfo` at the DAP,
-  `LLDP_NoD_Supported="true"`, `ResetToFactoryModes="2"`, `PTP_BoundarySupported="true"` and
-  `DCP_BoundarySupported="true"` (TIA V21's checker, rule codes
-  `0x00020020_0/5/6/10/11`) — none of which this device implements (no LLDP, no PTP/DCP
-  boundary, no ResetToFactory). `V2.3` is the last profile version without those mandates and
-  still allows `StartupMode="Advanced"`.
-- **`SupportedProtocols=""`**. This one answers an XSD validation failure, not a TIA popup: the
+- **`PNIO_Version="V2.31"`, not `"V2.4"`**. TIA's GSD checker (beyond the XSD) applies extra
+  rules from `PNIO_Version >= "V2.31"` (`CertificationInfo`, `LLDP_NoD_Supported="true"`,
+  `ResetToFactoryModes`, `PTP_BoundarySupported`/`DCP_BoundarySupported="true"`; rule codes
+  `0x00020020_0/5/6/10/11`). The device claims V2.31, the lowest such version, and implements the
+  claims — see [V2.31 profile](#v231-profile-plan-8) below.
+- **`SupportedProtocols`** (historical: was `""` before LLDP). This one answers an XSD validation failure, not a TIA popup: the
   v2.4 XSD marks the attribute `use="required"` on `InterfaceSubmoduleItem`, but its type
   (`base:TokenListT`, pattern `(([0-9a-zA-Z_]+;)*[0-9a-zA-Z_]+)?`) allows an empty token list —
-  so an empty value is the honest declaration (the device implements neither SNMP nor LLDP) and
-  passes the recipe above; omitting the attribute entirely fails XSD validation before TIA is
+  so an empty value was the honest declaration while no protocol was implemented (now
+  `"LLDP"`); omitting the attribute entirely fails XSD validation before TIA is
   even involved.
 - **`IOConfigData`'s `MaxInputLength`/`MaxOutputLength` count the IOPS/IOCS bytes**
   (`DeviceConfig::input_cr_len`/`output_cr_len`, `75`/`75` for the sample config above, not the
@@ -158,6 +155,25 @@ TIA at import or compile time. Three checker/schema rules shaped this crate's re
   `(data_len + 1)` per submodule with data in that direction, plus one IOCS byte per submodule
   with data only in the other direction — not the sum of each module's own `IOData` length.
   `MaxDataLength` (present, optional in the v2.4 XSD) is their sum.
+
+### V2.31 profile (Plan 8)
+
+Attributes added (2026-10-10): on the DAP `PNIO_Version="V2.31"`, `LLDP_NoD_Supported="true"`,
+`ResetToFactoryModes="2 4"`, and `<CertificationInfo ConformanceClass="A" ApplicationClass=""
+NetloadClass="I"/>` directly after `ModuleInfo`; on the interface submodule
+`SupportedProtocols="LLDP"`, `PTP_BoundarySupported="true"`, `DCP_BoundarySupported="true"`
+(`DCP_HelloSupported` and `DelayMeasurementSupported` stay `"false"`).
+
+XSD results on `crates/pnio/testdata/gsdml/sample-16real-32bool.xml` (lxml 6, TIA V21 schemas):
+
+- `GSDML-DeviceProfile-v2.4.xsd`: **True**, empty error log (the file's declared schema).
+- `GSDML-DeviceProfile-v2.31.xsd`: **False**, 7 errors, none concerning the V2.31 additions
+  (element order of `CertificationInfo` is accepted): `VirtualSubmoduleItem@MayIssueProcessAlarm`
+  not allowed (x5, a V2.4 attribute); `InterfaceSubmoduleItem@SupportedMibs` required;
+  `MAUTypeList` not expected (the V2.31 schema wants `RecordDataList` there). These are
+  pre-existing V2.4-isms of the document, not regressions.
+
+TIA GSD checker import: pending (manual import). Uninstall the old `pnio-dev` GSD first.
 
 ## Identity caveat
 
@@ -250,8 +266,8 @@ TIA already knows) needs no GSDML declaration, and this device never issues a pr
   reads**, which is why both are sourced from the one `Im0` value rather than a separately-typed
   `GsdmlMeta` field — a mismatch would show up as TIA displaying one order number/revision while
   the device reports another over the wire.
-- **`PNIO_Version` stays `"V2.3"`** (see [Validation](#validation)): the I&M/`Writeable_IM_Records`
-  declaration above does not require `V2.31+`, only the LLDP/PTP-DCP-boundary/ResetToFactory
+- **`PNIO_Version="V2.31"`** (see [Validation](#validation)): the I&M/`Writeable_IM_Records`
+  declaration above does not require it by itself; the LLDP/PTP-DCP-boundary/ResetToFactory
   claims do.
 - If a GSD with the same file name is already installed, TIA will not pick up the new
   `Writeable_IM_Records`/`ModuleInfo` values on a plain re-import — see the **uninstall/reinstall

@@ -115,22 +115,19 @@ fn module_identity_xml(cfg: &DeviceConfig) -> String {
 
 /// Render the GSDML document for `cfg`.
 ///
-/// Deviations from a plain textbook template, both made to match
+/// Deviations from a plain textbook template, made to match
 /// `GSDML-V2.4-RT-Labs-P-Net-Sample-App-20220324.xml` (the reference file TIA
 /// accepted), rather than inventing schema usage:
-/// - `DeviceAccessPointItem` carries `PNIO_Version="V2.3"`, not the reference's `"V2.4"`:
-///   TIA's GSD checker applies version-dependent checks, and for `PNIO_Version >=
-///   "V2.31"` it mandates `CertificationInfo` and `LLDP_NoD_Supported="true"` on the DAP,
-///   `ResetToFactoryModes="2"`, and `PTP_BoundarySupported="true"`/
-///   `DCP_BoundarySupported="true"` on `InterfaceSubmoduleItem` — none of which the device
-///   implements (no LLDP, no PTP/DCP boundary, no ResetToFactory). V2.3 is the last
-///   profile version without those mandates and still allows `StartupMode="Advanced"`.
-///   Revisit once LLDP/boundary/ResetToFactory support lands (Plan 5+).
-/// - `InterfaceSubmoduleItem` carries `SupportedProtocols=""` rather than the
-///   reference's `"SNMP;LLDP"`: the device implements neither. The v2.4 XSD makes the
-///   attribute `use="required"`, but its type (`base:TokenListT`, pattern
-///   `(([0-9a-zA-Z_]+;)*[0-9a-zA-Z_]+)?`) allows an empty token list, so an empty value
-///   is the honest declaration — omitting the attribute fails XSD validation.
+/// - `DeviceAccessPointItem` carries `PNIO_Version="V2.31"`: TIA's GSD checker applies
+///   version-dependent rules from that version on, and TIA only writes the PDEV records
+///   to a device claiming it. Every claim the checker then mandates is backed by the crate:
+///   `LLDP_NoD_Supported="true"` by the `lldp` module (LLDP agent, name-of-device
+///   frames); `ResetToFactoryModes="2 4"` by the `dcp` ResetToFactory modes 2 and 4;
+///   `PTP_BoundarySupported`/`DCP_BoundarySupported="true"` on the interface by the PDEV
+///   boundary records stored by `pdev`; `CertificationInfo` with
+///   `ConformanceClass="A"` (CC-A) is the honest conformance claim (no IRT/RT_CLASS_3).
+/// - `InterfaceSubmoduleItem` carries `SupportedProtocols="LLDP"` rather than the
+///   reference's `"SNMP;LLDP"`: the device implements LLDP but not SNMP.
 /// - `PortSubmoduleItem` lists its MAU type via a `<MAUTypeList><MAUTypeItem .../>`
 ///   child, as the reference does, instead of a flat `MAUTypes` attribute (which does
 ///   not appear anywhere in the reference). No `<SubslotList>` element is emitted
@@ -185,13 +182,14 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
     </DeviceFunction>
     <ApplicationProcess>
       <DeviceAccessPointList>
-        <DeviceAccessPointItem ID="DAP1" PNIO_Version="V2.3" PhysicalSlots="0..{n_slots}" ModuleIdentNumber="0x00000001" MinDeviceInterval="{mdi}" DNS_CompatibleName="{station}" FixedInSlots="0" ObjectUUID_LocalIndex="1" MultipleWriteSupported="true" DeviceAccessSupported="false" CheckDeviceID_Allowed="true" NameOfStationNotTransferable="false">
+        <DeviceAccessPointItem ID="DAP1" PNIO_Version="V2.31" PhysicalSlots="0..{n_slots}" ModuleIdentNumber="0x00000001" MinDeviceInterval="{mdi}" DNS_CompatibleName="{station}" FixedInSlots="0" ObjectUUID_LocalIndex="1" MultipleWriteSupported="true" DeviceAccessSupported="false" CheckDeviceID_Allowed="true" NameOfStationNotTransferable="false" LLDP_NoD_Supported="true" ResetToFactoryModes="2 4">
           <ModuleInfo>
             <Name TextId="T_DAP_Name"/>
             <InfoText TextId="T_DAP_Info"/>
             <VendorName Value="{vendor}"/>
 {identity}
           </ModuleInfo>
+          <CertificationInfo ConformanceClass="A" ApplicationClass="" NetloadClass="I"/>
           <IOConfigData MaxInputLength="{max_in}" MaxOutputLength="{max_out}" MaxDataLength="{max_data}"/>
           <UseableModules>
 "#,
@@ -227,7 +225,7 @@ pub fn render(cfg: &DeviceConfig, meta: &GsdmlMeta) -> String {
             </VirtualSubmoduleItem>
           </VirtualSubmoduleList>
           <SystemDefinedSubmoduleList>
-            <InterfaceSubmoduleItem ID="DAP1_IF" SubslotNumber="32768" TextId="T_Interface" SubmoduleIdentNumber="0x00008000" SupportedRT_Classes="RT_CLASS_1" SupportedProtocols="" DCP_HelloSupported="false" PTP_BoundarySupported="false" DCP_BoundarySupported="false" DelayMeasurementSupported="false">
+            <InterfaceSubmoduleItem ID="DAP1_IF" SubslotNumber="32768" TextId="T_Interface" SubmoduleIdentNumber="0x00008000" SupportedRT_Classes="RT_CLASS_1" SupportedProtocols="LLDP" DCP_HelloSupported="false" PTP_BoundarySupported="true" DCP_BoundarySupported="true" DelayMeasurementSupported="false">
               <ApplicationRelations StartupMode="Advanced">
                 <TimingProperties SendClock="{send_clock}" ReductionRatio="1 2 4 8 16 32 64 128 256 512"/>
               </ApplicationRelations>
@@ -445,24 +443,22 @@ mod tests {
         // rt-labs reference file TIA accepted).
         assert_eq!(dap.attribute("CheckDeviceID_Allowed"), Some("true"));
         assert_eq!(dap.attribute("NameOfStationNotTransferable"), Some("false"));
-        // V2.3, not V2.4: TIA's GSD checker mandates LLDP/PTP-DCP boundary/ResetToFactory/
-        // CertificationInfo claims from PNIO_Version >= "V2.31", none of which the device
-        // implements (see the module doc).
-        assert_eq!(dap.attribute("PNIO_Version"), Some("V2.3"));
+        // V2.31: the lowest PNIO_Version that triggers TIA's checker rules for
+        // LLDP/boundary/ResetToFactory/CertificationInfo — all of which Plan 8 implements.
+        assert_eq!(dap.attribute("PNIO_Version"), Some("V2.31"));
+        assert_eq!(dap.attribute("LLDP_NoD_Supported"), Some("true"));
+        assert_eq!(dap.attribute("ResetToFactoryModes"), Some("2 4"));
+        let cert = find("CertificationInfo");
+        assert_eq!(cert.len(), 1, "exactly one CertificationInfo under the DAP");
+        assert_eq!(cert[0].attribute("ConformanceClass"), Some("A"));
+        assert_eq!(cert[0].attribute("ApplicationClass"), Some(""));
+        assert_eq!(cert[0].attribute("NetloadClass"), Some("I"));
         let iface = find("InterfaceSubmoduleItem")[0];
-        // The v2.4 XSD makes SupportedProtocols required; an empty value is the honest
-        // declaration since the device implements neither SNMP nor LLDP.
-        assert_eq!(iface.attribute("SupportedProtocols"), Some(""));
-        for id in [
-            "LLDP_NoD_Supported",
-            "ResetToFactoryModes",
-            "CertificationInfo",
-        ] {
-            assert!(
-                !xml.contains(id),
-                "unimplemented feature claim {id} must not appear in the document"
-            );
-        }
+        assert_eq!(iface.attribute("SupportedProtocols"), Some("LLDP"));
+        assert_eq!(iface.attribute("PTP_BoundarySupported"), Some("true"));
+        assert_eq!(iface.attribute("DCP_BoundarySupported"), Some("true"));
+        assert_eq!(iface.attribute("DCP_HelloSupported"), Some("false"));
+        assert_eq!(iface.attribute("DelayMeasurementSupported"), Some("false"));
         for tag in ["Input", "Output"] {
             for n in find(tag) {
                 assert_eq!(
