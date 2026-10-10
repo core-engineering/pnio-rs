@@ -59,6 +59,16 @@ struct Args {
     /// startup, if unset)
     #[arg(long = "im-store")]
     im_store: Option<std::path::PathBuf>,
+    /// Backing file for the DCP-assigned name/IP (kept in memory only, lost on restart,
+    /// if unset); a stored identity wins over --station/--ip at startup
+    #[arg(long = "net-store")]
+    net_store: Option<std::path::PathBuf>,
+    /// Record a DCP-assigned IP suite without applying it to the interface
+    #[arg(long = "no-apply-ip")]
+    no_apply_ip: bool,
+    /// No LLDP socket: no LLDPDUs, no neighbour, and no PDEV records
+    #[arg(long = "no-lldp")]
+    no_lldp: bool,
 }
 
 /// One `--diag` entry, parsed and slot-validated up front (fails fast like `--csv`).
@@ -209,6 +219,10 @@ pub fn main() {
             }),
             app_cpus: app_cpus.clone(),
             im_store: a.im_store.clone(),
+            net_store: a.net_store.clone(),
+            apply_ip: !a.no_apply_ip,
+            lldp: !a.no_lldp,
+            on_signal: Some(Arc::new(|| log::info!("DCP Signal: flash"))),
         },
     )
     .expect("start (need cap_net_raw/cap_net_admin/cap_sys_nice/cap_ipc_lock)");
@@ -216,10 +230,12 @@ pub fn main() {
     let stop = Arc::new(AtomicBool::new(false));
     install_signal_handlers(stop.clone());
 
+    let net = dev.net_params();
     log::info!(
-        "device up on {} as station {:?}, waiting for the controller",
+        "device up on {} as station {:?} ip {}, waiting for the controller",
         a.iface,
-        a.station
+        net.name,
+        std::net::Ipv4Addr::from(net.ip)
     );
 
     // Everything `rt_bringup.rs` splits between a blocking `dev.run(&stop)` on `main`
@@ -277,6 +293,20 @@ pub fn main() {
         if last_log.elapsed() >= stats_every {
             let s = dev.stats();
             log::info!("rt stats: {s:?}, freshness: {:?}", dev.freshness());
+            let peer = dev.peer().map_or_else(
+                || "none".to_string(),
+                |p| format!("{}/{}", p.chassis_id, p.port_id),
+            );
+            let mismatch = dev
+                .port_mismatch()
+                .map_or_else(|| "none".to_string(), |m| format!("{m:?}"));
+            let net = dev.net_params();
+            log::info!(
+                "status: name={} ip={} peer={peer} mismatch={mismatch} signals={}",
+                net.name,
+                std::net::Ipv4Addr::from(net.ip),
+                dev.signal_count()
+            );
             if let Some(f) = csv.as_mut() {
                 use std::io::Write;
                 // Non-fatal by design: one row every `stats_every` seconds, unlike

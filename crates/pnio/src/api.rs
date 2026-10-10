@@ -6,9 +6,14 @@ use crate::alarm::AlarmStats;
 use crate::cm::{AbortReason, ArParams, ArState};
 use crate::config::{DeviceConfig, Direction, FieldRef, Slot};
 use crate::data::{CodecError, FieldType, Value};
-use crate::device::{Device, DeviceError, DiagCommand, DiagShared, RtOptions};
+use crate::dcp::{IpCommand, NetParams, NoopIp};
+use crate::device::{
+    Device, DeviceError, DeviceHooks, DeviceShared, DiagCommand, DiagShared, RtOptions,
+};
 use crate::diag::{ChannelError, Diagnosis, Severity};
-use crate::eth::{bpf::acyclic_filter, AfPacketTransport, EthTransport, MacAddr};
+use crate::eth::{bpf::acyclic_filter, AfPacketTransport, EthProto, EthTransport, MacAddr};
+use crate::lldp::Peer;
+use crate::pdev::{Mismatch, SysfsLink};
 use crate::rpc::{RpcTransport, UdpRpcTransport, PNIO_UDP_PORT};
 use crate::rt::{
     Freshness, ImageError, IoImage, RtConfig, RtError, RtHandle, RtStats, StatsSnapshot, Validity,
@@ -17,11 +22,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 use thiserror::Error;
 
 /// Options for [`IoDevice::start`]: the real interface to open and how the RT thread
 /// (if any) should be scheduled.
-#[derive(Debug, Clone)]
+///
+/// No `Default`: `iface` has none, so every field is spelled out at construction.
+#[derive(Clone)]
 pub struct StartOptions {
     /// Network interface to open (e.g. `"eth0"`); its MAC is read from
     /// `/sys/class/net/<iface>/address`.
@@ -36,6 +44,41 @@ pub struct StartOptions {
     /// Backing file for the writable I&M1-3 records; `None` keeps them in memory
     /// only (blank at startup, lost on restart) — see [`crate::device::DeviceSetup::im_store`].
     pub im_store: Option<PathBuf>,
+    /// Backing file for the DCP-assigned identity (NameOfStation + IP suite). When it
+    /// holds one at start, it wins over [`StartOptions::ip`] and the config's station
+    /// name. `None` = RAM only (a DCP Set is lost on restart); a warning is logged at
+    /// start — see [`crate::device::DeviceSetup::net_store`].
+    pub net_store: Option<PathBuf>,
+    /// Push a DCP-assigned IP suite to the interface (`ip addr`/`ip route`, needs
+    /// `cap_net_admin`); `false` only records it in the identity. Recommended `true`
+    /// (the `typed_bringup` example's default).
+    pub apply_ip: bool,
+    /// Open an `AF_PACKET` socket on EtherType `0x88CC` and run LLDP (periodic LLDPDUs,
+    /// neighbour learning, PDEV records). Recommended `true` (the `typed_bringup`
+    /// example's default); `false` also disables the PDEV record service (PDEV
+    /// records answer "invalid index"). With `true`, failing to open the socket fails
+    /// [`IoDevice::start`].
+    pub lldp: bool,
+    /// Called on every accepted DCP Signal ("flash the LED"), from the acyclic thread:
+    /// keep it short and non-blocking.
+    pub on_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+/// Hand-implemented: the `on_signal` hook has no `Debug` and prints as `<fn>`.
+impl std::fmt::Debug for StartOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartOptions")
+            .field("iface", &self.iface)
+            .field("ip", &self.ip)
+            .field("rt", &self.rt)
+            .field("app_cpus", &self.app_cpus)
+            .field("im_store", &self.im_store)
+            .field("net_store", &self.net_store)
+            .field("apply_ip", &self.apply_ip)
+            .field("lldp", &self.lldp)
+            .field("on_signal", &self.on_signal.as_ref().map(|_| "<fn>"))
+            .finish()
+    }
 }
 
 /// Errors from the [`IoDevice`] facade: config-table lookups (slot/index/type/direction),
@@ -190,18 +233,46 @@ pub struct IoDevice {
     /// `Device`, so it stays readable/writable from the application thread for the
     /// `IoDevice`'s whole lifetime.
     diag: Arc<DiagShared>,
+    /// The identity and port view the acyclic loop publishes — see
+    /// [`Device::device_shared`]. Taken before the thread takes ownership of `Device`.
+    device: Arc<DeviceShared>,
 }
 
 impl IoDevice {
     /// Opens a real `AF_PACKET`/UDP device on `opts.iface`, reading its MAC from
-    /// `/sys/class/net/<iface>/address`.
+    /// `/sys/class/net/<iface>/address`, plus (with `opts.lldp`) the LLDP socket on the
+    /// same interface. The startup identity is the `opts.net_store` file's when it
+    /// holds one, else `opts.ip` and the config's station name.
     pub fn start(cfg: DeviceConfig, opts: StartOptions) -> Result<IoDevice, ApiError> {
         let mac = read_mac(&opts.iface)?;
         let eth = AfPacketTransport::open(&opts.iface).map_err(io_err)?;
         eth.attach_filter(&acyclic_filter()).map_err(io_err)?;
+        let lldp = if opts.lldp {
+            Some(Box::new(
+                AfPacketTransport::open_with(&opts.iface, EthProto::LLDP).map_err(io_err)?,
+            ) as Box<dyn EthTransport>)
+        } else {
+            None
+        };
         let rpc = UdpRpcTransport::bind(std::net::SocketAddr::from(([0, 0, 0, 0], PNIO_UDP_PORT)))
             .map_err(|e| ApiError::Io(std::io::Error::other(e.to_string())))?;
-        let app_cpus = opts.app_cpus.clone();
+        if opts.net_store.is_none() {
+            log::warn!(
+                "no net store: a DCP-assigned name/IP is kept in RAM only and lost on restart"
+            );
+        }
+        let hooks = DeviceHooks {
+            ip: if opts.apply_ip {
+                Box::new(IpCommand)
+            } else {
+                Box::new(NoopIp)
+            },
+            link: Box::new(SysfsLink {
+                iface: opts.iface.clone(),
+            }),
+            lldp,
+            on_signal: opts.on_signal.clone(),
+        };
         Self::start_inner(
             cfg,
             mac,
@@ -210,13 +281,19 @@ impl IoDevice {
             eth,
             rpc,
             crate::rt::RtRunner::spawn,
-            app_cpus,
-            opts.im_store,
+            opts.app_cpus.clone(),
+            opts.im_store.clone(),
+            hooks,
+            opts.net_store.clone(),
+            &opts.iface,
         )
     }
 
-    /// Test/embedding hook: any transports, any runner factory.
+    /// Test/embedding hook: any transports, any runner factory, any side-effect hooks
+    /// (IP configurator, link probe, LLDP transport, Signal callback). No interface
+    /// name, no affinity, no I&M or net store.
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
     pub fn start_with<E, R>(
         cfg: DeviceConfig,
         mac: MacAddr,
@@ -225,12 +302,15 @@ impl IoDevice {
         eth: E,
         rpc: R,
         runner: impl Fn(RtConfig) -> Result<RtHandle, RtError> + Send + 'static,
+        hooks: DeviceHooks,
     ) -> Result<IoDevice, ApiError>
     where
         E: EthTransport + 'static,
         R: RpcTransport + 'static,
     {
-        Self::start_inner(cfg, mac, ip, rt, eth, rpc, runner, None, None)
+        Self::start_inner(
+            cfg, mac, ip, rt, eth, rpc, runner, None, None, hooks, None, "",
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -244,6 +324,9 @@ impl IoDevice {
         runner: impl Fn(RtConfig) -> Result<RtHandle, RtError> + Send + 'static,
         app_cpus: Option<Vec<usize>>,
         im_store: Option<PathBuf>,
+        hooks: DeviceHooks,
+        net_store: Option<PathBuf>,
+        iface: &str,
     ) -> Result<IoDevice, ApiError>
     where
         E: EthTransport + 'static,
@@ -252,7 +335,10 @@ impl IoDevice {
         let cfg = Arc::new(cfg);
         let mut setup = cfg.setup(mac, ip, rt);
         setup.im_store = im_store;
-        let mut dev = Device::new(setup, eth, rpc);
+        // `Device::new_with` loads this store itself and lets it win over `ip`.
+        setup.net_store = net_store;
+        setup.iface = iface.to_string();
+        let mut dev = Device::new_with(setup, eth, rpc, hooks, Instant::now());
         dev.with_runner_factory(runner);
         let shared = Arc::new(Shared {
             state: Mutex::new((ArState::Idle, None)),
@@ -267,6 +353,7 @@ impl IoDevice {
         let image = dev.image();
         let stats = dev.rt_stats();
         let diag = dev.diag_shared();
+        let device = dev.device_shared();
         let stop = Arc::new(AtomicBool::new(false));
         let inputs = cfg
             .submodules()
@@ -300,7 +387,41 @@ impl IoDevice {
             thread: Mutex::new(Some(thread)),
             params,
             diag,
+            device,
         })
+    }
+
+    /// The current identity (NameOfStation + IP suite): the startup one (net store,
+    /// else the config's name and the `ip` given to start), then whatever a DCP Set
+    /// assigned.
+    pub fn net_params(&self) -> NetParams {
+        self.device
+            .net
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    /// DCP Signal requests accepted since start.
+    pub fn signal_count(&self) -> u32 {
+        self.device.signal_count.load(Ordering::Relaxed)
+    }
+    /// The current LLDP neighbour on the port; always `None` without LLDP
+    /// ([`StartOptions::lldp`] `false`).
+    pub fn peer(&self) -> Option<Peer> {
+        self.device
+            .peer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    /// The current remote mismatch (actual neighbour vs the controller's `CheckPeers`),
+    /// if any.
+    pub fn port_mismatch(&self) -> Option<Mismatch> {
+        *self
+            .device
+            .port_mismatch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// The [`DeviceConfig`] this device was started with.
@@ -901,7 +1022,10 @@ mod tests {
     use crate::cm::ArState;
     use crate::config::{DeviceConfig, Slot};
     use crate::data::FieldType::*;
+    use crate::dcp::MockIp;
+    use crate::device::DeviceHooks;
     use crate::eth::{MacAddr, MockTransport};
+    use crate::pdev::MockLink;
     use crate::rpc::MockRpcTransport;
     use crate::rt::{DataStatus, Layout, RtFrame, RtRunner};
     use crate::testutil::{golden, synthetic_connect_req, RPC_OFF};
@@ -1038,6 +1162,7 @@ mod tests {
             eth_acyclic.clone(),
             rpc,
             move |rt_cfg| RtRunner::spawn_with_transport(rt_cfg, eth_rt.clone()),
+            DeviceHooks::default(),
         )
         .unwrap();
         (dev, eth_acyclic)
@@ -1082,6 +1207,7 @@ mod tests {
             MockTransport::new(),
             MockRpcTransport::new(),
             |c| RtRunner::spawn_with_transport(c, MockTransport::new()),
+            DeviceHooks::default(),
         )
         .unwrap();
         assert_eq!(dev.ar_state(), ArState::Idle);
@@ -1368,5 +1494,32 @@ mod tests {
             pdu.body,
             RtaBody::Err(PnioStatus::rta_abort(PnioStatus::RTA_ABORT_AR_REMOVED))
         );
+    }
+
+    #[test]
+    fn facade_exposes_identity_signal_and_peer() {
+        let (eth, _) = SharedMock::new_pair();
+        let hooks = DeviceHooks {
+            ip: Box::new(MockIp::default()),
+            link: Box::new(MockLink(true.into())),
+            lldp: Some(Box::new(MockTransport::new())),
+            on_signal: None,
+        };
+        let dev = IoDevice::start_with(
+            sample(),
+            DEV,
+            [172, 16, 2, 10],
+            None,
+            eth,
+            MockRpcTransport::new(),
+            |c| RtRunner::spawn_with_transport(c, MockTransport::new()),
+            hooks,
+        )
+        .unwrap();
+        assert_eq!(dev.net_params().name, sample().station_name());
+        assert_eq!(dev.signal_count(), 0);
+        assert_eq!(dev.peer(), None);
+        assert_eq!(dev.port_mismatch(), None);
+        dev.stop().unwrap();
     }
 }

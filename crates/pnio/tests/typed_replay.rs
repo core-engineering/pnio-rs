@@ -7,7 +7,7 @@ use common::{golden, synthetic_connect_req, RPC_OFF, RT_CSDU_OFF, RT_FRAMEID_OFF
 use pnio::api::IoDevice;
 use pnio::config::{DeviceConfig, Slot};
 use pnio::data::FieldType::*;
-use pnio::device::RtOptions;
+use pnio::device::{DeviceHooks, RtOptions};
 use pnio::eth::{EthTransport, MacAddr, TransportError};
 use pnio::rpc::MockRpcTransport;
 use pnio::rt::{DataStatus, Layout, RtFrame, RtRunner};
@@ -161,6 +161,7 @@ fn typed_round_trip_with_the_sample_config() {
         eth_acyclic.clone(),
         rpc,
         move |c| RtRunner::spawn_with_transport(c, eth_rt.clone()),
+        DeviceHooks::default(),
     )
     .unwrap();
     wait_until_ready(&dev);

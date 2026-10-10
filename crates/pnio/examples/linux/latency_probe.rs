@@ -108,6 +108,10 @@ pub fn main() {
             }),
             app_cpus,
             im_store: None,
+            net_store: None,
+            apply_ip: false,
+            lldp: false,
+            on_signal: None,
         },
     )
     .expect("start (need cap_net_raw/cap_net_admin/cap_sys_nice/cap_ipc_lock)");
