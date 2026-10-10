@@ -65,6 +65,15 @@ fn finish(mut b: Vec<u8>) -> Vec<u8> {
     b
 }
 
+/// Write a u8 length then the bytes, cut to their first 255 bytes so the length byte
+/// and the text always agree (a neighbour's LLDP Chassis/Port ID can be longer; the cut
+/// may split a UTF-8 sequence — it is wire text, read back byte-wise).
+fn push_len_prefixed(b: &mut Vec<u8>, s: &[u8]) {
+    let s = &s[..s.len().min(u8::MAX as usize)];
+    b.push(s.len() as u8);
+    b.extend_from_slice(s);
+}
+
 /// `PDPortDataReal` (`0x020F`) for our port, §2.3.
 pub fn port_data_real(p: &Pdev, slot: u16, subslot: u16) -> Vec<u8> {
     let mut b = begin(ty::PD_PORT_DATA_REAL);
@@ -78,10 +87,8 @@ pub fn port_data_real(p: &Pdev, slot: u16, subslot: u16) -> Vec<u8> {
     b.push(u8::from(peer.is_some())); // NumberOfPeers
     align4(&mut b);
     if let Some(peer) = peer {
-        b.push(peer.port_id.len() as u8);
-        b.extend_from_slice(peer.port_id.as_bytes());
-        b.push(peer.chassis_id.len() as u8);
-        b.extend_from_slice(peer.chassis_id.as_bytes());
+        push_len_prefixed(&mut b, peer.port_id.as_bytes()); // LengthPeerPortID, PeerPortID
+        push_len_prefixed(&mut b, peer.chassis_id.as_bytes()); // LengthPeerChassisID, PeerChassisID
         align4(&mut b);
         b.extend_from_slice(&0u32.to_be_bytes()); // LineDelay: format 0, value 0 = unknown
         b.extend_from_slice(&peer.mac); // PeerMACAddress
@@ -177,7 +184,9 @@ pub fn parse_check(record: &[u8]) -> Result<CheckRecord, BlockError> {
     let mut out = CheckRecord {
         peers: Vec::new(),
         mau_type: None,
-        raw: record.to_vec(),
+        // The outer block only: bytes past its BlockLength are not part of the record
+        // (they would read back inside PDExpectedData as a further block).
+        raw: record[..BlockHeader::LEN + body.len()].to_vec(),
     };
     let mut rest = &body[6..];
     while rest.len() >= BlockHeader::LEN && rest[..2] != [0, 0] {
@@ -206,6 +215,8 @@ pub fn parse_check(record: &[u8]) -> Result<CheckRecord, BlockError> {
 
 /// Serve a PDEV read: `Some(record)` (possibly empty) for an index/subslot this module
 /// owns, `None` otherwise (the caller falls through to I&M, then "invalid index").
+/// The written records (`0x802B`, `0x802F` on the port, `0x8071` on the interface) read
+/// back byte-identical, or empty when nothing is stored.
 pub fn read(p: &Pdev, idx: u16, slot: u16, subslot: u16) -> Option<Vec<u8>> {
     match (idx, slot, subslot) {
         (index::PD_PORT_DATA_REAL, 0, PORT_SUBSLOT) => Some(port_data_real(p, slot, subslot)),
@@ -216,6 +227,9 @@ pub fn read(p: &Pdev, idx: u16, slot: u16, subslot: u16) -> Option<Vec<u8>> {
             Some(p.adjust().map(<[u8]>::to_vec).unwrap_or_default())
         }
         (index::PD_INTERFACE_DATA_REAL, 0, IFACE_SUBSLOT) => Some(interface_data_real(p)),
+        (index::PD_INTERFACE_ADJUST, 0, IFACE_SUBSLOT) => {
+            Some(p.iface_adjust().map(<[u8]>::to_vec).unwrap_or_default())
+        }
         (index::PD_REAL_DATA, _, _) => Some(pd_real_data(p)),
         (index::PD_EXPECTED_DATA, _, _) => Some(pd_expected_data(p)),
         _ => None,
@@ -646,6 +660,64 @@ mod tests {
             read(&p, index::PD_EXPECTED_DATA, 0, IFACE_SUBSLOT),
             Some(exp)
         );
+    }
+
+    #[test]
+    fn port_data_real_clamps_peer_strings_to_255_bytes() {
+        // A length byte cannot say more than 255: the string is cut to match it, so the
+        // block stays self-consistent.
+        let mut p = pdev();
+        let long = "c".repeat(300);
+        let frame = crate::lldp::build_device_pdu(&long, [0xec; 6], "port-001.plc", 20)
+            .frame(crate::eth::MacAddr([0xec; 6]));
+        p.on_rx(&frame, Instant::now());
+        assert_eq!(
+            p.peer().unwrap().chassis_id.len(),
+            300,
+            "the neighbour really sent 300 bytes"
+        );
+        let b = port_data_real(&p, 0, PORT_SUBSLOT);
+        let chassis_len_at = 32 + 1 + "port-001.plc".len(); // peers start at 32 (§2.3)
+        assert_eq!(b[chassis_len_at], 255);
+        assert_eq!(
+            &b[chassis_len_at + 1..chassis_len_at + 256],
+            &long.as_bytes()[..255]
+        );
+        // Padding to 4, then LineDelay and the peer MAC right where the clamped length says.
+        let after = (chassis_len_at + 256 + 3) & !3;
+        assert_eq!(&b[after..after + 4], &[0; 4]);
+        assert_eq!(&b[after + 4..after + 10], &[0xec; 6]);
+        let (h, _) = BlockHeader::parse(&b).unwrap();
+        assert_eq!(h.block_length as usize + 4, b.len());
+    }
+
+    #[test]
+    fn check_raw_is_the_outer_block_only() {
+        // Bytes past the outer BlockLength are not part of the record we read back.
+        let rec = synthetic_check_record("port-001.plc", "plc");
+        let block_length = u16::from_be_bytes([rec[2], rec[3]]) as usize;
+        let mut with_garbage = rec.clone();
+        with_garbage.extend_from_slice(&[0xde, 0xad, 0xbe]);
+        let c = parse_check(&with_garbage).unwrap();
+        assert_eq!(c.raw.len(), 4 + block_length);
+        assert_eq!(c.raw, rec);
+    }
+
+    #[test]
+    fn interface_adjust_reads_back() {
+        let mut p = pdev();
+        assert_eq!(
+            read(&p, index::PD_INTERFACE_ADJUST, 0, IFACE_SUBSLOT),
+            Some(Vec::new())
+        );
+        // The 1515's MultipleInterfaceMode.NameOfDevice = 1 block (§2.7).
+        let iface_adjust = vec![0x02, 0x50, 0x00, 0x08, 0x01, 0x00, 0, 0, 0, 0, 0, 1];
+        p.set_iface_adjust(Some(iface_adjust.clone()));
+        assert_eq!(
+            read(&p, index::PD_INTERFACE_ADJUST, 0, IFACE_SUBSLOT),
+            Some(iface_adjust)
+        );
+        assert_eq!(read(&p, index::PD_INTERFACE_ADJUST, 0, PORT_SUBSLOT), None);
     }
 
     #[test]
