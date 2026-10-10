@@ -279,6 +279,15 @@ pub fn synthetic_connect_req(model: &crate::cm::DeviceModel) -> Vec<u8> {
     pdu
 }
 
+/// A well-formed I&M1 record: `BlockHeader` type `0x0021`, version 1.0, body 54 bytes
+/// (TagFunction 32 + TagLocation 22, space-padded).
+pub fn im1_record(function: &str, location: &str) -> Vec<u8> {
+    let mut rec = Vec::with_capacity(60);
+    crate::cm::BlockHeader::write(&mut rec, 0x0021, 54);
+    rec.extend_from_slice(format!("{function:<32}{location:<22}").as_bytes());
+    rec
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

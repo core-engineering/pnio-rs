@@ -4,14 +4,20 @@ pub mod block;
 pub mod frame;
 pub mod identify;
 pub mod name;
+pub mod ipconf;
 pub mod set;
+pub mod store;
 
 pub use block::{parse_blocks, write_blocks, DcpBlock};
 pub use frame::{DcpHeader, FrameId, ServiceId, ServiceType, DCP_MULTICAST_MAC};
 pub use identify::{
     build_identify_response, parse_identify_request, DeviceProperties, IdentifyFilter,
 };
+pub use ipconf::{IpConfigurator, MockIp, NoopIp};
+#[cfg(target_os = "linux")]
+pub use ipconf::IpCommand;
 pub use name::{validate_station_name, NameError};
+pub use store::NetStore;
 pub use set::{
     build_set_response, decide_set, parse_set_request, reset_mode, Effect, SetBlock, SetBlockError,
     SetDecision, SetRequest, QUALIFIER_PERMANENT,

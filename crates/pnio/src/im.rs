@@ -309,6 +309,14 @@ impl ImStore {
         Ok(())
     }
 
+    /// Blank all three records (all spaces) and persist, for DCP ResetToFactory mode 4.
+    pub fn clear(&mut self) {
+        self.im1 = [b' '; IM1_LEN];
+        self.im2 = [b' '; IM2_LEN];
+        self.im3 = [b' '; IM3_LEN];
+        self.persist();
+    }
+
     /// Write the three record bodies back to back to `path` (temp file in the same
     /// directory, then rename, for atomicity). No-op if no `path` is configured. A
     /// filesystem error is logged and otherwise ignored.
@@ -358,7 +366,7 @@ impl Default for ImStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::golden_alarm;
+    use crate::testutil::{golden_alarm, im1_record};
 
     fn pnet_im0() -> Im0 {
         Im0 {
@@ -459,5 +467,19 @@ mod tests {
             }
         );
         assert_eq!(s.read(INDEX_IM2).unwrap().len(), 22);
+    }
+
+    #[test]
+    fn clear_blanks_everything_and_persists() {
+        let dir = std::env::temp_dir().join(format!("pnio-imclear-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = ImStore::load(Some(dir.join("im")));
+        s.write(INDEX_IM1, &im1_record("FUNCTION", "LOCATION")).unwrap();
+        assert_eq!(s.tag_function().trim(), "FUNCTION");
+        s.clear();
+        assert_eq!(s.tag_function().trim(), "");
+        let reloaded = ImStore::load(Some(dir.join("im")));
+        assert_eq!(reloaded.tag_function().trim(), "");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
