@@ -10,6 +10,8 @@ use crate::lldp::{build_device_pdu, parse_frame, port_id_string, Peer, DEFAULT_T
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+pub mod records;
+
 /// Subslot of the device's one port (DAP submodule "Port 1").
 pub const PORT_SUBSLOT: u16 = 0x8001;
 /// Subslot of the device's interface (DAP submodule "Interface").

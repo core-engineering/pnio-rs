@@ -288,6 +288,84 @@ pub fn im1_record(function: &str, location: &str) -> Vec<u8> {
     rec
 }
 
+// synthetic — replace by the Task 2 golden. PDEV record and request builders from
+// docs/pdev-golden-frames.md §2 and the IODWriteReqHeader / IODReadReqHeader layouts
+// that `cm::WriteReq::parse` / `cm::ReadReq::parse` read.
+
+/// A `PDPortDataCheck` record (index `0x802B`, slot 0, subslot `0x8001`) with one expected
+/// peer (§2.5): header, padding 2, SlotNumber, SubslotNumber, a `CheckPeers` sub-block
+/// (NumberOfPeers, LengthPeerPortID + PeerPortID, LengthPeerChassisID + PeerChassisID, no
+/// padding) and a `Checking MAUType` sub-block (`0x0010`).
+pub fn synthetic_check_record(port_id: &str, chassis_id: &str) -> Vec<u8> {
+    use crate::cm::BlockHeader;
+    use crate::pdev::records::ty;
+    let mut peers = vec![1u8, port_id.len() as u8];
+    peers.extend_from_slice(port_id.as_bytes());
+    peers.push(chassis_id.len() as u8);
+    peers.extend_from_slice(chassis_id.as_bytes());
+    let mut body = vec![0, 0]; // padding
+    body.extend_from_slice(&0u16.to_be_bytes()); // SlotNumber
+    body.extend_from_slice(&0x8001u16.to_be_bytes()); // SubslotNumber
+    BlockHeader::write(&mut body, ty::CHECK_PEERS, peers.len() as u16);
+    body.extend_from_slice(&peers);
+    BlockHeader::write(&mut body, ty::CHECK_MAU_TYPE, 2);
+    body.extend_from_slice(&0x0010u16.to_be_bytes());
+    let mut out = Vec::new();
+    BlockHeader::write(&mut out, ty::PD_PORT_DATA_CHECK, body.len() as u16);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// One `IODWriteReqHeader` carrying `data` (a single-record Write, no MultipleWrite
+/// container): seq, ARUUID, API 0, slot, subslot, padding, index, RecordDataLength,
+/// 24 bytes padding, then the data.
+pub fn synthetic_write_record(
+    ar_uuid: crate::rpc::Uuid,
+    slot: u16,
+    subslot: u16,
+    index: u16,
+    data: &[u8],
+) -> Vec<u8> {
+    use crate::cm::{ty, BlockHeader};
+    let mut b = Vec::with_capacity(64 + data.len());
+    BlockHeader::write(&mut b, ty::IOD_WRITE_REQ_HEADER, 58);
+    b.extend_from_slice(&1u16.to_be_bytes());
+    ar_uuid.write(&mut b, crate::rpc::Drep::BIG);
+    b.extend_from_slice(&0u32.to_be_bytes());
+    b.extend_from_slice(&slot.to_be_bytes());
+    b.extend_from_slice(&subslot.to_be_bytes());
+    b.extend_from_slice(&[0, 0]);
+    b.extend_from_slice(&index.to_be_bytes());
+    b.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    b.extend_from_slice(&[0u8; 24]);
+    b.extend_from_slice(data);
+    b
+}
+
+/// One `IODReadReqHeader`: seq, ARUUID, API 0, slot, subslot, padding, index,
+/// RecordDataLength `0x8000`, TargetARUUID (= `ar_uuid`), 8 bytes padding.
+pub fn synthetic_read_req(
+    ar_uuid: crate::rpc::Uuid,
+    slot: u16,
+    subslot: u16,
+    index: u16,
+) -> Vec<u8> {
+    use crate::cm::{ty, BlockHeader};
+    let mut b = Vec::with_capacity(64);
+    BlockHeader::write(&mut b, ty::IOD_READ_REQ_HEADER, 58);
+    b.extend_from_slice(&2u16.to_be_bytes());
+    ar_uuid.write(&mut b, crate::rpc::Drep::BIG);
+    b.extend_from_slice(&0u32.to_be_bytes());
+    b.extend_from_slice(&slot.to_be_bytes());
+    b.extend_from_slice(&subslot.to_be_bytes());
+    b.extend_from_slice(&[0, 0]);
+    b.extend_from_slice(&index.to_be_bytes());
+    b.extend_from_slice(&0x8000u32.to_be_bytes());
+    ar_uuid.write(&mut b, crate::rpc::Drep::BIG);
+    b.extend_from_slice(&[0u8; 8]);
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
