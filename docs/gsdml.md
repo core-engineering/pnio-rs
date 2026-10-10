@@ -13,12 +13,16 @@ One `DeviceAccessPointItem` ("DAP1") plus one `ModuleItem` per declared slot:
 
 - **DAP** (slot 0): `ModuleIdentNumber="0x00000001"`, `PNIO_Version="V2.31"` (see
   [Validation](#validation) for why), `MinDeviceInterval` from `cfg.min_device_interval()`,
-  `DNS_CompatibleName` = the station name, plus four more `DeviceAccessPointItem` attributes:
+  `DNS_CompatibleName` = the station name, plus these `DeviceAccessPointItem` attributes:
   two the v2.4 XSD actually requires — `CheckDeviceID_Allowed="true"` and
   `NameOfStationNotTransferable="false"` (TIA's XSD validation failed without them, the HIL
-  bench's first rejection, `docs/bench-pnet-device.md` §6g) — and two more that are not
+  bench's first rejection, `docs/bench-pnet-device.md` §6g); two that are not
   schema-mandated but are declared to match the rt-labs reference file TIA accepted,
-  `MultipleWriteSupported="true"` and `DeviceAccessSupported="false"`. `IOConfigData` carries
+  `MultipleWriteSupported="true"` and `DeviceAccessSupported="false"`; and two backed by
+  Plan 8, `LLDP_NoD_Supported="true"` (the `lldp` agent) and `ResetToFactoryModes="2 4"` (DCP
+  ResetToFactory modes 2 and 4). The DAP also carries a `CertificationInfo` element
+  (`ConformanceClass="A"`, `NetloadClass="I"`), and the interface submodule declares
+  `SupportedProtocols="LLDP"`. `IOConfigData` carries
   `MaxInputLength`/`MaxOutputLength`/`MaxDataLength` — see [Validation](#validation), these are
   not the plain per-direction data sums. The interface submodule (subslot `32768`) and port
   submodule (subslot `32769`) are system-defined, fixed.
@@ -216,7 +220,7 @@ let dev = IoDevice::start(cfg, StartOptions {
     iface, ip, rt, app_cpus,
     im_store: None,
     net_store: None,      // Some(path) persists a DCP-assigned name/IP
-    apply_ip: true,
+    apply_ip: false,      // true pushes it to the interface: root or setcap on `ip`
     lldp: true,
     on_signal: None,
 })?;

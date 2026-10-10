@@ -36,6 +36,9 @@ rejected with `nca_unk_if`). Capturing **Connect/AR + cyclic RT + alarm** (Plans
 2. **`set_network_parameters` is replaced by a guard** (`~/p-net/build/set_network_parameters`,
    original kept as `.orig`): no-op if the requested IP equals the current one, **refuses (rc=1)**
    otherwise. The stock script does `ip address flush` + `ip route add default` — never run it here.
+   Same rule for `pnio` (Plan 8): the HIL runs `typed_bringup` **without `--apply-ip`** on the bench
+   edge, so a DCP Set-IP / ResetToFactory is only recorded; the checks that need the address
+   applied require root or `setcap cap_net_admin+ep` on `ip`, on a lab interface that may be flushed.
 3. **TIA cannot do DCP through the NAT** (L2). "Accessible devices", "Assign device name" and
    LED flashing from the laptop will not reach the device. Not blocking: the name comes from
    `pn_dev -s`, and the **CPU itself** emits Identify (NameOfStation filter) + Set IP on `eno2`.

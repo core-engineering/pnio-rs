@@ -399,10 +399,31 @@ Found during implementation:
 - **`tests/pdev_replay.rs` pending the goldens** (plan Task 14 Steps 1-2).
 - **PDExpectedData alignment**: if TIA's PDPortDataCheck is not 4-byte aligned, revisit the
   `0xF842` builder.
-- **`device/mod.rs` is 2651 lines**: split the tests and the DCP-Set / PDEV glue out.
+- **`device/mod.rs` is 2826 lines**: split the tests and the DCP-Set / PDEV glue out.
 - **An LLDP socket recv error aborts the acyclic loop** (same policy as the PROFINET socket).
 - **`as_text` text-vs-hex**: binary ids that happen to be all printable render as text.
 - **`attach_filter` doc**: the BPF programs are PROFINET-only (not valid for the LLDP socket).
 - **Facade test** asserting `net_params` / `signal_count` / `peer` / `port_mismatch` after a DCP Signal.
 - **`IoDevice::stop` doc is stale** (does not mention the TTL-0 LLDPDU).
 - **`typed_bringup`: the POSIX `on_signal` handler name clashes** with the `StartOptions::on_signal` hook naming.
+- **`AdjustPeerToPeerBoundary` bit 0 ("the LLDP agent shall not send") and
+  `PDInterfaceAdjust.MultipleInterfaceMode.NameOfDevice = 0` (Port ID without the NameOfStation)
+  are stored but not honoured**: the device always sends LLDPDUs and always uses the
+  `port-001.<name>` form. Task 2 (capture campaign) to check what the 1515 actually writes.
+- **Raising `CAP_NET_ADMIN` as an ambient capability before spawning `ip`** (needs an `unsafe`
+  `prctl`) is the alternative to documenting root / `setcap cap_net_admin+ep` on the `ip` binary
+  for `apply_ip`.
+- **Derive the PMD/MAU type from the interface** (ethtool speed/duplex) instead of the fixed
+  value in the LLDPDU and `PDPortDataReal`.
+- **The LLDP drain loop stops at the first non-accepted frame** (same behaviour as the DCP
+  drain): the rest of the burst waits for the next step.
+- **Task 3 name tests**: negative `port-xyz` forms, the `LooksLikeIp` edge (four numeric labels
+  vs. three or five), precedence between errors, non-ASCII input.
+- **Task 5 store parser leniency**: `+1`, leading zeros, a UTF-8 BOM and duplicate keys are
+  accepted or rejected by accident of `str::parse` / last-wins; pin the intended behaviour.
+- **Task 11 diagnosis builder duplication** (remote-mismatch vs. channel ExtChannelDiagnosis)
+  and **replay-order tests** after an AR loss with both kinds active.
+- **`device/mod.rs` PDEV tests call `Pdev::set_check` directly**; now complemented by the
+  end-to-end `check_written_over_rpc_against_a_mismatching_peer_raises_the_port_alarm` (RPC
+  Write → `CmOutput.pdev` → `DiagStore` → alarm), but the other mismatch tests still bypass
+  the record path.

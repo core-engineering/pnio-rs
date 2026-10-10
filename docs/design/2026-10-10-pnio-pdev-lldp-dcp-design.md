@@ -218,7 +218,7 @@ Extracted into `testdata/lldp/`, `testdata/pdev/`, `testdata/dcp/` as hex, docum
 - LLDP socket cannot be opened (no capability): `start` fails with `ApiError::Io` unless `lldp: false`.
 - `IpConfigurator` failure: DCP block answers `SetNotPossible`, nothing persisted, logged at error.
 - `NetStore` write failure: logged, the in-memory change stands (same policy as `ImStore`).
-- Name set to the current name: Ok, no abort, no persistence churn.
+- Name/IP set to the current values: Ok, no abort, no interface reconfiguration; a permanent Set still re-saves the whole identity (so a temporary Set followed by a permanent same-value Set lands in the file).
 - Peer flapping (PDU every 5 s from two different ports — a misconfigured switch): the last PDU wins; evaluation may toggle; acceptable, logged at debug.
 - Check written with `NumberOfPeers = 0` (TIA "no partner" topology): no mismatch ever, `evaluate()` → `None`.
 - Check or Adjust for an unknown subslot: `write_invalid_parameter`.

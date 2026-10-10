@@ -24,14 +24,20 @@ wire facts are provisional (dissector-sourced) in `docs/pdev-golden-frames.md`.
 - `device`: DCP effects, LLDP socket, PDEV tick, hooks, TTL-0 LLDPDU at shutdown.
 - `api`: `StartOptions { net_store, apply_ip, lldp, on_signal }`, `start_with(.., hooks)`,
   `IoDevice::{net_params, signal_count, peer, port_mismatch}`.
-- `typed_bringup`: `--net-store`, `--no-apply-ip`, `--no-lldp`.
+- `typed_bringup`: `--net-store`, `--apply-ip` (opt-in: applying needs root or
+  `setcap cap_net_admin+ep` on the `ip` binary), `--no-lldp`.
 
 ### Changed
 - `StartOptions` has four new fields (breaking for struct literals); `DeviceSetup` gained
   `net_store` and `iface`; `Device::new_with(.., hooks, now)`.
-- `dcp::decide_set` signature; `cm::build_write_res(req, statuses)` signature; `start_with`
-  signature (takes `DeviceHooks`); new `Action::WriteAccepted`.
+- `dcp::decide_set(req, &DeviceProperties) -> Vec<(u8, u8, SetBlockError)>` →
+  `decide_set(&SetRequest) -> Vec<SetDecision>` (per-block `Effect`, no current-properties
+  guard); `cm::build_write_res(req, statuses)` signature; `start_with` signature (takes
+  `DeviceHooks`); new `Action::WriteAccepted`.
 - Non-OK I&M writes now reach the wire (per-record Write status).
+- `IpCommand` flushes IPv4 only (`ip -4 addr flush`): the IPv6 link-local address survives.
+- The stored IP suite is re-applied to the interface at startup when a `NetStore` supplied
+  the identity (a failure is logged, never fatal).
 
 ### Fixed
 - TIA's `0xF841` / `0xF842` probes no longer answer "invalid index".

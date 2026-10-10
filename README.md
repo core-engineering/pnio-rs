@@ -78,7 +78,8 @@ let dev = IoDevice::start(cfg, StartOptions {
     app_cpus: Some(vec![0, 1, 2]),
     im_store: Some("/var/lib/pnio/im.bin".into()),   // persists the I&M1-3 written by TIA
     net_store: Some("/var/lib/pnio/net.txt".into()), // persists the name/IP assigned by DCP Set
-    apply_ip: true,                                  // push a DCP-assigned IP to the interface (cap_net_admin)
+    apply_ip: false,                                 // true: push a DCP-assigned IP to the interface, needs root
+                                                     // or `setcap cap_net_admin+ep /usr/sbin/ip` (not inherited)
     lldp: true,                                      // LLDP neighbourhood + PDEV records (EtherType 0x88CC)
     on_signal: None,                                 // optional "flash the LED" callback for DCP Signal
 }).expect("start (needs cap_net_raw/cap_net_admin/cap_sys_nice/cap_ipc_lock)");
@@ -139,7 +140,8 @@ application samples, controller‑side abort detected in 0.65 ms on device stop.
 ## Limitations (0.1)
 
 - **No process alarms** (OB40), manufacturer‑specific diagnosis codes, plug/pull alarms,
-  `ModuleDiffBlock`, or diagnosis record reads (`0x800x`, `0xF8xx` — answered "invalid index").
+  `ModuleDiffBlock`, or diagnosis record reads (`0xF820`, `0xF00C`, `0xF80C` — answered "invalid
+  index"; the PDEV reads `0xF841`/`0xF842` are served).
 - **PDEV / LLDP / DCP Set are implemented, bench validation pending**: the byte layouts come
   from the Wireshark dissector, not from a capture, until the capture campaign and the HIL run.
   Whether TIA V21 now writes I&M1‑3 under `PNIO_Version="V2.31"` is still to be confirmed.
