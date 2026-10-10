@@ -5,6 +5,10 @@ use thiserror::Error;
 pub const ETHERTYPE_PROFINET: u16 = 0x8892;
 /// Ethertype identifying an 802.1Q VLAN tag.
 pub const ETHERTYPE_VLAN: u16 = 0x8100;
+/// EtherType of LLDP (IEEE 802.1AB).
+pub const ETHERTYPE_LLDP: u16 = 0x88CC;
+/// LLDP nearest-bridge multicast destination `01:80:c2:00:00:0e`.
+pub const LLDP_MULTICAST_MAC: MacAddr = MacAddr([0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e]);
 
 /// A 6-byte Ethernet MAC address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

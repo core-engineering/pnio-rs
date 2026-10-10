@@ -7,8 +7,7 @@ use nix::sys::socket::{send, MsgFlags};
 use super::bpf::SockFilter;
 use super::poll::wait_readable;
 use super::transport::{EthTransport, TransportError, MAX_FRAME_LEN};
-use super::{ETHERTYPE_PROFINET, ETHERTYPE_VLAN};
-use crate::dcp::frame::DCP_MULTICAST_MAC;
+use super::EthProto;
 
 impl From<nix::errno::Errno> for TransportError {
     fn from(e: nix::errno::Errno) -> Self {
@@ -16,43 +15,32 @@ impl From<nix::errno::Errno> for TransportError {
     }
 }
 
-/// Returns true if the raw frame is a PROFINET frame (VLAN-tagged or untagged).
-fn is_profinet_frame(buf: &[u8]) -> bool {
-    if buf.len() < 14 {
-        return false;
-    }
-    let et = u16::from_be_bytes([buf[12], buf[13]]);
-    if et == ETHERTYPE_PROFINET {
-        return true;
-    }
-    et == ETHERTYPE_VLAN
-        && buf.len() >= 18
-        && u16::from_be_bytes([buf[16], buf[17]]) == ETHERTYPE_PROFINET
-}
-
-/// Raw AF_PACKET socket bound to a named interface and the PROFINET EtherType
-/// (0x8892), with membership in the DCP multicast group, filtered on EtherType
-/// PROFINET at recv time. In practice, live frames delivered to a
-/// protocol-bound `AF_PACKET` socket always arrive with any 802.1Q tag already
-/// stripped by the kernel (`__netif_receive_skb_core` untags before
-/// protocol-keyed dispatch, and `packet_rcv` does not reinsert it) — the tag is
-/// only observable via `PACKET_AUXDATA` + `recvmsg`, which this transport does
-/// not use. `is_profinet_frame`'s VLAN-tagged branch therefore never matches
-/// live `AfPacketTransport` traffic; it exists for the mock/replay path, where
-/// captured frames can still carry the tag, and as a hook for a possible future
-/// `ETH_P_ALL`-bound fallback that would see tagged frames.
+/// Raw AF_PACKET socket bound to a named interface and one EtherType (see
+/// [`EthProto`]), optionally joined to a multicast group, and filtered on that
+/// EtherType at recv time ([`EthProto::accepts`]).
 pub struct AfPacketTransport {
     fd: OwnedFd,
+    proto: EthProto,
 }
 
 impl AfPacketTransport {
     /// Open a raw AF_PACKET socket on `ifname`, bound to EtherType 0x8892 and
-    /// joined to the DCP multicast group (01:0e:cf:00:00:00).
+    /// joined to the DCP multicast group (01:0e:cf:00:00:00); shorthand for
+    /// [`open_with`](Self::open_with)`(ifname, EthProto::PROFINET)`.
     ///
     /// Returns `Err(TransportError::Io)` if the interface does not exist or the
     /// process lacks `CAP_NET_RAW`.
     pub fn open(ifname: &str) -> Result<Self, TransportError> {
-        let profinet_protocol = (ETHERTYPE_PROFINET).to_be() as i32;
+        Self::open_with(ifname, EthProto::PROFINET)
+    }
+
+    /// Open a raw AF_PACKET socket on `ifname`, bound to `proto.ethertype` and
+    /// joined to `proto.multicast` if any.
+    ///
+    /// Returns `Err(TransportError::Io)` if the interface does not exist or the
+    /// process lacks `CAP_NET_RAW`.
+    pub fn open_with(ifname: &str, proto: EthProto) -> Result<Self, TransportError> {
+        let protocol = proto.ethertype.to_be() as i32;
 
         // Safety: `socket(2)` with valid, constant arguments; the returned fd is
         // immediately wrapped in an `OwnedFd`, which takes ownership and closes it
@@ -61,7 +49,7 @@ impl AfPacketTransport {
             libc::socket(
                 libc::AF_PACKET,
                 libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-                profinet_protocol,
+                protocol,
             )
         };
         if raw_fd < 0 {
@@ -79,7 +67,7 @@ impl AfPacketTransport {
         // pattern is a valid value; every field we rely on is explicitly set below.
         let mut sll: libc::sockaddr_ll = unsafe { mem::zeroed() };
         sll.sll_family = libc::AF_PACKET as u16;
-        sll.sll_protocol = (ETHERTYPE_PROFINET).to_be();
+        sll.sll_protocol = proto.ethertype.to_be();
         sll.sll_ifindex = ifindex as libc::c_int;
 
         // Safety: `sll` is a valid, fully-initialized `sockaddr_ll` on the stack for
@@ -95,32 +83,34 @@ impl AfPacketTransport {
             return Err(TransportError::Io(std::io::Error::last_os_error()));
         }
 
-        // Join the DCP multicast group so multicast DCP frames (Identify, Hello)
-        // reach this socket even when the NIC does not pass all multicast by default.
-        // Safety: `packet_mreq` is a plain-old-data struct for which an all-zero bit
-        // pattern is a valid value; every field we rely on is explicitly set below.
-        let mut mreq: libc::packet_mreq = unsafe { mem::zeroed() };
-        mreq.mr_ifindex = ifindex as libc::c_int;
-        mreq.mr_type = libc::PACKET_MR_MULTICAST as u16;
-        mreq.mr_alen = 6;
-        mreq.mr_address[..6].copy_from_slice(&DCP_MULTICAST_MAC.0);
+        if let Some(group) = proto.multicast {
+            // Join the multicast group (e.g. DCP Identify/Hello, LLDP) so its frames
+            // reach this socket even when the NIC does not pass all multicast by default.
+            // Safety: `packet_mreq` is a plain-old-data struct for which an all-zero bit
+            // pattern is a valid value; every field we rely on is explicitly set below.
+            let mut mreq: libc::packet_mreq = unsafe { mem::zeroed() };
+            mreq.mr_ifindex = ifindex as libc::c_int;
+            mreq.mr_type = libc::PACKET_MR_MULTICAST as u16;
+            mreq.mr_alen = 6;
+            mreq.mr_address[..6].copy_from_slice(&group);
 
-        // Safety: `mreq` is a valid, fully-initialized `packet_mreq` on the stack for
-        // the duration of the call; `fd` is a valid, open socket.
-        let ret = unsafe {
-            libc::setsockopt(
-                fd.as_raw_fd(),
-                libc::SOL_PACKET,
-                libc::PACKET_ADD_MEMBERSHIP,
-                &mreq as *const libc::packet_mreq as *const libc::c_void,
-                mem::size_of::<libc::packet_mreq>() as libc::socklen_t,
-            )
-        };
-        if ret < 0 {
-            return Err(TransportError::Io(std::io::Error::last_os_error()));
+            // Safety: `mreq` is a valid, fully-initialized `packet_mreq` on the stack for
+            // the duration of the call; `fd` is a valid, open socket.
+            let ret = unsafe {
+                libc::setsockopt(
+                    fd.as_raw_fd(),
+                    libc::SOL_PACKET,
+                    libc::PACKET_ADD_MEMBERSHIP,
+                    &mreq as *const libc::packet_mreq as *const libc::c_void,
+                    mem::size_of::<libc::packet_mreq>() as libc::socklen_t,
+                )
+            };
+            if ret < 0 {
+                return Err(TransportError::Io(std::io::Error::last_os_error()));
+            }
         }
 
-        Ok(Self { fd })
+        Ok(Self { fd, proto })
     }
 
     /// Attach a classic BPF program (see [`crate::eth::bpf`]) to the socket. Frames
@@ -161,7 +151,7 @@ impl EthTransport for AfPacketTransport {
         Ok(())
     }
 
-    /// Returns `Ok(Some(len))` only for PROFINET frames (untagged or VLAN-tagged).
+    /// Returns `Ok(Some(len))` only for frames this transport's [`EthProto`] accepts.
     /// Returns `Ok(None)` for any other frame, for our own looped-back frames, or if
     /// `timeout` elapses before a frame arrives.
     fn recv_into(
@@ -205,7 +195,7 @@ impl EthTransport for AfPacketTransport {
         if n > buf.len() {
             return Err(TransportError::FrameTooLong { len: n });
         }
-        if is_profinet_frame(&buf[..n]) {
+        if self.proto.accepts(&buf[..n]) {
             Ok(Some(n))
         } else {
             Ok(None)
@@ -241,40 +231,5 @@ mod tests {
     fn attach_filter_on_loopback_succeeds() {
         let t = AfPacketTransport::open("lo").expect("open lo");
         t.attach_filter(&super::super::bpf::rt_filter()).unwrap();
-    }
-
-    #[test]
-    fn accepts_untagged_profinet() {
-        // 6 dst + 6 src + 2 ethertype (0x8892) + 2 payload bytes
-        let mut buf = vec![0u8; 16];
-        buf[12] = 0x88;
-        buf[13] = 0x92;
-        assert!(is_profinet_frame(&buf));
-    }
-
-    #[test]
-    fn accepts_vlan_tagged_profinet() {
-        // 6 dst + 6 src + 2 (0x8100 VLAN) + 2 TCI + 2 ethertype (0x8892) + 2 payload
-        let mut buf = vec![0u8; 20];
-        buf[12] = 0x81;
-        buf[13] = 0x00;
-        buf[16] = 0x88;
-        buf[17] = 0x92;
-        assert!(is_profinet_frame(&buf));
-    }
-
-    #[test]
-    fn rejects_non_profinet() {
-        // IPv4 ethertype 0x0800
-        let mut buf = vec![0u8; 16];
-        buf[12] = 0x08;
-        buf[13] = 0x00;
-        assert!(!is_profinet_frame(&buf));
-    }
-
-    #[test]
-    fn rejects_too_short() {
-        let buf = vec![0u8; 10];
-        assert!(!is_profinet_frame(&buf));
     }
 }

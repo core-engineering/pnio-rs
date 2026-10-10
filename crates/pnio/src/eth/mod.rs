@@ -9,10 +9,15 @@ pub mod bpf;
 mod header;
 #[allow(unsafe_code)]
 pub(crate) mod poll;
+mod proto;
 mod transport;
 
 #[cfg(target_os = "linux")]
 pub use afpacket::AfPacketTransport;
 pub use bpf::SockFilter;
-pub use header::{EthError, EthHeader, MacAddr, ETHERTYPE_PROFINET, ETHERTYPE_VLAN};
+pub use header::{
+    EthError, EthHeader, MacAddr, ETHERTYPE_LLDP, ETHERTYPE_PROFINET, ETHERTYPE_VLAN,
+    LLDP_MULTICAST_MAC,
+};
+pub use proto::EthProto;
 pub use transport::{EthTransport, MockTransport, TransportError, MAX_FRAME_LEN};
