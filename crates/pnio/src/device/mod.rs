@@ -17,6 +17,7 @@ use crate::alarm::{
 use crate::cm::model::DeviceModel;
 use crate::cm::{AbortReason, ArParams, ArState, Cm, CmOutput, PnioStatus};
 use crate::config::Slot;
+use crate::dcp::store::dotted;
 use crate::dcp::{
     build_set_response, classify, DcpConfig, DcpRequest, Effect, IpConfigurator, NetParams,
     NetStore, NoopIp, SetBlockError, SetDecision,
@@ -312,8 +313,9 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
     /// [`Device::new`] with explicit side effects: the IP configurator, the link probe,
     /// the LLDP transport (which also installs the [`Pdev`]: no LLDP socket, no PDEV)
     /// and the Signal hook. The startup identity is the [`DeviceSetup::net_store`]
-    /// file's when it holds one, else [`DeviceSetup::dcp`]'s; the first LLDPDU is due
-    /// at `now`.
+    /// file's when it holds one — then also pushed once to the interface through the
+    /// [`IpConfigurator`] (a failure is logged, never fatal) — else
+    /// [`DeviceSetup::dcp`]'s (not applied); the first LLDPDU is due at `now`.
     pub fn new_with(
         setup: DeviceSetup,
         eth: E,
@@ -329,7 +331,9 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
         } = hooks;
         let net_store = NetStore::new(setup.net_store.clone());
         let props = &setup.dcp.properties;
-        let net = net_store.load().unwrap_or_else(|| NetParams {
+        let stored = net_store.load();
+        let from_store = stored.is_some();
+        let net = stored.unwrap_or_else(|| NetParams {
             name: props.name_of_station.clone(),
             ip: props.ip,
             subnet: props.subnet,
@@ -368,6 +372,15 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             #[cfg(target_os = "linux")]
             runner_factory: Box::new(RtRunner::spawn),
         };
+        if from_store {
+            // The OS may not carry the DCP-assigned suite any more (reboot, cable
+            // swap): push the stored one once. Never fatal — the device still answers
+            // DCP, and the next Set-IP retries.
+            log::info!("net store: re-applying the stored IP suite on startup");
+            if let Err(e) = dev.ip.apply(&dev.setup.iface, &net) {
+                log::error!("re-applying the stored IP suite: {e}");
+            }
+        }
         dev.apply_net(net, now);
         dev
     }
@@ -719,9 +732,10 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
     /// Persist-always: a permanent block answered Ok saves the whole identity, even
     /// when it equals the current one (so a temporary Set followed by a permanent Set
     /// of the same value ends up in the file). A Set to the current name/IP is
-    /// answered Ok without an abort. A failing [`IpConfigurator`] turns its block
-    /// (Set-IP or ResetToFactory) into `SetNotPossible` with nothing applied or
-    /// persisted for it.
+    /// answered Ok without an abort, and a Set-IP to the current suite does not call
+    /// the [`IpConfigurator`] (no interface reconfiguration). A failing
+    /// [`IpConfigurator`] turns its block (Set-IP or ResetToFactory) into
+    /// `SetNotPossible` with nothing applied or persisted for it.
     fn handle_set(
         &mut self,
         src: MacAddr,
@@ -741,6 +755,7 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
             if let (SetBlockError::Ok, Some(effect)) = (d.error, &d.effect) {
                 match effect {
                     Effect::SetName { name, permanent } => {
+                        log::info!("DCP Set NameOfStation {name:?} (permanent: {permanent})");
                         if *name != new_net.name {
                             new_net.name = name.clone();
                             identity_changed = true;
@@ -753,25 +768,35 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
                         gateway,
                         permanent,
                     } => {
-                        let candidate = NetParams {
-                            name: new_net.name.clone(),
-                            ip: *ip,
-                            subnet: *subnet,
-                            gateway: *gateway,
-                        };
-                        match self.ip.apply(&self.setup.iface, &candidate) {
-                            Ok(()) => {
-                                if (candidate.ip, candidate.subnet, candidate.gateway)
-                                    != (new_net.ip, new_net.subnet, new_net.gateway)
-                                {
+                        log::info!(
+                            "DCP Set IP {}/{} gw {} (permanent: {permanent})",
+                            dotted(*ip),
+                            dotted(*subnet),
+                            dotted(*gateway)
+                        );
+                        // Compared with the suite as of this request's earlier blocks
+                        // (`self.net`, unless an earlier block of this request changed it).
+                        if (*ip, *subnet, *gateway) == (new_net.ip, new_net.subnet, new_net.gateway)
+                        {
+                            // Same suite: Ok without reconfiguring the interface.
+                            persist |= *permanent;
+                        } else {
+                            let candidate = NetParams {
+                                name: new_net.name.clone(),
+                                ip: *ip,
+                                subnet: *subnet,
+                                gateway: *gateway,
+                            };
+                            match self.ip.apply(&self.setup.iface, &candidate) {
+                                Ok(()) => {
                                     identity_changed = true;
+                                    new_net = candidate;
+                                    persist |= *permanent;
                                 }
-                                new_net = candidate;
-                                persist |= *permanent;
-                            }
-                            Err(e) => {
-                                log::error!("applying IP suite: {e}");
-                                err = SetBlockError::SetNotPossible;
+                                Err(e) => {
+                                    log::error!("applying IP suite: {e}");
+                                    err = SetBlockError::SetNotPossible;
+                                }
                             }
                         }
                     }
@@ -2225,8 +2250,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A Set to the current name and IP suite: answered Ok, the suite is still pushed
-    /// to the interface, but the AR stays up — no abort, no ERR-RTA.
+    /// A Set to the current name and IP suite: answered Ok, the interface is not
+    /// reconfigured, and the AR stays up — no abort, no ERR-RTA.
     #[test]
     fn set_to_the_current_name_and_ip_does_not_abort() {
         let (h, _, calls) = hooks();
@@ -2253,7 +2278,11 @@ mod tests {
         dev.step(t0 + Duration::from_millis(1), Some(Duration::ZERO))
             .unwrap();
         assert_eq!(dev.state(), ArState::Data);
-        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            0,
+            "same IP suite: the interface is not reconfigured"
+        );
         assert!(
             eth.sent()[before..].iter().all(|f| !is_alarm_frame(f)),
             "no ERR-RTA"
@@ -2647,5 +2676,151 @@ mod tests {
         assert_eq!(dev.port_mismatch(), None);
         assert_eq!(*shared.port_mismatch.lock().unwrap(), None);
         assert!(!dev.problem_indicator());
+    }
+
+    /// A stored identity is pushed to the interface once at construction (the OS may
+    /// have lost the DCP-assigned suite over a reboot); the configured (non-stored)
+    /// suite is not, and a failing configurator never fails construction.
+    #[test]
+    fn stored_identity_is_reapplied_to_the_interface_at_startup() {
+        let dir = std::env::temp_dir().join(format!("pnio-dev-startip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("net");
+        let with_store = || {
+            let mut s = setup();
+            s.net_store = Some(path.clone());
+            s
+        };
+        let t0 = Instant::now();
+        // Store configured, no file yet: nothing applied.
+        let (h, _, calls) = hooks();
+        let _ = Device::new_with(
+            with_store(),
+            SharedEth::new(),
+            MockRpcTransport::new(),
+            h,
+            t0,
+        );
+        assert!(calls.lock().unwrap().is_empty());
+        // No store at all: the setup suite is not applied either.
+        let (h, _, calls) = hooks();
+        let _ = Device::new_with(setup(), SharedEth::new(), MockRpcTransport::new(), h, t0);
+        assert!(calls.lock().unwrap().is_empty());
+        // A stored identity: applied once, and adopted.
+        let stored = NetParams {
+            name: "stored".into(),
+            ip: [10, 0, 0, 7],
+            subnet: [255, 0, 0, 0],
+            gateway: [10, 0, 0, 1],
+        };
+        crate::dcp::NetStore::new(Some(path.clone())).save(&stored);
+        let (h, _, calls) = hooks();
+        let dev = Device::new_with(
+            with_store(),
+            SharedEth::new(),
+            MockRpcTransport::new(),
+            h,
+            t0,
+        );
+        assert_eq!(*calls.lock().unwrap(), vec![stored.clone()]);
+        assert_eq!(dev.net_params(), stored);
+        // A failing configurator: logged, the device is still built on the stored identity.
+        let h = DeviceHooks {
+            ip: Box::new(MockIp {
+                fail: true,
+                ..Default::default()
+            }),
+            ..DeviceHooks::default()
+        };
+        let dev = Device::new_with(
+            with_store(),
+            SharedEth::new(),
+            MockRpcTransport::new(),
+            h,
+            t0,
+        );
+        assert_eq!(dev.net_params(), stored);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// End to end through both transports: the LLDP neighbour sits on `port-001.plc`,
+    /// then the controller writes a `PDPortDataCheck` expecting `port-009.plc` in an
+    /// RPC Write. The Write is answered all-OK and the Port mismatch reaches the wire
+    /// as a Diagnosis alarm (`CmOutput.pdev` → `apply_pdev_actions` → `DiagStore` →
+    /// alarm channel), without any direct `set_check` call.
+    #[test]
+    fn check_written_over_rpc_against_a_mismatching_peer_raises_the_port_alarm() {
+        use crate::rpc::{Drep, NdrRequest, NdrResponse, RpcHeader};
+        use crate::testutil::{synthetic_check_record, synthetic_write_record};
+        let (h, lldp, _) = hooks();
+        let eth = SharedEth::new();
+        let t0 = Instant::now();
+        let mut dev = Device::new_with(setup(), eth.clone(), MockRpcTransport::new(), h, t0);
+        feed_bring_up(&dev, None, None);
+        dev.step(t0, Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.state(), ArState::Data);
+        lldp.push_rx(
+            crate::lldp::build_device_pdu("plc", [0xec; 6], "port-001.plc", 20).frame(CPU_MAC),
+        );
+        let t1 = t0 + Duration::from_millis(1);
+        dev.step(t1, Some(Duration::ZERO)).unwrap();
+        assert_eq!(dev.peer().unwrap().port_id, "port-001.plc");
+        assert_eq!(dev.port_mismatch(), None, "no Check yet");
+        // The RPC Write envelope: the `write_req` golden's RPC header (fresh seq_num, new
+        // frag_len) + a rebuilt NDR header + one IODWriteReqHeader with the record —
+        // the same recipe as `cm::tests::rpc_request`.
+        let ar = Uuid::parse_str("e5e1aecc-b133-4b4d-b187-cc68b0211ed2").unwrap();
+        let blocks = synthetic_write_record(
+            ar,
+            0,
+            0x8001,
+            0x802B,
+            &synthetic_check_record("port-009.plc", "plc"),
+        );
+        let template = golden("write_req")[RPC_OFF..].to_vec();
+        let mut hdr = RpcHeader::parse(&template).unwrap();
+        let (ndr, _) = NdrRequest::parse(&template[RpcHeader::LEN..], hdr.drep).unwrap();
+        hdr.seq_num = 0x200;
+        hdr.frag_len = (NdrRequest::LEN + blocks.len()) as u16;
+        let mut pdu = Vec::new();
+        hdr.write(&mut pdu);
+        NdrRequest::for_blocks(ndr.args_max, blocks.len() as u32).write(&mut pdu, hdr.drep);
+        pdu.extend_from_slice(&blocks);
+        let rpc_before = dev.rpc().sent().len();
+        let eth_before = eth.sent().len();
+        dev.rpc()
+            .push_rx(pdu, "172.16.2.100:54766".parse().unwrap());
+        dev.step(t1 + Duration::from_millis(1), Some(Duration::ZERO))
+            .unwrap();
+        // The Write response: PNIOStatus OK, one IODWriteResHeader with record status OK.
+        let sent = dev.rpc().sent();
+        assert_eq!(sent.len(), rpc_before + 1, "one Write response");
+        let (n, res) =
+            NdrResponse::parse(&sent.last().unwrap().0[RpcHeader::LEN..], Drep::BIG).unwrap();
+        assert!(PnioStatus(n.status).is_ok());
+        assert_eq!(res.len(), 64, "one IODWriteResHeader");
+        assert_eq!(&res[44..48], &[0, 0, 0, 0], "record status OK");
+        // The Diagnosis alarm on the PROFINET transport.
+        let alarm = eth.sent()[eth_before..]
+            .iter()
+            .rev()
+            .find(|f| is_alarm_frame(f))
+            .cloned()
+            .expect("a Diagnosis alarm was sent");
+        let RtaBody::Data(RtaData::Notification(n)) = parse_frame(&alarm).unwrap().body else {
+            panic!("expected an AlarmNotification")
+        };
+        assert_eq!(n.alarm_type, AlarmType::Diagnosis);
+        assert_eq!((n.slot, n.subslot), (0, 0x8001));
+        assert_eq!(n.usi, 0x8002);
+        let crate::alarm::UserData::ExtChannel(d) = &n.data else {
+            panic!("expected ExtChannelDiagnosis")
+        };
+        assert_eq!(
+            (d.error_type, d.ext_error_type),
+            (0x8001, Mismatch::Port.ext_error_type())
+        );
+        assert_eq!(dev.port_mismatch(), Some(Mismatch::Port));
+        assert!(dev.problem_indicator());
     }
 }

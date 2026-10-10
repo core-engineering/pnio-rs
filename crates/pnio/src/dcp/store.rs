@@ -17,8 +17,10 @@ impl NetStore {
         NetStore { path }
     }
 
-    /// Read the file. `None` when there is no path, no file, or the file is malformed
-    /// (logged at warn — the caller falls back to its configured defaults).
+    /// Read the file. `None` when there is no path, no file, the file is malformed, or
+    /// its name fails [`validate_station_name`](crate::dcp::validate_station_name) (an
+    /// empty name — the blank identity after a ResetToFactory — is accepted); the last
+    /// two are logged at warn and the caller falls back to its configured defaults.
     pub fn load(&self) -> Option<NetParams> {
         let path = self.path.as_ref()?;
         let text = match std::fs::read_to_string(path) {
@@ -30,7 +32,17 @@ impl NetStore {
             }
         };
         match parse(&text) {
-            Some(p) => Some(p),
+            Some(p) => match crate::dcp::validate_station_name(&p.name) {
+                Err(e) if !p.name.is_empty() => {
+                    log::warn!(
+                        "net store {}: invalid name {:?} ({e}), ignoring",
+                        path.display(),
+                        p.name
+                    );
+                    None
+                }
+                _ => Some(p),
+            },
             None => {
                 log::warn!("net store {}: malformed, ignoring", path.display());
                 None
@@ -163,6 +175,27 @@ mod tests {
         assert_eq!(store.load().unwrap().ip, [10, 0, 0, 2]);
         std::fs::write(&path, "name=pnio-dev\nip=not-an-ip\n").unwrap();
         assert_eq!(store.load(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_invalid_station_name_is_rejected_and_a_blank_one_accepted() {
+        let dir = std::env::temp_dir().join(format!("pnio-netstore-name-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("net");
+        let store = NetStore::new(Some(path.clone()));
+        std::fs::write(
+            &path,
+            "name=Bad_Name\nip=10.0.0.2\nsubnet=255.0.0.0\ngateway=0.0.0.0\n",
+        )
+        .unwrap();
+        assert_eq!(store.load(), None);
+        std::fs::write(
+            &path,
+            "name=\nip=0.0.0.0\nsubnet=0.0.0.0\ngateway=0.0.0.0\n",
+        )
+        .unwrap();
+        assert_eq!(store.load(), Some(NetParams::default()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

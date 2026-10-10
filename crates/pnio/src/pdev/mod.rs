@@ -278,11 +278,14 @@ impl Pdev {
     }
 
     /// Forget every engineering record (AR loss, ResetToFactory); clears the diag.
+    /// The topology context goes with the AR: "a neighbour was seen" is forgotten too,
+    /// so the next Check gets its full no-peer grace (2 × TX_PERIOD) again.
     pub fn clear_engineering(&mut self) -> Vec<PdevAction> {
         self.adjust = None;
         self.iface_adjust = None;
         self.check = None;
         self.check_written_at = None;
+        self.ever_seen_peer = false;
         match self.mismatch.take() {
             Some(_) => vec![PdevAction::Diag(None)],
             None => Vec::new(),
@@ -509,6 +512,28 @@ mod tests {
         q.set_check(Some(check("plc", "port-001.plc")), t0);
         assert_eq!(sends(&q.tick(t0 + Duration::from_secs(7))), 1);
         assert_eq!(q.next_deadline(), Some(t0 + Duration::from_secs(10)));
+    }
+
+    /// AR loss forgets the topology context: a neighbour seen under the old AR does
+    /// not cut the no-peer grace of a Check written for the next one.
+    #[test]
+    fn clear_engineering_restores_the_no_peer_grace() {
+        let t0 = Instant::now();
+        let mut p = pdev(t0);
+        p.on_rx(&cpu_frame("plc", "port-001.plc", 20), t0);
+        p.clear_engineering();
+        // New AR, new Check at t (peer still cached, matches); the peer then expires.
+        let t = t0 + Duration::from_secs(19);
+        assert_eq!(
+            diag(&p.set_check(Some(check("plc", "port-001.plc")), t)),
+            None
+        );
+        assert_eq!(diag(&p.tick(t + Duration::from_secs(1))), None);
+        assert!(p.peer().is_none(), "expired at t0 + 20 s");
+        assert_eq!(
+            diag(&p.tick(t + Duration::from_secs(10))),
+            Some(Some(Mismatch::NoPeer))
+        );
     }
 
     #[test]

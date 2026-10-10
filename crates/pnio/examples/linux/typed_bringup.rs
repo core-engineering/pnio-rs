@@ -63,9 +63,11 @@ struct Args {
     /// if unset); a stored identity wins over --station/--ip at startup
     #[arg(long = "net-store")]
     net_store: Option<std::path::PathBuf>,
-    /// Record a DCP-assigned IP suite without applying it to the interface
-    #[arg(long = "no-apply-ip")]
-    no_apply_ip: bool,
+    /// Push a DCP-assigned IP suite to the interface with `ip` (off by default: the
+    /// suite is only recorded). Needs root, or `setcap cap_net_admin+ep` on the `ip`
+    /// binary — the child process does not inherit this program's capabilities
+    #[arg(long = "apply-ip")]
+    apply_ip: bool,
     /// No LLDP socket: no LLDPDUs, no neighbour, and no PDEV records
     #[arg(long = "no-lldp")]
     no_lldp: bool,
@@ -220,7 +222,7 @@ pub fn main() {
             app_cpus: app_cpus.clone(),
             im_store: a.im_store.clone(),
             net_store: a.net_store.clone(),
-            apply_ip: !a.no_apply_ip,
+            apply_ip: a.apply_ip,
             lldp: !a.no_lldp,
             on_signal: Some(Arc::new(|| log::info!("DCP Signal: flash"))),
         },
@@ -232,10 +234,16 @@ pub fn main() {
 
     let net = dev.net_params();
     log::info!(
-        "device up on {} as station {:?} ip {}, waiting for the controller",
+        "device up on {} as station {:?} ip {} (DCP IP {}, LLDP {}), waiting for the controller",
         a.iface,
         net.name,
-        std::net::Ipv4Addr::from(net.ip)
+        std::net::Ipv4Addr::from(net.ip),
+        if a.apply_ip {
+            "applied to the interface"
+        } else {
+            "recorded only; --apply-ip to apply"
+        },
+        if a.no_lldp { "off" } else { "on" }
     );
 
     // Everything `rt_bringup.rs` splits between a blocking `dev.run(&stop)` on `main`

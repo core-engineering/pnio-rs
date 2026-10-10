@@ -49,9 +49,11 @@ pub struct StartOptions {
     /// name. `None` = RAM only (a DCP Set is lost on restart); a warning is logged at
     /// start — see [`crate::device::DeviceSetup::net_store`].
     pub net_store: Option<PathBuf>,
-    /// Push a DCP-assigned IP suite to the interface (`ip addr`/`ip route`, needs
-    /// `cap_net_admin`); `false` only records it in the identity. Recommended `true`
-    /// (the `typed_bringup` example's default).
+    /// Push a DCP-assigned IP suite to the interface (`ip -4 addr`/`ip route`; a
+    /// stored identity is also pushed once at start); `false` only records it in the
+    /// identity. Requires the process to run as root or the `ip` binary to carry
+    /// `cap_net_admin+ep` (a child process does not inherit the binary's setcap
+    /// capabilities). Default off in the examples.
     pub apply_ip: bool,
     /// Open an `AF_PACKET` socket on EtherType `0x88CC` and run LLDP (periodic LLDPDUs,
     /// neighbour learning, PDEV records). Recommended `true` (the `typed_bringup`

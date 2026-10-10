@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 /// DCP Set-IP; an `Err` turns the block's answer into `SetNotPossible`.
 pub trait IpConfigurator: Send {
     /// Make `iface` carry `p.ip/p.subnet` with `p.gateway` as default route. A blank
-    /// suite (`0.0.0.0`) removes every address from the interface.
+    /// suite (`0.0.0.0`) removes every IPv4 address from the interface.
     fn apply(&self, iface: &str, p: &NetParams) -> std::io::Result<()>;
 }
 
@@ -44,9 +44,11 @@ impl IpConfigurator for MockIp {
     }
 }
 
-/// Runs the iproute2 `ip` binary: `addr flush`, `addr add <ip>/<prefix>`, and
-/// `route replace default via <gw>` when the gateway is neither blank nor the
-/// device's own address. Needs `CAP_NET_ADMIN` (already required for `AF_PACKET`).
+/// Runs the iproute2 `ip` binary: `-4 addr flush` (IPv4 only — the IPv6 link-local
+/// address survives), `addr add <ip>/<prefix>`, and `route replace default via <gw>`
+/// when the gateway is neither blank nor the device's own address. Needs
+/// `CAP_NET_ADMIN` in the `ip` child process: run as root, or give the binary
+/// `cap_net_admin+ep` (the capability of the pnio process itself is not inherited).
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
 pub struct IpCommand;
@@ -59,7 +61,7 @@ impl IpCommand {
     /// The argument vectors `apply` runs, in order (exposed for tests).
     pub fn commands(iface: &str, p: &NetParams) -> Vec<Vec<String>> {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        let mut out = vec![s(&["addr", "flush", "dev", iface])];
+        let mut out = vec![s(&["-4", "addr", "flush", "dev", iface])];
         if p.ip != [0; 4] {
             let cidr = format!("{}/{}", dotted(p.ip), p.prefix_len());
             out.push(s(&["addr", "add", &cidr, "dev", iface]));
@@ -119,7 +121,7 @@ mod tests {
         assert_eq!(
             IpCommand::commands("eno2", &p),
             vec![
-                vec!["addr", "flush", "dev", "eno2"],
+                vec!["-4", "addr", "flush", "dev", "eno2"],
                 vec!["addr", "add", "172.16.2.10/24", "dev", "eno2"],
                 vec![
                     "route",
@@ -135,7 +137,7 @@ mod tests {
         let blank = NetParams::default();
         assert_eq!(
             IpCommand::commands("eno2", &blank),
-            vec![vec!["addr", "flush", "dev", "eno2"]]
+            vec![vec!["-4", "addr", "flush", "dev", "eno2"]]
         );
         let self_gw = NetParams {
             gateway: [172, 16, 2, 10],

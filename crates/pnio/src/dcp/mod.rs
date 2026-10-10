@@ -177,7 +177,8 @@ pub fn classify(frame: &[u8], cfg: &DcpConfig) -> Result<Option<DcpRequest>, Dcp
             let req = parse_set_request(blocks)?;
             let decisions = decide_set(&req);
             for d in &decisions {
-                log::info!(
+                // The applied effects are logged at info by `Device::handle_set`.
+                log::debug!(
                     "DCP Set block ({}, {}) -> {:?}",
                     d.option,
                     d.suboption,
