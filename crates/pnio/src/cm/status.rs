@@ -88,7 +88,8 @@ impl PnioStatus {
     }
 
     /// PNIORW: write problem, resource unavailable — the AR's accumulated
-    /// parameter-write records would exceed the per-AR cap. Convention as used by
+    /// parameter-write records would exceed the per-AR cap, or (as one record's own
+    /// status) a PDEV record exceeds `cm::records::MAX_PDEV_RECORD_LEN`. Convention as used by
     /// open PROFINET stacks; re-verify against the standard (FOLLOWUPS).
     pub fn write_resource_unavailable() -> PnioStatus {
         PnioStatus::new(0xDF, 0x80, 0xC3, 0x00)
@@ -132,9 +133,9 @@ impl PnioStatus {
     /// family byte, as in `write_wrong_ar`/`write_index_unsupported`), `Code1 = 0xB0`
     /// (the same index/parameter family byte as `write_index_unsupported`), `Code2 =
     /// 0x02` ("invalid parameter", distinct from `write_index_unsupported`'s "invalid
-    /// index" `0x00`). Not currently placed on the wire (per-record Write statuses are
-    /// out of scope; the Write response keeps the AR's own OK status), used only to
-    /// log the rejection. Convention as used by open PROFINET stacks; re-verify
+    /// index" `0x00`). Answered as that record's own status in the Write response
+    /// (also for a PDEV record on the wrong slot/subslot or a malformed
+    /// `PDPortDataCheck`). Convention as used by open PROFINET stacks; re-verify
     /// against the standard (FOLLOWUPS).
     pub fn write_invalid_parameter() -> PnioStatus {
         PnioStatus::new(0xDF, 0x81, 0xB0, 0x02)

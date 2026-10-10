@@ -22,11 +22,15 @@ pub use block::{
 pub use connect::{build_connect_res, validate, ArParams, ConnectReq, IocrParams};
 pub use control::{app_ready_req, cmd, prm_end_done, release_done, ControlBlock};
 pub use model::{DeviceModel, SlotModel, SubmoduleModel};
-pub use records::{build_read_res, read_record, write_im_record, ReadReq, RecordCtx};
+pub use records::{
+    build_read_res, read_record, write_im_record, write_pdev_record, ReadReq, RecordCtx,
+    MAX_PDEV_RECORD_LEN,
+};
 pub use status::{ConnectBlock, PnioStatus};
 pub use write::{build_write_res, Record, WriteReq, INDEX_MULTIPLE_WRITE};
 
 use crate::im::{Im0, ImStore, INDEX_IM1, INDEX_IM3};
+use crate::pdev::{Pdev, PdevAction};
 use crate::rpc::{
     Drep, NdrRequest, NdrResponse, Opnum, PacketType, RpcError, RpcHeader, Uuid, FLAG1_IDEMPOTENT,
     FLAG1_NO_FACK, PNIO_CONTROLLER_INTERFACE, PNIO_DEVICE_INTERFACE, PNIO_UDP_PORT,
@@ -103,8 +107,9 @@ pub struct Outgoing {
     pub to: SocketAddr,
 }
 
-/// The effects of one `Cm::handle_datagram`/`Cm::tick` call: datagrams to send, and AR
-/// state-change notifications to report (state plus the abort reason, when any).
+/// The effects of one `Cm::handle_datagram`/`Cm::tick` call: datagrams to send, AR
+/// state-change notifications to report (state plus the abort reason, when any), and
+/// PDEV actions to apply.
 #[derive(Debug, Default, PartialEq)]
 pub struct CmOutput {
     /// Datagrams the caller must send on the wire, in order.
@@ -112,6 +117,9 @@ pub struct CmOutput {
     /// AR state transitions to report to the application, each with the reason when
     /// the transition is a fall back to [`ArState::Idle`] due to an abort.
     pub notify: Vec<(ArState, Option<AbortReason>)>,
+    /// Actions the device loop must apply on the [`Pdev`]'s behalf (e.g. the diagnosis
+    /// change a `PDPortDataCheck` Write caused), in order.
+    pub pdev: Vec<PdevAction>,
 }
 
 /// The request-specific fields needed to build and cache a Response PDU, gathered
@@ -179,6 +187,10 @@ pub struct Cm {
     /// Controller address for outgoing calls, learned from the Connect request's
     /// source address (its IP, PNIO's well-known UDP port).
     controller_addr: Option<SocketAddr>,
+    /// The port/interface (PDEV) state, when the device runs LLDP: owned here because
+    /// Read/Write serve its records synchronously inside [`Cm::handle_datagram`]; the
+    /// device loop reaches it through [`Cm::pdev_mut`].
+    pdev: Option<Pdev>,
     /// Cached full response PDUs, keyed by `(activity, seq_num)`, FIFO eviction at
     /// [`CACHE_CAPACITY`] entries.
     cache: VecDeque<((Uuid, u32), Vec<u8>)>,
@@ -198,6 +210,7 @@ impl Cm {
             call_seq: 0,
             current_call_seq: None,
             controller_addr: None,
+            pdev: None,
             cache: VecDeque::new(),
         }
     }
@@ -232,6 +245,33 @@ impl Cm {
         &self.im
     }
 
+    /// Rename the device for the PNIO side: the record model's station name and the
+    /// ARServerBlock of the next Connect (an established AR keeps its cached Connect
+    /// response).
+    pub fn set_station_name(&mut self, name: &str) {
+        self.model.station_name = name.to_string();
+        self.ar.set_station_name(name);
+    }
+
+    /// Install (or remove) the port/interface (PDEV) state whose records Read and
+    /// Write serve. Without one, PDEV reads answer "invalid index" and PDEV writes are
+    /// accepted without being stored (the lenient rule for indices we do not
+    /// interpret).
+    pub fn set_pdev(&mut self, pdev: Option<Pdev>) {
+        self.pdev = pdev;
+    }
+
+    /// The port/interface (PDEV) state, if installed.
+    pub fn pdev(&self) -> Option<&Pdev> {
+        self.pdev.as_ref()
+    }
+
+    /// The port/interface (PDEV) state, if installed, for the device loop's LLDP
+    /// receive and timer handling.
+    pub fn pdev_mut(&mut self) -> Option<&mut Pdev> {
+        self.pdev.as_mut()
+    }
+
     /// Parse one incoming UDP datagram and drive the AR machine, returning the PDUs to
     /// send and the AR notifications to report. RPC envelope errors ([`RpcHeader::parse`],
     /// [`NdrRequest::parse`]/[`NdrResponse::parse`], a foreign interface UUID) propagate to
@@ -256,7 +296,7 @@ impl Cm {
                 },
                 now,
             );
-            self.apply(actions, None, false, &mut output);
+            self.apply(actions, None, false, now, &mut output);
             return Ok(output);
         }
         if h.ptype != PacketType::Request {
@@ -324,36 +364,11 @@ impl Cm {
                 }
                 actions
             }
+            // The AR machine decides whether the Write is accepted at all (foreign
+            // ar_uuid, wrong state, record cap); an accepted one comes back as
+            // `Action::WriteAccepted` and `apply` answers it per record.
             Some(Opnum::Write) => match WriteReq::parse(blocks) {
-                Ok(req) => {
-                    // Kept so the I&M1-3 records can be inspected below: `Event::
-                    // WriteReq` consumes `req`, but only the AR machine gets to
-                    // decide whether the Write is accepted at all (foreign ar_uuid,
-                    // wrong state, record cap).
-                    let records = req.records.clone();
-                    let actions = self.ar.on(Event::WriteReq(req), now);
-                    let accepted = actions
-                        .iter()
-                        .any(|a| matches!(a, Action::Respond { status, .. } if status.is_ok()));
-                    if accepted {
-                        for r in &records {
-                            if (INDEX_IM1..=INDEX_IM3).contains(&r.index) {
-                                let status = write_im_record(r, &self.model, &mut self.im);
-                                if !status.is_ok() {
-                                    log::warn!(
-                                        "I&M write rejected: index {:#06x} slot {} \
-                                         subslot {} status {:#010x}",
-                                        r.index,
-                                        r.slot,
-                                        r.subslot,
-                                        status.to_u32()
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    actions
-                }
+                Ok(req) => self.ar.on(Event::WriteReq(req), now),
                 Err(e) => respond(error_status(&e, PnioStatus::write_index_unsupported())),
             },
             Some(Opnum::Control) => match ControlBlock::parse(blocks) {
@@ -392,7 +407,7 @@ impl Cm {
             args_max: req.args_max,
             from,
         };
-        self.apply(actions, Some((ctx, cache_key)), true, &mut output);
+        self.apply(actions, Some((ctx, cache_key)), true, now, &mut output);
         Ok(output)
     }
 
@@ -401,7 +416,7 @@ impl Cm {
     pub fn tick(&mut self, now: Instant) -> CmOutput {
         let mut output = CmOutput::default();
         let actions = self.ar.on(Event::Tick, now);
-        self.apply(actions, None, false, &mut output);
+        self.apply(actions, None, false, now, &mut output);
         output
     }
 
@@ -411,12 +426,13 @@ impl Cm {
     pub fn abort(&mut self, reason: AbortReason, now: Instant) -> CmOutput {
         let mut output = CmOutput::default();
         let actions = self.ar.on(Event::Abort(reason), now);
-        self.apply(actions, None, false, &mut output);
+        self.apply(actions, None, false, now, &mut output);
         output
     }
 
     /// Turn a batch of `Ar` actions into `CmOutput`: build+cache a Response PDU for each
-    /// `Respond`, build a Request PDU to the controller for each `CallController`
+    /// `Respond` (and for each `WriteAccepted`, once its records are applied and their
+    /// statuses known), build a Request PDU to the controller for each `CallController`
     /// (`call_is_new` selects a fresh call sequence number vs. reusing the outstanding
     /// one, for `tick`'s retries), and forward `Notify`s unchanged.
     fn apply(
@@ -424,23 +440,20 @@ impl Cm {
         actions: Vec<Action>,
         resp_ctx: Option<(RespondCtx, (Uuid, u32))>,
         call_is_new: bool,
+        now: Instant,
         output: &mut CmOutput,
     ) {
         for action in actions {
             match action {
-                Action::Respond { status, blocks } => match &resp_ctx {
-                    Some((ctx, cache_key)) => {
-                        let pdu = build_response_pdu(ctx, status, blocks);
-                        self.cache_insert(*cache_key, pdu.clone());
-                        output.send.push(Outgoing {
-                            bytes: pdu,
-                            to: ctx.from,
-                        });
-                    }
-                    None => {
-                        log::warn!("Respond action with no request context; dropping");
-                    }
-                },
+                Action::Respond { status, blocks } => {
+                    self.respond_pdu(&resp_ctx, status, blocks, output)
+                }
+                Action::WriteAccepted { req } => {
+                    let (statuses, pdev_actions) = self.write_statuses(&req.records, now);
+                    output.pdev.extend(pdev_actions);
+                    let blocks = build_write_res(&req, &statuses);
+                    self.respond_pdu(&resp_ctx, PnioStatus::OK, blocks, output);
+                }
                 Action::CallController { blocks } => {
                     let to = self
                         .controller_addr
@@ -451,6 +464,60 @@ impl Cm {
                 Action::Notify { state, reason } => output.notify.push((state, reason)),
             }
         }
+    }
+
+    /// Build, cache and queue the Response PDU answering the request in `resp_ctx`.
+    fn respond_pdu(
+        &mut self,
+        resp_ctx: &Option<(RespondCtx, (Uuid, u32))>,
+        status: PnioStatus,
+        blocks: Vec<u8>,
+        output: &mut CmOutput,
+    ) {
+        match resp_ctx {
+            Some((ctx, cache_key)) => {
+                let pdu = build_response_pdu(ctx, status, blocks);
+                self.cache_insert(*cache_key, pdu.clone());
+                output.send.push(Outgoing {
+                    bytes: pdu,
+                    to: ctx.from,
+                });
+            }
+            None => {
+                log::warn!("Respond action with no request context; dropping");
+            }
+        }
+    }
+
+    /// Statuses for a Write's records, computed by `Cm` after the AR accepted the
+    /// Write (one per record, in order), and the PDEV actions storing them caused.
+    /// The `MultipleWrite` container is OK; I&M1-3 and PDEV records answer their own
+    /// store's verdict; any other index — PDEV ones too when no [`Pdev`] is installed —
+    /// is accepted as is (lenient on indices we do not interpret: a device without
+    /// LLDP keeps answering the CPU's Connect-phase `0x8071` OK, as before PDEV
+    /// existed).
+    fn write_statuses(
+        &mut self,
+        records: &[Record],
+        now: Instant,
+    ) -> (Vec<PnioStatus>, Vec<PdevAction>) {
+        use crate::pdev::records::index;
+        let mut actions = Vec::new();
+        let statuses = records
+            .iter()
+            .map(|r| match r.index {
+                INDEX_MULTIPLE_WRITE => PnioStatus::OK,
+                INDEX_IM1..=INDEX_IM3 => write_im_record(r, &self.model, &mut self.im),
+                index::PD_PORT_DATA_CHECK
+                | index::PD_PORT_DATA_ADJUST
+                | index::PD_INTERFACE_ADJUST => match self.pdev.as_mut() {
+                    None => PnioStatus::OK,
+                    Some(p) => write_pdev_record(p, r, now, &mut actions),
+                },
+                _ => PnioStatus::OK,
+            })
+            .collect();
+        (statuses, actions)
     }
 
     /// Build the ApplicationReady request PDU: fresh call (`is_new`) advances
@@ -515,6 +582,7 @@ impl Cm {
             model: &self.model,
             im0: &self.im0,
             im: &self.im,
+            pdev: self.pdev.as_ref(),
         };
         match read_record(req, &ctx) {
             Some(data) => respond_ok(build_read_res(req, &data)),
@@ -582,6 +650,7 @@ mod tests {
     use crate::im::SwRevision;
     use crate::rpc::Uuid;
     use crate::testutil::{golden, golden_alarm, RPC_OFF};
+    use crate::testutil::{synthetic_check_record, synthetic_read_req, synthetic_write_record};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Instant;
 
@@ -833,6 +902,123 @@ mod tests {
             cm.tick(now + crate::cm::ar::APP_READY_TIMEOUT + std::time::Duration::from_millis(1));
         assert_eq!(o.send[0].bytes, pdu("appready_req"));
         assert_eq!(o.send[0].to, cpu_cm());
+    }
+
+    /// `ar_uuid` of the AR the cm goldens establish (see `cm_in_data_with_the_alarm_capture_ar`).
+    fn golden_ar() -> Uuid {
+        Uuid::parse_str("e5e1aecc-b133-4b4d-b187-cc68b0211ed2").unwrap()
+    }
+
+    /// `template` (an RPC request PDU, from `RPC_OFF`) with its PNIO blocks replaced by
+    /// `blocks`: same RPC header except a fresh `seq_num` (so `Cm`'s response cache does
+    /// not answer it) and a recomputed `frag_len`; NDR header rebuilt for the new length.
+    fn rpc_request(template: &[u8], blocks: &[u8], seq_num: u32) -> Vec<u8> {
+        let mut h = RpcHeader::parse(template).unwrap();
+        let (ndr, _) = NdrRequest::parse(&template[RpcHeader::LEN..], h.drep).unwrap();
+        h.seq_num = seq_num;
+        h.frag_len = (NdrRequest::LEN + blocks.len()) as u16;
+        let mut out = Vec::with_capacity(RpcHeader::LEN + NdrRequest::LEN + blocks.len());
+        h.write(&mut out);
+        NdrRequest::for_blocks(ndr.args_max, blocks.len() as u32).write(&mut out, h.drep);
+        out.extend_from_slice(blocks);
+        out
+    }
+
+    /// `cm()` with a `Pdev` installed (as `Device::new_with` does when LLDP is on), AR
+    /// brought to `Data` by the four cm goldens. `write_req` carries `0x8071` on subslot
+    /// `0x8000`, which the `Pdev` now stores.
+    fn cm_with_pdev_in_data(now: Instant) -> Cm {
+        let mut cm = cm();
+        let link = Box::new(crate::pdev::MockLink(true.into()));
+        cm.set_pdev(Some(crate::pdev::Pdev::new(MAC.0, link, now)));
+        for name in ["connect_req", "write_req", "prmend_req"] {
+            cm.handle_datagram(&pdu(name), cpu(), now).unwrap();
+        }
+        cm.handle_datagram(&pdu("appready_res"), cpu_cm(), now)
+            .unwrap();
+        assert_eq!(cm.state(), ArState::Data);
+        cm
+    }
+
+    #[test]
+    fn pdev_check_write_is_stored_and_read_back_and_f841_is_served() {
+        let now = Instant::now();
+        let mut cm = cm_with_pdev_in_data(now);
+        assert!(
+            cm.pdev().unwrap().iface_adjust().is_some(),
+            "write_req's 0x8071 is stored"
+        );
+        // synthetic — replace by the Task 2 golden (`connect_write_check`).
+        let check = synthetic_check_record("port-001.plcxb1d0ed", "plcxb1d0ed");
+        let blocks = synthetic_write_record(golden_ar(), 0, 0x8001, 0x802B, &check);
+        let out = cm
+            .handle_datagram(&rpc_request(&pdu("write_req"), &blocks, 0x200), cpu(), now)
+            .unwrap();
+        assert_eq!(out.send.len(), 1);
+        let (n, res) = NdrResponse::parse(&out.send[0].bytes[RpcHeader::LEN..], Drep::BIG).unwrap();
+        assert!(PnioStatus(n.status).is_ok());
+        assert_eq!(res.len(), 64, "one IODWriteResHeader");
+        assert_eq!(&res[44..48], &[0, 0, 0, 0], "record status OK");
+        assert_eq!(
+            cm.pdev().unwrap().check().unwrap().peers[0].chassis_id,
+            "plcxb1d0ed"
+        );
+        // synthetic — replace by the Task 2 golden (`read_f841_req`); the Read envelope is
+        // the alarm capture's I&M0 Read (opnum 2) with new blocks.
+        let read = rpc_request(
+            &golden_alarm("im0_read_req")[RPC_OFF..],
+            &synthetic_read_req(golden_ar(), 0, 1, 0xF841),
+            0x201,
+        );
+        let out = cm.handle_datagram(&read, cpu(), now).unwrap();
+        let (n, res) = NdrResponse::parse(&out.send[0].bytes[RpcHeader::LEN..], Drep::BIG).unwrap();
+        assert!(PnioStatus(n.status).is_ok());
+        assert_eq!(
+            u16::from_be_bytes([res[0], res[1]]),
+            ty::IOD_READ_RES_HEADER
+        );
+        let record = BlockHeader::read_all(&res[64..]).unwrap();
+        assert_eq!(record.len(), 2, "two MultipleBlockHeaders");
+        assert!(record
+            .iter()
+            .all(|(h, _)| h.block_type == crate::pdev::records::ty::MULTIPLE_BLOCK_HEADER));
+    }
+
+    /// Golden guard: with a `Pdev` installed the 1515's Connect-phase MultipleWrite
+    /// stores its `0x8071` and is still answered byte-exact (every record OK).
+    #[test]
+    fn write_req_with_a_pdev_stores_0x8071_and_still_matches_the_write_res_golden() {
+        let now = Instant::now();
+        let mut cm = cm();
+        let link = Box::new(crate::pdev::MockLink(true.into()));
+        cm.set_pdev(Some(crate::pdev::Pdev::new(MAC.0, link, now)));
+        cm.handle_datagram(&pdu("connect_req"), cpu(), now).unwrap();
+        let o = cm.handle_datagram(&pdu("write_req"), cpu(), now).unwrap();
+        assert_eq!(o.send[0].bytes, pdu("write_res"));
+        assert!(o.pdev.is_empty());
+        let w = WriteReq::parse(&golden("write_req")[142..]).unwrap();
+        assert_eq!(
+            cm.pdev().unwrap().iface_adjust(),
+            Some(&w.records[1].data[..])
+        );
+    }
+
+    #[test]
+    fn set_station_name_reaches_the_ar_server_block_of_the_next_connect() {
+        let mut cm = cm();
+        cm.set_station_name("renamed");
+        let o = cm
+            .handle_datagram(&pdu("connect_req"), cpu(), Instant::now())
+            .unwrap();
+        let res = &o.send[0].bytes;
+        assert!(
+            res.windows(7).any(|w| w == b"renamed"),
+            "ARServerBlock carries the new name"
+        );
+        assert!(
+            !res.windows(11).any(|w| w == b"rt-labs-dev"),
+            "the old name is gone"
+        );
     }
 
     // -----------------------------------------------------------------------

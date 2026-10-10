@@ -4,9 +4,10 @@
 //! `MultipleWrite` container (index `0xe040`): an outer `IODWriteReqHeader` whose
 //! data holds nested `IODWriteReqHeader + data` records back to back, each padded
 //! to the next 4-byte boundary. The response mirrors the request one-for-one, in
-//! request order, each response record a fixed 64 bytes with `status = 0`.
+//! request order, each response record a fixed 64 bytes carrying that record's own
+//! status (see [`build_write_res`]).
 
-use super::{ty, BlockError, BlockHeader, CmError, Cursor};
+use super::{ty, BlockError, BlockHeader, CmError, Cursor, PnioStatus};
 use crate::rpc::{Drep, Uuid};
 
 /// The index of the `MultipleWrite` container record (IEC 61158-6-10 §4.8.5.3).
@@ -115,10 +116,13 @@ fn parse_one(buf: &[u8]) -> Result<(Record, usize), BlockError> {
 
 /// Build the Write response's PNIO blocks: one `IODWriteResHeader` per request record,
 /// in request order, each 64 bytes (`record_data_length = 0`, `additional_value_1/2 = 0`,
-/// `status = 0`).
-pub fn build_write_res(req: &WriteReq) -> Vec<u8> {
+/// `status = statuses[i]`). `statuses` has one entry per `req.records` entry; the
+/// `MultipleWrite` container (`records[0]`, when present) is given
+/// [`PnioStatus::OK`] by the caller.
+pub fn build_write_res(req: &WriteReq, statuses: &[PnioStatus]) -> Vec<u8> {
+    debug_assert_eq!(statuses.len(), req.records.len());
     let mut out = Vec::with_capacity(req.records.len() * 64);
-    for r in &req.records {
+    for (r, status) in req.records.iter().zip(statuses) {
         BlockHeader::write(&mut out, ty::IOD_WRITE_RES_HEADER, 58);
         out.extend_from_slice(&r.seq.to_be_bytes());
         r.ar_uuid.write(&mut out, Drep::BIG);
@@ -130,7 +134,7 @@ pub fn build_write_res(req: &WriteReq) -> Vec<u8> {
         out.extend_from_slice(&0u32.to_be_bytes()); // record_data_length
         out.extend_from_slice(&0u16.to_be_bytes()); // additional_value_1
         out.extend_from_slice(&0u16.to_be_bytes()); // additional_value_2
-        out.extend_from_slice(&0u32.to_be_bytes()); // status
+        out.extend_from_slice(&status.to_u32().to_be_bytes());
         out.extend_from_slice(&[0u8; 16]); // padding
     }
     out
@@ -172,9 +176,29 @@ mod tests {
     #[test]
     fn write_response_is_byte_exact() {
         let w = WriteReq::parse(&golden("write_req")[BLOCKS..]).unwrap();
-        let out = build_write_res(&w);
+        let out = build_write_res(&w, &vec![PnioStatus::OK; w.records.len()]);
         assert_eq!(out, &golden("write_res")[BLOCKS..]);
         assert_eq!(out.len(), 320);
+    }
+
+    #[test]
+    fn write_res_carries_one_status_per_record() {
+        let w = WriteReq::parse(&golden("write_req")[BLOCKS..]).unwrap();
+        let all_ok = vec![PnioStatus::OK; w.records.len()];
+        assert_eq!(
+            build_write_res(&w, &all_ok),
+            golden("write_res")[BLOCKS..].to_vec()
+        );
+        let mut st = all_ok.clone();
+        st[2] = PnioStatus::write_invalid_parameter();
+        let out = build_write_res(&w, &st);
+        // record 2 = third 64-byte response block; status at offset 6+2+16+4+2+2+2+2+4+2+2 = 44
+        let off = 2 * 64 + 44;
+        assert_eq!(
+            &out[off..off + 4],
+            &PnioStatus::write_invalid_parameter().to_u32().to_be_bytes()
+        );
+        assert_eq!(&out[44..48], &[0, 0, 0, 0]);
     }
 
     #[test]
@@ -189,7 +213,7 @@ mod tests {
         let w = WriteReq::parse(&b).unwrap();
         assert_eq!(w.records.len(), 1);
         assert_eq!(w.records[0].data, vec![0xde, 0xad, 0xbe, 0xef]);
-        assert_eq!(build_write_res(&w).len(), 64);
+        assert_eq!(build_write_res(&w, &[PnioStatus::OK]).len(), 64);
     }
 
     #[test]

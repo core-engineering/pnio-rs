@@ -15,7 +15,7 @@ use super::connect::{build_connect_res, validate, ArParams, ConnectReq};
 use super::control::{app_ready_req, prm_end_done, release_done, ControlBlock};
 use super::model::DeviceModel;
 use super::status::PnioStatus;
-use super::write::{build_write_res, Record, WriteReq};
+use super::write::{Record, WriteReq};
 use std::time::{Duration, Instant};
 
 /// ApplicationReady request retry timeout: how long the device waits for the
@@ -76,6 +76,10 @@ pub enum AbortReason {
     RtSocket,
     /// The application stopped the device (`IoDevice::stop`).
     Shutdown,
+    /// A DCP Set changed the station name or IP suite.
+    DcpSet,
+    /// A DCP Set ResetToFactory reset the device's identity and stored parameters.
+    ResetToFactory,
 }
 
 /// An input to the AR state machine. Carries the already-parsed request so `Ar`
@@ -127,6 +131,14 @@ pub enum Action {
         status: PnioStatus,
         /// PNIO response blocks to append; empty on rejection/wrong-state.
         blocks: Vec<u8>,
+    },
+    /// The AR accepted this Write and stored its records; `Cm` computes the
+    /// per-record statuses and builds the response from them (an accepted Write is
+    /// always answered with an OK RPC status, the per-record outcome being in the
+    /// `IODWriteResHeader`s).
+    WriteAccepted {
+        /// The accepted request, records in request order.
+        req: WriteReq,
     },
     /// Call the controller (ApplicationReady request PNIO blocks).
     CallController {
@@ -186,6 +198,12 @@ impl Ar {
     /// The AR's current lifecycle state.
     pub fn state(&self) -> ArState {
         self.state
+    }
+
+    /// Set the station name answered in the ARServerBlock of the next Connect (an
+    /// already-established AR keeps its cached Connect response).
+    pub fn set_station_name(&mut self, name: &str) {
+        self.model.station_name = name.to_string();
     }
 
     /// The established AR's context, if one exists (`state() != ArState::Idle`).
@@ -337,18 +355,14 @@ impl Ar {
                 if exceeds_record_cap(ctx, &req.records) {
                     return vec![reject(PnioStatus::write_resource_unavailable())];
                 }
-                let blocks = build_write_res(&req);
                 let rearm_activity = self.state == ArState::Connected;
                 let factor = ctx.params.activity_timeout_factor;
                 let ctx = self.ctx.as_mut().expect("ctx present outside Idle");
-                ctx.records.extend(req.records);
+                ctx.records.extend(req.records.iter().cloned());
                 if rearm_activity {
                     self.activity_deadline = Some(now + ACTIVITY_TIMEOUT_UNIT * factor as u32);
                 }
-                vec![Action::Respond {
-                    status: PnioStatus::OK,
-                    blocks,
-                }]
+                vec![Action::WriteAccepted { req }]
             }
         }
     }
@@ -505,7 +519,7 @@ mod tests {
     use crate::cm::connect::ConnectReq;
     use crate::cm::control::{cmd, ControlBlock};
     use crate::cm::model::DeviceModel;
-    use crate::cm::write::WriteReq;
+    use crate::cm::write::{build_write_res, WriteReq};
     use crate::eth::MacAddr;
     use crate::testutil::golden;
     use std::time::{Duration, Instant};
@@ -527,6 +541,16 @@ mod tests {
     }
     fn t0() -> Instant {
         Instant::now()
+    }
+
+    /// The response `Cm` builds for an accepted Write when every record is OK.
+    fn accepted_write_res(actions: &[Action]) -> Vec<u8> {
+        match &actions[0] {
+            Action::WriteAccepted { req } => {
+                build_write_res(req, &vec![PnioStatus::OK; req.records.len()])
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     fn respond_ok(actions: &[Action]) -> &Vec<u8> {
@@ -579,7 +603,7 @@ mod tests {
         ));
         assert_eq!(ar.state(), ArState::Connected);
         let a = ar.on(write(), now);
-        assert_eq!(respond_ok(&a), &golden("write_res")[BLOCKS..]);
+        assert_eq!(accepted_write_res(&a), golden("write_res")[BLOCKS..]);
         assert_eq!(ar.context().unwrap().records.len(), 5);
         let a = ar.on(prm_end(), now);
         assert_eq!(respond_ok(&a), &golden("prmend_res")[BLOCKS..]);
@@ -770,7 +794,7 @@ mod tests {
         ar.on(prm_end(), now);
         assert_eq!(ar.next_deadline(), Some(now + APP_READY_TIMEOUT));
         let a = ar.on(write(), now);
-        assert_eq!(respond_ok(&a), &golden("write_res")[BLOCKS..]);
+        assert_eq!(accepted_write_res(&a), golden("write_res")[BLOCKS..]);
         assert_eq!(ar.context().unwrap().records.len(), 5);
         assert_eq!(ar.next_deadline(), Some(now + APP_READY_TIMEOUT));
     }
@@ -1007,7 +1031,7 @@ mod tests {
     fn data_write_stores_records_and_touches_no_timer() {
         let (mut ar, now) = to_data();
         let a = ar.on(write(), now);
-        assert_eq!(respond_ok(&a), &golden("write_res")[BLOCKS..]);
+        assert_eq!(accepted_write_res(&a), golden("write_res")[BLOCKS..]);
         assert_eq!(ar.next_deadline(), None);
     }
 
@@ -1124,7 +1148,7 @@ mod tests {
         // 12 golden Writes x 5 records = 60 stored, under the 64 cap.
         for _ in 0..12 {
             let a = ar.on(write(), now);
-            assert!(matches!(&a[0], Action::Respond { status, .. } if status.is_ok()));
+            assert!(matches!(&a[0], Action::WriteAccepted { .. }));
         }
         assert_eq!(ar.context().unwrap().records.len(), 60);
         // The 13th Write would bring the total to 65, over the cap: refused, and

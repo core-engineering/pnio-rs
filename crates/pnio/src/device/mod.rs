@@ -136,6 +136,8 @@ fn err_rta_code2(reason: &AbortReason) -> Option<u8> {
         // Every other device-side abort says the same thing: this AR is gone.
         AbortReason::RtSocket
         | AbortReason::Shutdown
+        | AbortReason::DcpSet
+        | AbortReason::ResetToFactory
         | AbortReason::ControllerRelease
         | AbortReason::ControllerReconnect
         | AbortReason::AppReadyFailed
