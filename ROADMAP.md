@@ -99,9 +99,9 @@ E3940 with an Intel `igb` NIC, Debian 13 `PREEMPT_RT`.
 
 - **Other controllers**: other S7-1500 CPUs or firmware, S7-1200, ET 200SP CPU, CODESYS-based
   controllers, Beckhoff TwinCAT, Phoenix Contact PLCnext.
-- **Other hosts**: other x86 CPUs, ARM boards (`aarch64`: the test suite passes in CI on a native runner, never run against a
-  controller), other NICs and
-  drivers, standard (non-RT) kernels at relaxed update times.
+- **Other hosts**: other x86 CPUs, ARM boards (`aarch64`: the test suite passes in CI on a native
+  runner, never run against a controller), other NICs and drivers, standard (non-RT) kernels at
+  relaxed update times.
 - **The 0.2 branch**, if you have a controller and TIA: the capture campaign is described step by
   step in Task 2 of the [Plan 8 implementation plan](https://github.com/core-engineering/pnio-rs/blob/feat/pdev-lldp-dcp/docs/plans/2026-10-10-pnio-pdev-lldp-dcp.md).
 
