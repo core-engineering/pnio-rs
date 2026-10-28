@@ -55,7 +55,8 @@ cargo run --example gen_gsdml -- --out .     # the GSDML matching the sample dec
 
 Linux only: the `AF_PACKET` backend needs `CAP_NET_RAW`/`CAP_NET_ADMIN` at runtime (plus
 `CAP_SYS_NICE`/`CAP_IPC_LOCK` for the real‑time thread); tests that need a real socket are
-`#[ignore]`d.
+`#[ignore]`d. `scripts/veth-e2e.sh` runs the stack end to end against a scripted controller over
+a veth pair, without root (see [CONTRIBUTING](CONTRIBUTING.md#development)).
 
 Declare the device's process data, start it, exchange typed values:
 

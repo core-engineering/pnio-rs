@@ -25,6 +25,9 @@ wire facts are provisional (dissector-sourced) in `docs/pdev-golden-frames.md`.
 - `device`: `Device::run_with(stop, after_step)`, the loop of `Device::run` with a per-step callback.
 - `api`: `StartOptions { net_store, apply_ip, lldp, on_signal }`, `start_with(.., hooks)`,
   `IoDevice::{net_params, signal_count, peer, port_mismatch}`.
+- End-to-end test over a veth pair (`tests/veth_e2e.rs`, `scripts/veth-e2e.sh`, CI job): the
+  device on real `AF_PACKET`/UDP sockets against a scripted controller in its own network
+  namespace (DCP Identify/Set/Signal, AR establishment, cyclic data both ways, LLDP, shutdown).
 - `typed_bringup`: `--net-store`, `--apply-ip` (opt-in: applying needs root or
   `setcap cap_net_admin+ep` on the `ip` binary), `--no-lldp`.
 

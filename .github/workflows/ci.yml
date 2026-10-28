@@ -22,6 +22,16 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all
+  veth:
+    name: end-to-end over a veth pair
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # The script runs in an unprivileged user namespace, which Ubuntu 24.04's AppArmor
+      # policy forbids by default.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: scripts/veth-e2e.sh
   msrv:
     name: MSRV 1.77 (check)
     runs-on: ubuntu-latest

@@ -39,7 +39,8 @@ the [README](README.md#status) and [`docs/bench-pnet-device.md`](docs/bench-pnet
 ## 0.2 — implemented, bench pending
 
 On branch [`feat/pdev-lldp-dcp`](https://github.com/core-engineering/pnio-rs/tree/feat/pdev-lldp-dcp)
-(unit-tested, CI green), released once a capture campaign and a HIL run have confirmed it:
+(unit-tested, run end to end over a veth pair against a scripted controller in CI), released
+once a capture campaign and a HIL run have confirmed it:
 
 - **LLDP** neighbourhood and **PDEV** records (port and interface data, peer check, remote
   mismatch diagnosis): the controller sees the device in its topology view.
