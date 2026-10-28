@@ -28,6 +28,7 @@ wire facts are provisional (dissector-sourced) in `docs/pdev-golden-frames.md`.
   `setcap cap_net_admin+ep` on the `ip` binary), `--no-lldp`.
 
 ### Changed
+- MSRV raised from 1.74 to 1.77: `thiserror` 2.0.21 requires rustc 1.77.
 - `StartOptions` has four new fields (breaking for struct literals); `DeviceSetup` gained
   `net_store` and `iface`; `Device::new_with(.., hooks, now)`.
 - `dcp::decide_set(req, &DeviceProperties) -> Vec<(u8, u8, SetBlockError)>` →
