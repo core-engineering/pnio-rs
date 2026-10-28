@@ -22,6 +22,7 @@ wire facts are provisional (dissector-sourced) in `docs/pdev-golden-frames.md`.
 - `diag`: remote-mismatch ExtChannelDiagnosis (ChannelErrorType `0x8001`, USI `0x8002`).
 - `cm`: per-record Write statuses, `Cm::set_station_name`, `AbortReason::{DcpSet, ResetToFactory}`.
 - `device`: DCP effects, LLDP socket, PDEV tick, hooks, TTL-0 LLDPDU at shutdown.
+- `device`: `Device::run_with(stop, after_step)`, the loop of `Device::run` with a per-step callback.
 - `api`: `StartOptions { net_store, apply_ip, lldp, on_signal }`, `start_with(.., hooks)`,
   `IoDevice::{net_params, signal_count, peer, port_mismatch}`.
 - `typed_bringup`: `--net-store`, `--apply-ip` (opt-in: applying needs root or

@@ -505,9 +505,20 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
     /// Runs the loop until `stop` is set, re-checking it at least every 200ms so it
     /// stays responsive even with nothing arriving on either socket.
     pub fn run(&mut self, stop: &AtomicBool) -> Result<(), DeviceError> {
+        self.run_with(stop, |_| {})
+    }
+
+    /// Like [`Device::run`], calling `after_step(self)` after every iteration (the
+    /// facade uses it to mirror `ar_params()` without duplicating the loop).
+    pub fn run_with(
+        &mut self,
+        stop: &AtomicBool,
+        mut after_step: impl FnMut(&Device<E, R>),
+    ) -> Result<(), DeviceError> {
         while !stop.load(Ordering::Relaxed) {
             let wait = self.poll_interval(Duration::from_millis(200));
             self.step(Instant::now(), Some(wait))?;
+            after_step(self);
         }
         self.shutdown(Instant::now())
     }
@@ -1636,6 +1647,22 @@ mod tests {
         };
         dev.run(&stop).unwrap();
         flipper.join().unwrap();
+    }
+
+    #[test]
+    fn run_with_calls_back_once_per_step_and_stops_from_inside_the_callback() {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut dev = Device::new(setup(), MockTransport::new(), MockRpcTransport::new());
+        let mut calls = 0;
+        dev.run_with(&stop, |d| {
+            assert_eq!(d.state(), ArState::Idle);
+            calls += 1;
+            if calls == 3 {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
     }
 
     /// Wraps a `MockRpcTransport` for `recv`, but always fails `send` — used to prove

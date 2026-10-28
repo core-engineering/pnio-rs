@@ -373,7 +373,19 @@ impl IoDevice {
                             log::warn!("acyclic affinity {cpus:?}: {e}");
                         }
                     }
-                    let r = run_publishing_params(&mut dev, &stop, &params);
+                    // Mirror ar_params() into the shared slot on every change. `run_with`
+                    // ends with `Device::shutdown`, which tells the controller we're going
+                    // away (ERR-RTA "AR removed") instead of leaving it to time out its own
+                    // watchdog — this is the only place that runs: `IoDevice::stop`/`Drop`
+                    // set `stop` and join this thread, but never call `shutdown` themselves.
+                    let mut last = None;
+                    let r = dev.run_with(&stop, |d| {
+                        let p = d.ar_params();
+                        if p != last {
+                            *params.lock().unwrap_or_else(|e| e.into_inner()) = p.clone();
+                            last = p;
+                        }
+                    });
                     drop(dev); // stops and joins the RT runner before the thread ends
                     r
                 })
@@ -846,33 +858,6 @@ impl Drop for IoDevice {
     }
 }
 
-/// `Device::run` with the AR parameters mirrored into `params` on every state change.
-fn run_publishing_params<E: EthTransport, R: RpcTransport>(
-    dev: &mut Device<E, R>,
-    stop: &AtomicBool,
-    params: &Mutex<Option<ArParams>>,
-) -> Result<(), DeviceError> {
-    // Same loop as Device::run (200 ms poll, shortened while an alarm is in flight
-    // or a diagnosis command is queued — see `Device::poll_interval`), stepping so
-    // we can observe ar_params():
-    use std::time::{Duration, Instant};
-    let mut last = None;
-    while !stop.load(Ordering::Relaxed) {
-        let wait = dev.poll_interval(Duration::from_millis(200));
-        dev.step(Instant::now(), Some(wait))?;
-        let p = dev.ar_params();
-        if p != last {
-            *params.lock().unwrap_or_else(|e| e.into_inner()) = p.clone();
-            last = p;
-        }
-    }
-    // Tell the controller we're going away (ERR-RTA "AR removed") instead of
-    // leaving it to time out its own watchdog — this is the only place that runs:
-    // `IoDevice::stop`/`Drop` set `stop` and join this thread, but never call
-    // `Device::shutdown` themselves (see `device::Device::shutdown`'s doc).
-    dev.shutdown(Instant::now())
-}
-
 /// A consistent copy of one output slot's bytes, decoded on demand.
 pub struct SlotSnapshot {
     /// Slot this snapshot was taken from.
@@ -1053,8 +1038,8 @@ mod tests {
     ///
     /// Without this partitioning the two consumers would race a plain FIFO: the
     /// acyclic loop has no `raw_fd` to poll on with mocks, so `Device::step` drains
-    /// `eth.recv` in a tight, unthrottled loop (same as `Device::run` — see
-    /// `run_publishing_params`), while the RT thread only drains once per ~1ms tick.
+    /// `eth.recv` in a tight, unthrottled loop (same as `Device::run_with`),
+    /// while the RT thread only drains once per ~1ms tick.
     /// The acyclic side would win essentially every time and silently drop every
     /// RTC1 frame as unparsable DCP, so the RT thread would starve.
     #[derive(Clone)]
