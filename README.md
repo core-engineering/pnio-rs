@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/pnio.svg)](https://crates.io/crates/pnio)
 [![docs.rs](https://img.shields.io/docsrs/pnio)](https://docs.rs/pnio)
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
-![MSRV](https://img.shields.io/badge/MSRV-1.74-informational)
+![MSRV](https://img.shields.io/badge/MSRV-1.77-informational)
 
 A **PROFINET RT IO-Device** (Conformance Class A, RT class 1) in **pure Rust**, for Linux
 `PREEMPT_RT`. It lets an edge computer sit on a PLC's PROFINET IO system like any other

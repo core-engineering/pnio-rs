@@ -9,5 +9,5 @@ updates:
     schedule:
       interval: monthly
     ignore:
-      # `dtolnay/rust-toolchain@1.74` pins the MSRV toolchain, not an action version.
+      # `dtolnay/rust-toolchain@1.77` pins the MSRV toolchain, not an action version.
       - dependency-name: dtolnay/rust-toolchain

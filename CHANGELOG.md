@@ -6,6 +6,10 @@ follows SemVer's 0.y.z rules (breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Changed
+
+- MSRV raised from 1.74 to 1.77: `thiserror` 2.0.21 requires rustc 1.77.
+
 ## [0.1.0] — 2026-08-31
 
 First published version (crates.io `pnio 0.1.0`, tag `v0.1.0`). A PROFINET RT IO-Device (Conformance Class A, RT class 1) in pure

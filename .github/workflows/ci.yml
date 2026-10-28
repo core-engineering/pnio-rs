@@ -16,11 +16,11 @@ jobs:
       - run: cargo test --all
       - run: cargo test -p pnio --lib --no-default-features
   msrv:
-    name: MSRV 1.74 (check)
+    name: MSRV 1.77 (check)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.74
+      - uses: dtolnay/rust-toolchain@1.77
       # The library honours rust-version; examples/tests pull dev-dependencies (clap 4.6,
       # edition 2024) that need a newer toolchain and are covered by the stable job.
       - run: cargo check -p pnio
