@@ -165,6 +165,7 @@ emits that has a real counterpart is pinned byte‑exact as a "golden frame" wit
 ## Documentation
 
 - [`CHANGELOG.md`](CHANGELOG.md) — releases and known limitations
+- [`ROADMAP.md`](ROADMAP.md) — what comes next, statuses, how to help test
 - [`docs/design/`](docs/design/) — design documents; [`docs/plans/`](docs/plans/) — the
   task‑by‑task implementation plans they were built from
 - [`docs/gsdml.md`](docs/gsdml.md) — typed configuration, generated GSDML, TIA import, XSD validation
@@ -175,9 +176,11 @@ emits that has a real counterpart is pinned byte‑exact as a "golden frame" wit
 
 ## Roadmap
 
-0.1 (this): CC‑A device with alarms, diagnosis and I&M, validated on an S7‑1500. Next: the
-V2.31+ GSDML profile (LLDP, PTP/DCP boundaries, reset‑to‑factory, certification info), DCP
-Set‑name/Signal, process alarms, then the 250 µs work (`PACKET_MMAP`/busy‑poll).
+0.1 (this) is validated on an S7‑1500. 0.2 (LLDP/PDEV, DCP Set‑name/Signal/Reset, GSDML V2.31)
+is implemented and waits for bench validation. Next come process alarms and diagnosis records,
+then 250 µs and a second port, later an MRP ring client. No dates: statuses and order are in
+[`ROADMAP.md`](ROADMAP.md) — and if you can test on your own controller or hardware, see its
+[Help wanted](ROADMAP.md#help-wanted) section.
 
 ## License
 
