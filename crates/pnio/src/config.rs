@@ -872,6 +872,30 @@ mod tests {
     }
 
     #[test]
+    fn total_csdu_counts_the_iocs_of_a_mixed_submodule() {
+        // 359 REAL in + 1 BOOL out: Input CR = 3 (DAP) + (1436+1) data/IOPS + 1 IOCS for
+        // the output half = 1441 — over the budget only through the IOCS byte.
+        let e = DeviceConfig::builder("a")
+            .submodule(Slot(1), "mixed", &[Real; 359], &[Bool])
+            .build()
+            .unwrap_err();
+        assert_eq!(
+            e,
+            ConfigError::TooLongTotal {
+                direction: Direction::Input,
+                bytes: 1441,
+                max: MAX_SUBMODULE_BYTES,
+            }
+        );
+        // One REAL less fits: 3 + 1433 + 1 = 1437.
+        let cfg = DeviceConfig::builder("a")
+            .submodule(Slot(1), "mixed", &[Real; 358], &[Bool])
+            .build()
+            .unwrap();
+        assert_eq!(cfg.input_cr_len(), 1437);
+    }
+
+    #[test]
     fn station_name_is_lowercased_on_input() {
         // TIA lowercases; we accept mixed case and normalize so the DCP answer matches.
         let cfg = DeviceConfig::builder("Pnio-Dev")
