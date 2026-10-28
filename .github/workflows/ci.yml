@@ -15,6 +15,13 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all
       - run: cargo test -p pnio --lib --no-default-features
+  aarch64:
+    name: test (aarch64, native runner)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all
   msrv:
     name: MSRV 1.77 (check)
     runs-on: ubuntu-latest
