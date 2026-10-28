@@ -30,6 +30,14 @@ wire facts are provisional (dissector-sourced) in `docs/pdev-golden-frames.md`.
 
 ### Changed
 - MSRV raised from 1.74 to 1.77: `thiserror` 2.0.21 requires rustc 1.77.
+- API surface: the protocol layers `alarm`, `cm`, `dcp`, `device`, `eth`, `lldp`, `pdev`, `rpc`
+  and `rt` are `#[doc(hidden)]` (still `pub`, no 0.x stability promise), as are the plumbing items
+  `DeviceConfig::{model, setup, dcp_properties, activity_seed}`, `diag::DiagStore`,
+  `IoDevice::image` and `Peer::from_pdu`. The types the facade exposes are re-exported from
+  `pnio::api` (`RtOptions`, `ArState`, `AbortReason`, `AlarmStats`, `MacAddr`, `NetParams`, `Peer`,
+  `Mismatch`, `Validity`, `Freshness`, `WatchdogState`, `RtStats`, `StatsSnapshot`, `Histogram`,
+  `HistSnapshot`, `DeviceError`, `ImageError`, `TransportError`, `RpcError`); the old paths keep
+  compiling.
 - `StartOptions` has four new fields (breaking for struct literals); `DeviceSetup` gained
   `net_store` and `iface`; `Device::new_with(.., hooks, now)`.
 - `dcp::decide_set(req, &DeviceProperties) -> Vec<(u8, u8, SetBlockError)>` →

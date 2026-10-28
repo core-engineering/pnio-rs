@@ -335,6 +335,7 @@ pub struct Peer {
 
 impl Peer {
     /// The neighbour described by `pdu`, received from `src` at `now`.
+    #[doc(hidden)]
     pub fn from_pdu(pdu: &Lldpdu, src: [u8; 6], now: Instant) -> Peer {
         Peer {
             chassis_id: pdu.chassis_id.as_text(),

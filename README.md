@@ -60,10 +60,9 @@ Linux only: the `AF_PACKET` backend needs `CAP_NET_RAW`/`CAP_NET_ADMIN` at runti
 Declare the device's process data, start it, exchange typed values:
 
 ```rust
-use pnio::api::{IoDevice, StartOptions};
+use pnio::api::{IoDevice, RtOptions, StartOptions};
 use pnio::config::{DeviceConfig, Slot};
 use pnio::data::FieldType;
-use pnio::device::RtOptions;
 
 let cfg = DeviceConfig::builder("pnio-dev")
     .input(Slot(1), &[FieldType::Real; 16])   // device -> controller (%I)
@@ -159,6 +158,11 @@ frames only — one atomic load, no allocation, no lock held across a syscall) t
 per‑cycle‑consistent I/O image. `unsafe` is confined to the raw‑socket and scheduler modules
 (`eth::afpacket`, `eth::poll`, `rt::sched`, `rt::runner`); the rest of the crate is
 `#![deny(unsafe_code)]`.
+
+**API surface.** The supported API is `api` (the `IoDevice` facade and the types it
+re‑exports), `config`, `data`, `im`, `diag`, `gsdml` and `capture`. The protocol layers (`alarm`,
+`cm`, `dcp`, `device`, `eth`, `lldp`, `pdev`, `rpc`, `rt`) stay `pub` for the tests and the
+bring‑up examples but are hidden from the API docs and may change in any 0.x release.
 
 Design documents: [`docs/design/`](docs/design/) — the overall device design and one design note
 per subsystem (AR, cyclic exchange, 1 ms determinism, configuration/GSDML/API, alarms/diagnosis/I&M).

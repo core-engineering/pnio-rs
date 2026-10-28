@@ -309,6 +309,7 @@ impl DeviceConfig {
     }
 
     /// The plug-and-play model the `cm` layer validates Connect requests against.
+    #[doc(hidden)]
     pub fn model(&self, mac: MacAddr) -> DeviceModel {
         let sm = |subslot: u16, ident: u32, i: u16, o: u16| SubmoduleModel {
             subslot,
@@ -344,6 +345,7 @@ impl DeviceConfig {
     }
 
     /// DCP identity answered on the wire (Identify/Set), for the given IP (/24, no router).
+    #[doc(hidden)]
     pub fn dcp_properties(&self, ip: [u8; 4]) -> DeviceProperties {
         DeviceProperties {
             name_of_station: self.station_name.clone(),
@@ -361,6 +363,7 @@ impl DeviceConfig {
     }
 
     /// The activity UUID seed our outgoing RPC calls use: fixed prefix + the MAC.
+    #[doc(hidden)]
     pub fn activity_seed(mac: MacAddr) -> Uuid {
         let mut b = [
             0x14, 0xaf, 0x19, 0x8a, 0x12, 0x34, 0x10, 0x56, 0x80, 0x79, 0, 0, 0, 0, 0, 0,
@@ -375,6 +378,7 @@ impl DeviceConfig {
     /// (`PNIO-<XXYYZZ>`) when the config leaves it blank, so a device configured
     /// without an explicit serial still answers I&M0 with something MAC-derived
     /// rather than an empty field.
+    #[doc(hidden)]
     pub fn setup(&self, mac: MacAddr, ip: [u8; 4], rt: Option<RtOptions>) -> DeviceSetup {
         let mut im0 = self.im0.clone();
         if im0.serial_number.is_empty() {

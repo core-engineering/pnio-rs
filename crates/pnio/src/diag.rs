@@ -148,6 +148,7 @@ pub struct SubmoduleInfo {
 
 /// Tracks the active channel diagnoses across a device's submodules and produces
 /// the `AlarmNotification`s (and the aggregate problem indicator) they imply.
+#[doc(hidden)]
 pub struct DiagStore {
     submodules: Vec<SubmoduleInfo>,
     active: BTreeMap<(u16, u16, u16), Diagnosis>,

@@ -2,22 +2,31 @@
 //! a [`DeviceConfig`] in one call, read the controller's outputs and write our inputs
 //! by (slot, index) with the config's field table. The RT path is untouched.
 
-use crate::alarm::AlarmStats;
-use crate::cm::{AbortReason, ArParams, ArState};
+// Types of the protocol layers that appear in this facade's signatures. The layers
+// themselves are `#[doc(hidden)]` (see the crate docs); these re-exports are the supported
+// way to name them.
+pub use crate::alarm::AlarmStats;
+pub use crate::cm::{AbortReason, ArState};
+pub use crate::dcp::NetParams;
+pub use crate::device::{DeviceError, RtOptions};
+pub use crate::eth::{MacAddr, TransportError};
+pub use crate::lldp::Peer;
+pub use crate::pdev::Mismatch;
+pub use crate::rpc::RpcError;
+pub use crate::rt::{
+    Freshness, HistSnapshot, Histogram, ImageError, RtStats, StatsSnapshot, Validity, WatchdogState,
+};
+
+use crate::cm::ArParams;
 use crate::config::{DeviceConfig, Direction, FieldRef, Slot};
 use crate::data::{CodecError, FieldType, Value};
-use crate::dcp::{IpCommand, NetParams, NoopIp};
-use crate::device::{
-    Device, DeviceError, DeviceHooks, DeviceShared, DiagCommand, DiagShared, RtOptions,
-};
+use crate::dcp::{IpCommand, NoopIp};
+use crate::device::{Device, DeviceHooks, DeviceShared, DiagCommand, DiagShared};
 use crate::diag::{ChannelError, Diagnosis, Severity};
-use crate::eth::{bpf::acyclic_filter, AfPacketTransport, EthProto, EthTransport, MacAddr};
-use crate::lldp::Peer;
-use crate::pdev::{Mismatch, SysfsLink};
+use crate::eth::{bpf::acyclic_filter, AfPacketTransport, EthProto, EthTransport};
+use crate::pdev::SysfsLink;
 use crate::rpc::{RpcTransport, UdpRpcTransport, PNIO_UDP_PORT};
-use crate::rt::{
-    Freshness, ImageError, IoImage, RtConfig, RtError, RtHandle, RtStats, StatsSnapshot, Validity,
-};
+use crate::rt::{IoImage, RtConfig, RtError, RtHandle};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -450,6 +459,7 @@ impl IoDevice {
     /// `IoImage` — but writing through it bypasses the config's field table
     /// entirely: no slot/index/type/direction checks, and any error is `rt`'s
     /// [`ImageError`], not [`ApiError`].
+    #[doc(hidden)]
     pub fn image(&self) -> Arc<IoImage> {
         self.image.clone()
     }

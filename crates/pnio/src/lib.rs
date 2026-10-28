@@ -3,61 +3,73 @@
 //! Community project, NOT affiliated with or endorsed by PROFIBUS & PROFINET
 //! International. "PROFINET" is a registered trademark of PNO.
 //!
-//! # Example: answer a DCP Identify on the device side
+//! # API surface
+//!
+//! The supported API is the [`api`] facade ([`api::IoDevice`] and the types it re-exports), the
+//! device declaration ([`config`], [`data`], [`im`]), channel diagnosis ([`diag`]), the GSDML
+//! generator ([`gsdml`]) and the capture reader ([`capture`]). The protocol layers (`alarm`, `cm`,
+//! `dcp`, `device`, `eth`, `lldp`, `pdev`, `rpc`, `rt`) stay `pub` for the integration tests and
+//! the bring-up examples, but are hidden from this documentation and may change in any 0.x
+//! release.
+//!
+//! # Example: declare a device and render its GSDML
 //!
 //! ```
-//! use pnio::dcp::{handle_dcp_frame, DcpConfig, DeviceProperties};
-//! use pnio::eth::MacAddr;
+//! use pnio::config::{DeviceConfig, Slot};
+//! use pnio::data::FieldType;
+//! use pnio::gsdml::{file_name, render, GsdmlMeta};
 //!
-//! let cfg = DcpConfig {
-//!     mac: MacAddr([0x02, 0xc0, 0xa8, 0x01, 0x0f, 0x02]),
-//!     properties: DeviceProperties {
-//!         name_of_station: "i-device".to_string(),
-//!         type_of_station: "demo".to_string(),
-//!         vendor_id: 0x002a,
-//!         device_id: 0x010e,
-//!         device_role: 0,
-//!         device_instance: 0x1064,
-//!         device_options: vec![0x02, 0x07],
-//!         ip: [192, 168, 1, 61],
-//!         subnet: [255, 255, 255, 0],
-//!         gateway: [192, 168, 1, 61],
-//!         ip_block_info: 1,
-//!     },
+//! let cfg = DeviceConfig::builder("pnio-dev")
+//!     .input(Slot(1), &[FieldType::Real; 4]) // device -> controller (%I)
+//!     .output(Slot(2), &[FieldType::Bool; 8]) // controller -> device (%Q)
+//!     .build()
+//!     .expect("valid declaration");
+//! assert_eq!(cfg.input_len(Slot(1)), Some(16)); // 4 REAL, big-endian, no padding
+//!
+//! let meta = GsdmlMeta {
+//!     vendor_name: "Example".into(),
+//!     product_family: "pnio".into(),
+//!     info_text: "4 REAL in, 8 BOOL out".into(),
+//!     date: (2026, 10, 28),
 //! };
-//!
-//! // A DCP Identify request for "i-device" produces an Identify response.
-//! let req = [
-//!     0x01, 0x0e, 0xcf, 0x00, 0x00, 0x00, 0xec, 0x1c, 0x5d, 0x61, 0xe7, 0x3f, 0x88, 0x92,
-//!     0xfe, 0xfe, 0x05, 0x00, 0x03, 0x00, 0x01, 0x52, 0x00, 0x01, 0x00, 0x0c, 0x02, 0x02,
-//!     0x00, 0x08, 0x69, 0x2d, 0x64, 0x65, 0x76, 0x69, 0x63, 0x65,
-//! ];
-//! let resp = handle_dcp_frame(&req, &cfg).unwrap();
-//! assert!(resp.is_some());
+//! let xml = render(&cfg, &meta); // save as `file_name(&meta)`, import in the engineering tool
+//! assert!(xml.starts_with("<?xml"));
+//! assert!(file_name(&meta).starts_with("GSDML-V2."));
 //! ```
+//!
+//! On Linux, [`api::IoDevice::start`] then runs the declared device on a network interface.
 
 // `unsafe` is confined to the raw-socket / scheduler layer: `eth::afpacket`, `eth::poll`,
 // `rt::sched`, `rt::runner`. Every other module is checked by the compiler to contain none.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+#[doc(hidden)]
 pub mod alarm;
 #[cfg(target_os = "linux")]
 pub mod api;
 #[cfg(feature = "capture")]
 pub mod capture;
+#[doc(hidden)]
 pub mod cm;
 pub mod config;
 pub mod data;
+#[doc(hidden)]
 pub mod dcp;
+#[doc(hidden)]
 pub mod device;
 pub mod diag;
+#[doc(hidden)]
 pub mod eth;
 pub mod gsdml;
 pub mod im;
+#[doc(hidden)]
 pub mod lldp;
+#[doc(hidden)]
 pub mod pdev;
+#[doc(hidden)]
 pub mod rpc;
+#[doc(hidden)]
 pub mod rt;
 #[cfg(test)]
 pub(crate) mod testutil;
