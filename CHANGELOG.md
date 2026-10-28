@@ -45,6 +45,9 @@ wire facts are provisional (dissector-sourced) in `docs/pdev-golden-frames.md`.
 - TIA's `0xF841` / `0xF842` probes no longer answer "invalid index".
 - DCP Set-IP no longer requires the suite to equal the configured one.
 
+### Removed
+- `pnio::version()`, a smoke test left over from the scaffold (the crate version is in Cargo metadata).
+
 ## [0.1.0] — 2026-08-31
 
 First published version (crates.io `pnio 0.1.0`, tag `v0.1.0`). A PROFINET RT IO-Device (Conformance Class A, RT class 1) in pure
