@@ -22,6 +22,45 @@
 - Every `(verify)` item in spec §4 is resolved in `docs/pdev-golden-frames.md` (Task 2) **before** the task that implements it starts; the implementer reads that document, not the spec's guess. A provisional, dissector-sourced version of that document already exists (commit `6c2ba3a`): implementers read it now; Task 2 confirms or overrides each line from the captures.
 - Bench-free execution: Tasks 3-14 do not wait for the Task 2 captures. Tests that would load a Task 2 golden build a **synthetic** frame instead, from the facts in `docs/pdev-golden-frames.md`, in a helper commented `// synthetic — replace by the Task 2 golden`; Task 2, when it runs, adds the golden-based twin next to each of them.
 
+## Bench change (2026-10-30): S7-1518HF R/H through an XC-208
+
+Tasks 2 and 15 were written for a 1515-2 PN on a direct cable. The bench is now a redundant S7-1518HF-4 PN pair (FW V3.1.6) behind a SCALANCE XC-208, in line, without MRP. `pnio` is accepted as an S1 device and reaches AR `Data` on it (2026-10-30). Spec §6 and §8 hold except on the points below.
+
+| XC-208 port | Connected to | VLAN |
+|---|---|---|
+| P0.1 | CPU1 X1, 172.16.2.201 | 100 |
+| P0.2 | CPU2 X1, 172.16.2.202 | 100 |
+| P0.3 | edge `eno2` | 100 |
+| P0.4 | free | none |
+| P0.5, P0.6 | CPU1 X2, 192.168.1.201; CPU2 X2, 192.168.1.202 | 1 |
+| P0.7 | edge `eno1`, 192.168.1.21 | 1 |
+| P0.8 | CPL to the office and TIA, 192.168.1.10 | 1 |
+
+System addresses: 172.16.2.203 on X1, 192.168.1.203 on X2.
+
+1. **TIA is not on the device's segment.** DCP is layer 2 and the online functions need an address in 172.16.2.0/24, so every step marked *TIA session* needs one of these, the first being cleaner: a USB Ethernet adapter on P0.4, with P0.4 in VLAN 100 and 172.16.2.50/24 on the adapter; or, with no adapter, P0.1 to P0.3 moved to VLAN 1 for the session (`U` on line 1, `-` on line 100, PVID 1) and 172.16.2.50/24 added to the laptop's Ethernet. Restore the VLANs afterwards.
+2. **The LLDP neighbour is the switch.** `eno2` receives the XC-208's LLDPDU (`port-003`), never the CPU's: LLDP stops at the first bridge. Both become goldens: `switch_p3.hex` from `eno2`, and `cpu_x1.hex` with `eno2` moved for a moment to a free X1 port of a CPU.
+3. **Chassis comparison, watch it on the first topology download.** `pdev::evaluate` compares the CheckPeers chassis to the LLDP chassis as exact strings. A station name in CheckPeers against a MAC chassis from the XC-208 would raise a false `Mismatch::Chassis`. Task 2's `connect` capture settles it; if it happens, fix it in its own commit, test first.
+4. **Device address.** TIA assigned `172.16.2.1`. The first download below sets it to `172.16.2.10`. Until then the device needs `--ip 172.16.2.10 --apply-ip`: announcing `.1` directly means the controller sends no Set and `eno2` keeps its old address.
+5. **Update time.** 500 µs is replaced by the shortest update time TIA accepts on the R/H. TIA chose 2 ms on its own; the GSD allows 1 ms (`MinDeviceInterval="32"`). Pass `--max-rx-interval-us` at 1.5 × the cycle, the default 1500 only suits 1 ms.
+6. **One binary, one session.** Tasks 3-14 are done, so Tasks 2 and 15 both run `~/bench/typed_bringup-plan8`, not the Plan 5 binary. The device now accepts DCP Set instead of answering `SuboptionNotSupported`. TIA's requests are the same, which is what Task 2 needs.
+7. **Downloads stop the R/H.** Group TIA changes into as few downloads as possible, and coordinate with the safety-kinematics bench, which uses the same pair.
+8. **Switchover is deferred to its own campaign** (check 10 in Task 15). Moving a system address between interfaces needs two downloads: V3.1.6 rejects it in one (`Direct exchange of system IP addresses between interfaces is not supported`).
+
+## Bench findings (2026-10-30, TIA V21 on the R/H)
+
+Captures in `~/bench/captures/plan8-20261030/` (`tcpdump -w` writes classic pcap, whatever the file name). Facts that replace assumptions of this plan:
+
+- **TIA reads before it writes.** Assign IP starts with a DCP Get of `1/2` and `3/61`: unanswered, the function stops without a word. `dcp/get.rs` answers Get; `3/61` is refused with `OptionNotSupported`, which TIA accepts.
+- **DeviceOptions must list what the device does.** The list now holds `1/2 2/1 2/2 2/3 2/4 2/5 2/7 5/3 5/5 5/6`.
+- **TIA's *Reset to factory settings* is FactoryReset `5/5`, qualifier `0`, no mode**, not ResetToFactory `5/6`. It is treated as mode 4, as p-net does. "Retain I&M" does not exist on the wire, so Task 2 has one `dcp-reset` file and Task 15 check 7 has one case. Modes 2 and 4 of `5/6` stay untested against TIA.
+- **A failed read can kill the AR.** With TIA's diagnostics open, the CPU itself reads `0xF841`, `0xF842`, `0xF820` and `0xF00C` on `(0, 0x8000)`; an "invalid index" on the last two is followed within 1 ms by `ERR-RTA 0xCF81FD12`, in a loop on both CPUs. Both now read empty. That is not real ARData: revisit if a tool needs the content.
+- **`eno1` and `eno2` on one segment** (VLANs merged for a TIA session) need `arp_ignore=1` and `arp_announce=2` on both, or the CPU reports `IP address exists multiple times` and the AR never reaches `Data`.
+- **`lldpd` must stay off `eno2`** (`/etc/lldpd.d/only-eno1.conf`): the XC-208 otherwise sees two neighbours on P0.3.
+- **TIA screens:** the project's *Online & diagnostics* uses the I219; *Online access* showed the PLCSIM virtual adapter (`02:1b:1b:f4:60:01`), bridged to the same wire, and stayed greyed on the Reset page.
+
+Still open: `im-write` (no I&M load function found in TIA, and `connect` shows no I&M Write at AR setup), topology with the `Mismatch::Chassis` check, `cpu-lldp`, switchover.
+
 ## Deviations from spec (ruled 2026-10-10)
 
 The spec (`docs/design/2026-10-10-pnio-pdev-lldp-dcp-design.md`) is the authority except on these points, where the plan's form was ruled in:
@@ -213,7 +252,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 Bench task: it may run after Tasks 3-13 (bench-free execution, see Global Constraints). Until it runs, the tests of Tasks 4, 7, 9, 10 and 12 use synthetic frames; Task 14's `pdev_replay.rs` waits for it.
 
 **Files:**
-- Create: `crates/pnio/testdata/lldp/cpu_x1.hex` (the 1515's LLDPDU, full Ethernet frame)
+- Create: `crates/pnio/testdata/lldp/cpu_x1.hex` (the 1518's LLDPDU, full Ethernet frame) and `crates/pnio/testdata/lldp/switch_p3.hex` (the XC-208's, same format)
 - Create: `crates/pnio/testdata/pdev/connect_write_check.hex` (the Connect-phase MultipleWrite carrying `0x802B`/`0x802F`/`0x8071`, PNIO blocks only, same offset convention as `testdata/cm/write_req.hex`)
 - Create: `crates/pnio/testdata/pdev/read_802a_req.hex`, `read_8080_req.hex`, `read_f841_req.hex`, `read_f842_req.hex` (TIA read requests, PNIO blocks)
 - Create: `crates/pnio/testdata/dcp/set_name_req.hex`, `set_ip_req.hex`, `signal_req.hex`, `reset_keep_im_req.hex`, `reset_all_req.hex` (full Ethernet frames, VLAN-tagged or not — the Task 4 `blocks_of` helper handles both)
@@ -226,23 +265,40 @@ Bench task: it may run after Tasks 3-13 (bench-free execution, see Global Constr
 
 - [ ] **Step 1: Prepare the bench**
 
-Edge: current `main` binary (`~/bench/typed_bringup`, Plan 5 build, md5 `05e869f2…`), `pnio-dev` at 500 µs, cabled on X1. TIA: the Task 1 GSD installed, device re-added if needed, **topology configured** (Topology view: CPU X1 P1 ↔ `pnio-dev` port 1), I&M1 plant designation and location filled in the device properties, project compiled and downloaded.
+TIA, in one download (see "Bench change"): the Task 1 GSD installed, device IP `172.16.2.10`, **topology configured** (Topology view: XC-208 P0.1 ↔ CPU1 X1, P0.2 ↔ CPU2 X1, P0.3 ↔ `pnio-dev` port 1), I&M1 plant designation and location filled in the device properties. Compile, download, wait for RUN-Redundant.
 
-- [ ] **Step 2: Capture, one file per step**, `captures/plan8-<YYYYMMDD>/`, with `sudo tcpdump -i eno2 -w <name>.pcapng` (no filter — the `vlan` keyword trap from Plan 3):
+Edge: `eno2` back on its address, capture directory ready:
 
-| file | action |
-|---|---|
-| `connect.pcapng` | restart `typed_bringup`, wait for AR `Data`, 30 s |
-| `lldp.pcapng` | 30 s idle (≥ 5 CPU LLDPDUs) |
-| `reads.pcapng` | TIA online on the device, *Diagnostics → PROFINET interface → Ports* open, 60 s |
-| `im-write.pcapng` | download with changed I&M1 fields (H1 test) |
-| `dcp-name.pcapng` | *Online & diagnostics → Functions → Assign PROFINET device name*, new name `pnio-dev-b` |
-| `dcp-ip.pcapng` | *Assign IP address*, same IP re-assigned |
-| `dcp-flash.pcapng` | *Flash LED* |
-| `dcp-reset-keep-im.pcapng` | *Reset to factory settings*, "Retain I&M data" ticked |
-| `dcp-reset-all.pcapng` | same, unticked |
+```bash
+sudo ip addr flush dev eno2 && sudo ip addr add 172.16.2.10/24 dev eno2
+mkdir -p ~/bench/captures/plan8-<YYYYMMDD>
+```
 
-The device answers Set with `SuboptionNotSupported` today; TIA will show an error — expected, we want the requests.
+Device, for every step below:
+
+```bash
+sudo ~/bench/typed_bringup-plan8 --iface eno2 --ip 172.16.2.10 --net-store ~/bench/pnio-net --im-store ~/bench/pnio-im \
+  --cpu 3 --rt-priority 80 --lock-memory --app-cpus 0-1 --max-rx-interval-us 3000
+```
+
+- [ ] **Step 2: Capture, one file per step**, `~/bench/captures/plan8-<YYYYMMDD>/`, with `sudo timeout --signal=INT <seconds> tcpdump -i eno2 -s 0 -w <name>.pcapng` (no filter: the `vlan` keyword trap from Plan 3). Steps marked TIA need a *TIA session* (see "Bench change").
+
+| file | seconds | action |
+|---|---|---|
+| `connect.pcapng` | 45 | start the capture, then the device, wait for AR `Data` |
+| `switch-lldp.pcapng` | 65 | idle (at least 2 XC-208 LLDPDUs) |
+| `reads.pcapng` | 60 | TIA: online on the device, *Diagnostics → PROFINET interface → Ports* open |
+| `im-write.pcapng` | 120 | TIA: write changed I&M1 fields, by *Online & diagnostics* if offered, else a download |
+| `dcp-name.pcapng` | 30 | TIA: *Assign PROFINET device name*, new name `pnio-dev-b` |
+| `dcp-ip.pcapng` | 30 | TIA: *Assign IP address*, same IP re-assigned |
+| `dcp-flash.pcapng` | 20 | TIA: *Flash LED* |
+| `dcp-reset-keep-im.pcapng` | 30 | TIA: *Reset to factory settings*, "Retain I&M data" ticked |
+| `dcp-reset-all.pcapng` | 30 | TIA: same, unticked |
+| `cpu-lldp.pcapng` | 35 | last: `eno2` on a free X1 port of a CPU (AR lost, expected), back on P0.3 afterwards |
+
+After `dcp-name` and the two resets, give the name back with TIA before the next step, and delete `~/bench/pnio-net` if the restart keeps a stale identity.
+
+Copy the campaign to the workstation: `scp -r maintenance@192.168.1.21:bench/captures/plan8-<YYYYMMDD> captures/`.
 
 - [ ] **Step 3: Extract the goldens**
 
@@ -285,7 +341,7 @@ Then, next to every synthetic test (each helper commented `// synthetic — repl
 
 ```bash
 git add crates/pnio/testdata/lldp crates/pnio/testdata/pdev crates/pnio/testdata/dcp docs/pdev-golden-frames.md crates/pnio/src
-git commit -m "test: Plan 8 goldens from the 1515 X1 campaign (LLDP, PDEV writes/reads, DCP name/IP/signal/reset) + pinned wire facts
+git commit -m "test: Plan 8 goldens from the 1518 R/H campaign (LLDP, PDEV writes/reads, DCP name/IP/signal/reset) + pinned wire facts
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -3296,13 +3352,26 @@ Update every existing `start_with` call site to pass `DeviceHooks::default()` as
 **Files:**
 - Modify: `docs/bench-pnet-device.md` (new §6j), `docs/gsdml.md` (H1 outcome), `docs/pdev-golden-frames.md` (any value corrected on the bench)
 
-- [ ] **Step 1: Build and deploy** — musl build as for Plan 5 (`cargo build --release --target x86_64-unknown-linux-musl --example typed_bringup`), `scp` to `~/bench/typed_bringup.plan8`, `setcap cap_net_raw,cap_net_admin,cap_sys_nice,cap_ipc_lock+ep`, run with `--net-store ~/bench/pnio-net --im-store ~/bench/pnio-im` plus the usual RT flags. GSD from Task 1 already installed; topology configured.
+- [ ] **Step 1: Deploy** — the binary is already on the edge (`~/bench/typed_bringup-plan8`, branch `a8bad81`, rebuild and `scp` if the branch moved: `cargo build --release --target x86_64-unknown-linux-musl --example typed_bringup`). Run it with the Task 2 command. GSD installed, topology configured.
 
-- [ ] **Step 2: Run the nine checks of spec §6** in order, `tcpdump` per check into `captures/plan8-hil-<date>/`. For each: expected observation (spec §6), actual, PASS/FAIL. Check 3 (I&M1-3) decides H1 — if FAIL, apply the fallback (fields set? `V2.35`? capture) and record.
+- [ ] **Step 2: Run the checks** in order, `tcpdump` per check into `~/bench/captures/plan8-hil-<date>/`. For each: expected observation, actual, PASS/FAIL. Check 3 (I&M1-3) decides H1: if FAIL, apply the fallback (fields set? `V2.35`? capture) and record. Spec §6 adapted to the R/H bench, *Bench change* above:
+
+| # | Check | Expected |
+|---|---|---|
+| 1 | GSD and compile | Accepted with the topology through the XC-208 |
+| 2 | Download, AR up | Online topology green, CPU buffer clean, RUN-Redundant kept. Wireshark: our LLDPDU and `0x802A`/`0x8080`/`0xF841` responses decode with no "unknown" remainder. No false chassis mismatch against the XC-208 |
+| 3 | I&M1-3 (TIA session) | Write records captured; device restarted; values read back in TIA |
+| 4 | Assign name, then IP (TIA session) | Identify shows them, `~/bench/pnio-net` updated, restart keeps the name, `ip addr` reflects the IP with `--apply-ip`. The AR comes back once TIA and the device agree on the name again |
+| 5 | Flash LED (TIA session) | `signal_count` increments, log line |
+| 6 | Wrong port | Add P0.4 to VLAN 100 (`U`, PVID 100), move `eno2` from P0.3 to P0.4: remote mismatch in the CPU buffer within ~25 s (TTL + period). Back on P0.3: entry disappears. Unplug: AR loss as before, no stale mismatch after reconnect |
+| 7 | Reset to factory, mode 2 then mode 4 (TIA session) | Name blank in Identify, TIA re-assigns; mode 4 blanks I&M1-3 |
+| 8 | `0xF841`/`0xF842` reads, one minute (TIA session) | Zero "invalid index" |
+| 9 | 10 min at the shortest update time, mismatch active | `PASS`, zero missed ticks |
+| 10 | Switchover (deferred, own campaign) | 5 STOP/RUN each way, `tcpdump` for the exact gap, log covering the CPU's return. First run 2026-10-30: `ControllerRelease`, then a new AR from the new primary; gap ≈ 0.32 s from 1 Hz counters, not frame timestamps |
 
 - [ ] **Step 3: Write §6j** in `docs/bench-pnet-device.md` (same structure as §6i: setup, table of checks, findings, captures list), update `docs/gsdml.md` with the H1 outcome, correct `docs/pdev-golden-frames.md` if the bench contradicted a pinned value (and fix the code/test, with its own commit).
 
-- [ ] **Step 4: Commit** — `docs(bench): §6j HIL Plan 8 — PDEV/LLDP/DCP on the 1515 X1 (<n>/9 checks)`
+- [ ] **Step 4: Commit** — `docs(bench): §6j HIL Plan 8 — PDEV/LLDP/DCP on the 1518 R/H (<n>/9 checks)`
 
 If a check fails for a code reason, fix it in its own task-sized commit (test first) before closing the HIL.
 

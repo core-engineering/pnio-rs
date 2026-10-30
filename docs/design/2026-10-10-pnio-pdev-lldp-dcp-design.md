@@ -185,6 +185,8 @@ Reset: mode 2 → `NetParams { name: "", ip: 0, subnet: 0, gateway: 0 }` applied
 
 ## 6. Examples and HIL (§6j of `docs/bench-pnet-device.md`)
 
+> Bench changed on 2026-10-30 to an S7-1518HF R/H pair behind an XC-208: see "Bench change" in `docs/plans/2026-10-10-pnio-pdev-lldp-dcp.md`, which overrides this section where they differ.
+
 Bench: 1515-2 PN X1 ↔ edge `eno2`, TIA V21, 500 µs. Binary: musl `typed_bringup` with `--net-store ~/bench/pnio-net`, `--im-store`, caps `cap_net_raw,cap_net_admin,cap_sys_nice,cap_ipc_lock`.
 
 1. GSD checker accepts the V2.31 GSD; project compiles with the device, topology configured (CPU X1 P1 ↔ device port-001).
@@ -204,6 +206,8 @@ Bench: 1515-2 PN X1 ↔ edge `eno2`, TIA V21, 500 µs. Binary: musl `typed_bring
 - GSDML: golden + `lxml` validation recipe (manual, documented).
 
 ## 8. Capture campaign (task 0) and goldens
+
+> Bench changed on 2026-10-30 to an S7-1518HF R/H pair behind an XC-208: see "Bench change" in `docs/plans/2026-10-10-pnio-pdev-lldp-dcp.md`, which overrides this section where they differ.
 
 Prerequisite: GSDML task done (V2.31 GSD installed in TIA, topology configured), 0.1.0 binary running (it answers errors; we want the requests and the CPU's own frames). Capture on `eno2` without filter, one pcapng per step, under `captures/plan8-<date>/` (git-ignored) with a README:
 - `connect`: AR establishment — expect `0x802B` CheckPeers, `0x802F`, `0x8071` in the MultipleWrite; the CPU's LLDPDU on X1.
