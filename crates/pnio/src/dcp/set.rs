@@ -1,5 +1,5 @@
-//! DCP Set: parse the Set request (IP suite, NameOfStation, Signal, ResetToFactory),
-//! decide each block, build the response.
+//! DCP Set: parse the Set request (IP suite, NameOfStation, Signal, FactoryReset,
+//! ResetToFactory), decide each block, build the response.
 //!
 //! This module is the pure decision layer: [`decide_set`] validates each block and
 //! returns the [`Effect`] to apply when it is accepted. Applying it (pushing the IP to
@@ -40,6 +40,9 @@ pub enum SetBlock {
         /// `SignalValue`: `0x0100` = "Flash Once", the only value defined.
         value: u16,
     },
+    /// Control option (5), suboption 5 (FactoryReset): what TIA V21 sends for *Reset to
+    /// factory settings*. No value, no mode: everything is reset.
+    FactoryReset,
     /// Control option (5), suboption 6 (ResetToFactory): no value, the mode sits in
     /// the qualifier (see [`reset_mode`]).
     ResetToFactory {
@@ -204,6 +207,7 @@ pub fn parse_set_request(block_bytes: &[u8]) -> Result<SetRequest, DcpError> {
                     value: u16::from_be_bytes([b.value[0], b.value[1]]),
                 });
             }
+            (5, 5) => out.push(SetBlock::FactoryReset),
             (5, 6) => out.push(SetBlock::ResetToFactory { qualifier }),
             (option, suboption) => out.push(SetBlock::Other { option, suboption }),
         }
@@ -258,6 +262,7 @@ pub fn decide_set(req: &SetRequest) -> Vec<SetDecision> {
             ),
             SetBlock::Signal { value: 0x0100, .. } => SetDecision::ok(5, 3, Effect::Signal),
             SetBlock::Signal { .. } => SetDecision::err(5, 3, SetBlockError::SuboptionNotSet),
+            SetBlock::FactoryReset => SetDecision::ok(5, 5, Effect::Reset { mode: 4 }),
             SetBlock::ResetToFactory { qualifier } => match reset_mode(*qualifier) {
                 mode @ (2 | 4) => SetDecision::ok(5, 6, Effect::Reset { mode }),
                 _ => SetDecision::err(5, 6, SetBlockError::SuboptionNotSupported),
@@ -391,9 +396,21 @@ mod tests {
     }
 
     #[test]
-    fn get_request_is_ignored() {
+    fn tia_factory_reset_resets_everything() {
+        // TIA V21 Reset to factory settings: bench capture 2026-10-30.
+        let req = parse_set_request(&[0x05, 0x05, 0x00, 0x02, 0x00, 0x00]).unwrap();
+        assert_eq!(req.blocks, vec![SetBlock::FactoryReset]);
+        assert_eq!(
+            decide_set(&req),
+            vec![SetDecision::ok(5, 5, Effect::Reset { mode: 4 })]
+        );
+    }
+
+    #[test]
+    fn get_response_is_ignored() {
         let mut f = golden("dcp_set_req");
         f[VLAN_PAYLOAD_OFF + 2] = 3; // ServiceID Get
+        f[VLAN_PAYLOAD_OFF + 3] = 1; // ServiceType response
         assert_eq!(handle_dcp_frame(&f, &cfg([172, 16, 2, 10])).unwrap(), None);
     }
 

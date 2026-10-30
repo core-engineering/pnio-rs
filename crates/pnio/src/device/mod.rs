@@ -642,7 +642,9 @@ impl<E: EthTransport, R: RpcTransport> Device<E, R> {
                 continue;
             }
             match classify(&frame, &self.setup.dcp) {
-                Ok(Some(DcpRequest::Identify { reply })) => self.eth.send(&reply)?,
+                Ok(Some(DcpRequest::Identify { reply } | DcpRequest::Get { reply })) => {
+                    self.eth.send(&reply)?
+                }
                 Ok(Some(DcpRequest::Set { .. }))
                     if frame.get(..6) != Some(&self.setup.dcp.mac.0[..]) =>
                 {

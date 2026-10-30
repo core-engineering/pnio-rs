@@ -354,7 +354,7 @@ impl DeviceConfig {
             device_id: self.device_id,
             device_role: 0x0100,
             device_instance: 1,
-            device_options: vec![1, 2, 2, 2, 2, 3],
+            device_options: vec![1, 2, 2, 1, 2, 2, 2, 3, 2, 4, 2, 5, 2, 7, 5, 3, 5, 5, 5, 6],
             ip,
             subnet: [255, 255, 255, 0],
             gateway: ip,
@@ -951,7 +951,10 @@ mod tests {
             (p.ip, p.subnet, p.gateway, p.ip_block_info),
             ([172, 16, 2, 10], [255, 255, 255, 0], [172, 16, 2, 10], 1)
         );
-        assert_eq!(p.device_options, vec![1, 2, 2, 2, 2, 3]);
+        assert_eq!(
+            p.device_options,
+            vec![1, 2, 2, 1, 2, 2, 2, 3, 2, 4, 2, 5, 2, 7, 5, 3, 5, 5, 5, 6]
+        );
         let s = cfg.setup(mac, [172, 16, 2, 10], None);
         assert_eq!(s.dcp.mac, mac);
         assert_eq!(s.model, cfg.model(mac));

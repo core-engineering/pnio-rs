@@ -62,6 +62,46 @@ pub struct DeviceProperties {
     pub ip_block_info: u16,
 }
 
+/// The blocks of an Identify response, in wire order.
+const IDENTIFY_BLOCKS: [(u8, u8); 7] = [(2, 2), (2, 5), (2, 1), (2, 3), (2, 4), (2, 7), (1, 2)];
+
+/// The response block carrying one device property, `None` if this device has no such
+/// option/suboption. Shared by Identify and Get.
+pub(crate) fn property_block(
+    props: &DeviceProperties,
+    option: u8,
+    suboption: u8,
+) -> Option<DcpBlock> {
+    let value = match (option, suboption) {
+        (2, 2) => props.name_of_station.as_bytes().to_vec(),
+        (2, 5) => props.device_options.clone(),
+        (2, 1) => props.type_of_station.as_bytes().to_vec(),
+        (2, 3) => {
+            let mut v = Vec::with_capacity(4);
+            v.extend_from_slice(&props.vendor_id.to_be_bytes());
+            v.extend_from_slice(&props.device_id.to_be_bytes());
+            v
+        }
+        (2, 4) => props.device_role.to_be_bytes().to_vec(),
+        (2, 7) => props.device_instance.to_be_bytes().to_vec(),
+        (1, 2) => {
+            let mut v = Vec::with_capacity(12);
+            v.extend_from_slice(&props.ip);
+            v.extend_from_slice(&props.subnet);
+            v.extend_from_slice(&props.gateway);
+            v
+        }
+        _ => return None,
+    };
+    let block_info = if option == 1 { props.ip_block_info } else { 0 };
+    Some(DcpBlock {
+        option,
+        suboption,
+        block_info: Some(block_info),
+        value,
+    })
+}
+
 /// Build the full Ethernet frame of an Identify response for the given device.
 pub fn build_identify_response(
     dst: MacAddr,
@@ -69,59 +109,10 @@ pub fn build_identify_response(
     xid: u32,
     props: &DeviceProperties,
 ) -> Vec<u8> {
-    let mut device_id_val = Vec::with_capacity(4);
-    device_id_val.extend_from_slice(&props.vendor_id.to_be_bytes());
-    device_id_val.extend_from_slice(&props.device_id.to_be_bytes());
-
-    let mut ip_val = Vec::with_capacity(12);
-    ip_val.extend_from_slice(&props.ip);
-    ip_val.extend_from_slice(&props.subnet);
-    ip_val.extend_from_slice(&props.gateway);
-
-    let blocks = vec![
-        DcpBlock {
-            option: 2,
-            suboption: 2,
-            block_info: Some(0),
-            value: props.name_of_station.as_bytes().to_vec(),
-        },
-        DcpBlock {
-            option: 2,
-            suboption: 5,
-            block_info: Some(0),
-            value: props.device_options.clone(),
-        },
-        DcpBlock {
-            option: 2,
-            suboption: 1,
-            block_info: Some(0),
-            value: props.type_of_station.as_bytes().to_vec(),
-        },
-        DcpBlock {
-            option: 2,
-            suboption: 3,
-            block_info: Some(0),
-            value: device_id_val,
-        },
-        DcpBlock {
-            option: 2,
-            suboption: 4,
-            block_info: Some(0),
-            value: props.device_role.to_be_bytes().to_vec(),
-        },
-        DcpBlock {
-            option: 2,
-            suboption: 7,
-            block_info: Some(0),
-            value: props.device_instance.to_be_bytes().to_vec(),
-        },
-        DcpBlock {
-            option: 1,
-            suboption: 2,
-            block_info: Some(props.ip_block_info),
-            value: ip_val,
-        },
-    ];
+    let blocks: Vec<DcpBlock> = IDENTIFY_BLOCKS
+        .iter()
+        .filter_map(|&(option, suboption)| property_block(props, option, suboption))
+        .collect();
 
     let header = DcpHeader {
         service_id: ServiceId::Identify,

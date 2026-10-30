@@ -2,6 +2,7 @@
 
 pub mod block;
 pub mod frame;
+pub mod get;
 pub mod identify;
 pub mod ipconf;
 pub mod name;
@@ -10,6 +11,7 @@ pub mod store;
 
 pub use block::{parse_blocks, write_blocks, DcpBlock};
 pub use frame::{DcpHeader, FrameId, ServiceId, ServiceType, DCP_MULTICAST_MAC};
+pub use get::{build_get_response, parse_get_request};
 pub use identify::{
     build_identify_response, parse_identify_request, DeviceProperties, IdentifyFilter,
 };
@@ -94,6 +96,11 @@ pub enum DcpRequest {
         /// The Identify response, ready to send.
         reply: Vec<u8>,
     },
+    /// A Get addressed to this device, with its ready-made answer.
+    Get {
+        /// The Get response, ready to send.
+        reply: Vec<u8>,
+    },
     /// A Set request: the decisions per block; the caller applies the effects and answers.
     Set {
         /// The requester's MAC (the response's destination).
@@ -106,12 +113,12 @@ pub enum DcpRequest {
 }
 
 /// Handle one received Ethernet frame without side effects. Returns the response
-/// frame to send (Identify: its reply; Set: the response built from the decisions,
+/// frame to send (Identify, Get: its reply; Set: the response built from the decisions,
 /// effects *not* applied), or `None` if the frame is not a DCP request this device
 /// should answer. `device::Device` uses [`classify`] instead, to apply Set effects.
 pub fn handle_dcp_frame(frame: &[u8], cfg: &DcpConfig) -> Result<Option<Vec<u8>>, DcpError> {
     Ok(match classify(frame, cfg)? {
-        Some(DcpRequest::Identify { reply }) => Some(reply),
+        Some(DcpRequest::Identify { reply } | DcpRequest::Get { reply }) => Some(reply),
         Some(DcpRequest::Set {
             src,
             xid,
@@ -125,9 +132,9 @@ pub fn handle_dcp_frame(frame: &[u8], cfg: &DcpConfig) -> Result<Option<Vec<u8>>
 }
 
 /// Classify one received Ethernet frame against `cfg`: an Identify this device
-/// matches comes back with its reply; a Set request comes back with the per-block
-/// [`SetDecision`]s (the caller applies the effects and answers); anything else is
-/// `None`.
+/// matches or a Get addressed to it comes back with its reply; a Set request comes back
+/// with the per-block [`SetDecision`]s (the caller applies the effects and answers);
+/// anything else is `None`.
 pub fn classify(frame: &[u8], cfg: &DcpConfig) -> Result<Option<DcpRequest>, DcpError> {
     let (eth, payload_off) =
         EthHeader::parse(frame).map_err(|_| DcpError::Malformed("bad Ethernet header"))?;
@@ -166,6 +173,21 @@ pub fn classify(frame: &[u8], cfg: &DcpConfig) -> Result<Option<DcpRequest>, Dcp
         }
         Some(FrameId::GetSet) => {
             let (header, blocks) = DcpHeader::parse(&payload[2..])?;
+            if header.service_id == ServiceId::Get && header.service_type == ServiceType::Request {
+                if eth.dst != cfg.mac {
+                    return Ok(None);
+                }
+                let requested = parse_get_request(blocks)?;
+                return Ok(Some(DcpRequest::Get {
+                    reply: build_get_response(
+                        eth.src,
+                        cfg.mac,
+                        header.xid,
+                        &requested,
+                        &cfg.properties,
+                    ),
+                }));
+            }
             if header.service_id != ServiceId::Set || header.service_type != ServiceType::Request {
                 log::debug!(
                     "ignoring DCP Get/Set-response frame (service_id={:?}, service_type={:?})",
@@ -239,6 +261,75 @@ mod dispatch_tests {
         assert_eq!(&resp[14..16], &[0xfe, 0xff]); // Identify response FrameID
                                                   // echoes the request Xid
         assert_eq!(&resp[18..22], &[0x03, 0x00, 0x01, 0x52]);
+    }
+
+    // TIA V21 DCP Get (IP suite, DHCP client id): bench capture 2026-10-30, dst rewritten
+    // to `cfg().mac`.
+    const GET_REQ: &[u8] = &[
+        0x02, 0xc0, 0xa8, 0x01, 0x0f, 0x02, 0x02, 0x1b, 0x1b, 0xf4, 0x60, 0x01, 0x88, 0x92, 0xfe,
+        0xfd, 0x03, 0x00, 0x09, 0x01, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x04, 0x01, 0x02, 0x03, 0x3d,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    fn get_frame(pairs: &[u8]) -> Vec<u8> {
+        let mut f = GET_REQ[..24].to_vec();
+        f.extend_from_slice(&(pairs.len() as u16).to_be_bytes());
+        f.extend_from_slice(pairs);
+        f
+    }
+
+    #[test]
+    fn get_answers_ip_suite_and_refuses_dhcp() {
+        let resp = handle_dcp_frame(GET_REQ, &cfg())
+            .unwrap()
+            .expect("expected a response");
+        assert_eq!(&resp[0..6], &[0x02, 0x1b, 0x1b, 0xf4, 0x60, 0x01]);
+        assert_eq!(&resp[6..12], &[0x02, 0xc0, 0xa8, 0x01, 0x0f, 0x02]);
+        assert_eq!(&resp[14..16], &[0xfe, 0xfd]);
+        let (h, blocks) = DcpHeader::parse(&resp[16..]).unwrap();
+        assert_eq!(h.service_id, ServiceId::Get);
+        assert_eq!(h.service_type, ServiceType::ResponseSuccess);
+        assert_eq!(h.xid, 0x0901_000a);
+        #[rustfmt::skip]
+        let expected: &[u8] = &[
+            1, 2, 0, 14, 0, 1, 192, 168, 1, 61, 255, 255, 255, 0, 192, 168, 1, 61,
+            5, 4, 0, 3, 3, 0x3d, 1, 0,
+        ];
+        assert_eq!(blocks, expected);
+    }
+
+    #[test]
+    fn get_answers_a_device_property() {
+        let resp = handle_dcp_frame(&get_frame(&[2, 2]), &cfg())
+            .unwrap()
+            .expect("expected a response");
+        let (_, blocks) = DcpHeader::parse(&resp[16..]).unwrap();
+        assert_eq!(blocks, b"\x02\x02\x00\x0a\x00\x00i-device");
+    }
+
+    #[test]
+    fn get_refuses_an_unknown_suboption_of_a_known_option() {
+        let resp = handle_dcp_frame(&get_frame(&[2, 0x40]), &cfg())
+            .unwrap()
+            .expect("expected a response");
+        let (_, blocks) = DcpHeader::parse(&resp[16..]).unwrap();
+        assert_eq!(blocks, &[5, 4, 0, 3, 2, 0x40, 2, 0]);
+    }
+
+    #[test]
+    fn get_rejects_an_odd_request_length() {
+        assert!(matches!(
+            handle_dcp_frame(&get_frame(&[1, 2, 3]), &cfg()),
+            Err(DcpError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn get_for_another_mac_is_ignored() {
+        let mut f = GET_REQ.to_vec();
+        f[5] ^= 1;
+        assert_eq!(handle_dcp_frame(&f, &cfg()).unwrap(), None);
     }
 
     #[test]
