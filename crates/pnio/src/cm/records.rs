@@ -100,6 +100,11 @@ pub fn build_read_res(req: &ReadReq, data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `ARData`: read by the controller for TIA's online diagnostics. Served empty.
+const INDEX_AR_DATA: u16 = 0xF820;
+/// The AR's diagnosis, in the same case as [`INDEX_AR_DATA`].
+const INDEX_AR_DIAGNOSIS: u16 = 0xF00C;
+
 /// Everything [`read_record`] needs that is not in the request.
 pub struct RecordCtx<'a> {
     /// The device's slot/submodule model, used to check `(slot, subslot)` is known.
@@ -125,6 +130,8 @@ pub struct RecordCtx<'a> {
 /// - PDEV indices, when `ctx.pdev` is set: whatever [`crate::pdev::records::read`]
 ///   serves on that `(slot, subslot)`, an empty record included (nothing written yet
 ///   is a successful empty read, not an invalid index).
+/// - `0xF820`, `0xF00C` (AR data and diagnosis): an empty record on any submodule the
+///   model knows. An S7-1518HF aborts the AR when these reads fail.
 pub fn read_record(req: &ReadReq, ctx: &RecordCtx) -> Option<Vec<u8>> {
     ctx.model.find(req.slot, req.subslot)?;
     if let Some(p) = ctx.pdev {
@@ -135,6 +142,7 @@ pub fn read_record(req: &ReadReq, ctx: &RecordCtx) -> Option<Vec<u8>> {
     match req.index {
         INDEX_IM0 => Some(encode_im0(ctx.model.vendor_id, ctx.im0, IM_SUPPORTED_DAP)),
         INDEX_IM1..=INDEX_IM3 => ctx.im.read(req.index),
+        INDEX_AR_DATA | INDEX_AR_DIAGNOSIS => Some(Vec::new()),
         _ => None,
     }
 }
@@ -394,6 +402,33 @@ mod tests {
         assert!(read_record(&req(0xF841, 0x0001), &ctx).is_some());
         let none = RecordCtx { pdev: None, ..ctx };
         assert!(read_record(&req(0x802A, 0x8001), &none).is_none());
+    }
+
+    #[test]
+    fn ar_data_and_diagnosis_read_empty() {
+        // An S7-1518HF aborts the AR (0xCF81FD12) when TIA's online diagnostics make it
+        // read either index and the read fails: bench capture 2026-10-30.
+        let model = DeviceModel::pnet_sample(MacAddr([0; 6]));
+        let (im0, store) = (Im0::default(), ImStore::new());
+        let ctx = RecordCtx {
+            model: &model,
+            im0: &im0,
+            im: &store,
+            pdev: None,
+        };
+        for index in [0xF820, 0xF00C] {
+            let req = ReadReq {
+                seq: 0,
+                ar_uuid: Uuid([0; 16]),
+                api: 0,
+                slot: 0,
+                subslot: 0x8000,
+                index,
+                record_data_length: 0x8000,
+                target_ar_uuid: Uuid([0; 16]),
+            };
+            assert_eq!(read_record(&req, &ctx), Some(Vec::new()));
+        }
     }
 
     fn pdev_record(subslot: u16, index: u16, data: Vec<u8>) -> Record {
