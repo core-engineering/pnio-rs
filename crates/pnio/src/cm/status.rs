@@ -16,6 +16,168 @@ pub enum ConnectBlock {
     AlarmCr = 4,
 }
 
+/// `ErrorCode1 = 64` (CMRPC) Connect rejections: problems with the request as a
+/// whole rather than with one field of one block (goes into `PNIOStatus.Code2` of
+/// [`PnioStatus::connect_reject_cmrpc`]). Values per IEC 61158-6-10.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CmrpcReason {
+    /// The NDR args do not hold the blocks they claim to (truncated or overlong).
+    ArgsLengthInvalid = 0,
+    /// A block of a type this device does not know.
+    UnknownBlocks = 1,
+    /// No Input or no Output IOCRBlockReq.
+    IocrMissing = 2,
+    /// A required block is missing or duplicated (ARBlockReq, AlarmCRBlockReq).
+    WrongBlockCount = 3,
+    /// No AR resource left on the device.
+    OutOfArResources = 4,
+    /// The device is in a state in which it cannot take this Connect.
+    StateConflict = 6,
+    /// More provider, consumer or alarm CRs than the device supports (e.g. more than
+    /// one Input and one Output CR on a legacy AR).
+    OutOfProviderConsumerOrAlarmResources = 7,
+    /// No memory left to take the AR.
+    OutOfMemory = 8,
+}
+
+// ---------------------------------------------------------------------------------
+// ErrorCode2 field positions of a Connect-request block.
+// ---------------------------------------------------------------------------------
+//
+// `ErrorCode2` of a `(block, field)` Connect rejection names the offending field by
+// its position in the block, counted from the block header: `BlockType` = 0,
+// `BlockLength` = 1, `BlockVersionHigh` = 2, `BlockVersionLow` = 3, then the block's
+// own fields in wire order, one number per field whatever its size. This is how
+// IEC 61158-6-10 numbers them and how a controller's diagnostic buffer decodes them.
+// Within a repeated group (an API, a submodule) the number is that of the field's
+// first occurrence.
+
+/// `ErrorCode2` positions shared by every block: the 6-byte block header.
+pub mod block_field {
+    /// `BlockType`: the block's type is not the one expected at this position.
+    pub const BLOCK_TYPE: u8 = 0;
+    /// `BlockLength`: the block's body does not hold the fields its type promises.
+    pub const BLOCK_LENGTH: u8 = 1;
+    /// `BlockVersionHigh`.
+    pub const BLOCK_VERSION_HIGH: u8 = 2;
+    /// `BlockVersionLow`.
+    pub const BLOCK_VERSION_LOW: u8 = 3;
+}
+
+/// `ErrorCode2` positions of an `(ArBlock, …)` reject: the fields of `ARBlockReq`.
+pub mod ar_field {
+    /// `ARType`.
+    pub const AR_TYPE: u8 = 4;
+    /// `ARUUID`.
+    pub const AR_UUID: u8 = 5;
+    /// `SessionKey`.
+    pub const SESSION_KEY: u8 = 6;
+    /// `CMInitiatorMacAdd`.
+    pub const INITIATOR_MAC: u8 = 7;
+    /// `CMInitiatorObjectUUID`.
+    pub const INITIATOR_OBJECT_UUID: u8 = 8;
+    /// `ARProperties`.
+    pub const AR_PROPERTIES: u8 = 9;
+    /// `CMInitiatorActivityTimeoutFactor`.
+    pub const ACTIVITY_TIMEOUT_FACTOR: u8 = 10;
+    /// `CMInitiatorUDPRTPort`.
+    pub const INITIATOR_UDP_RT_PORT: u8 = 11;
+    /// `StationNameLength`.
+    pub const STATION_NAME_LENGTH: u8 = 12;
+    /// `CMInitiatorStationName`.
+    pub const STATION_NAME: u8 = 13;
+}
+
+/// `ErrorCode2` positions of an `(IocrBlock, …)` reject: the fields of `IOCRBlockReq`.
+pub mod iocr_field {
+    /// `IOCRType`.
+    pub const IOCR_TYPE: u8 = 4;
+    /// `IOCRReference`.
+    pub const REFERENCE: u8 = 5;
+    /// `LT` (LengthType/EtherType).
+    pub const LT: u8 = 6;
+    /// `IOCRProperties`.
+    pub const PROPERTIES: u8 = 7;
+    /// `DataLength`.
+    pub const DATA_LENGTH: u8 = 8;
+    /// `FrameID`.
+    pub const FRAME_ID: u8 = 9;
+    /// `SendClockFactor`.
+    pub const SEND_CLOCK_FACTOR: u8 = 10;
+    /// `ReductionRatio`.
+    pub const REDUCTION_RATIO: u8 = 11;
+    /// `Phase`.
+    pub const PHASE: u8 = 12;
+    /// `Sequence`.
+    pub const SEQUENCE: u8 = 13;
+    /// `FrameSendOffset`.
+    pub const FRAME_SEND_OFFSET: u8 = 14;
+    /// `WatchdogFactor`.
+    pub const WATCHDOG_FACTOR: u8 = 15;
+    /// `DataHoldFactor`.
+    pub const DATA_HOLD_FACTOR: u8 = 16;
+    /// `IOCRTagHeader`.
+    pub const TAG_HEADER: u8 = 17;
+    /// `IOCRMulticastMACAdd`.
+    pub const MULTICAST_MAC: u8 = 18;
+    /// `NumberOfAPIs`.
+    pub const NUMBER_OF_APIS: u8 = 19;
+}
+
+/// `ErrorCode2` positions of an `(ExpectedSubmodule, …)` reject: the fields of
+/// `ExpectedSubmoduleBlockReq`.
+pub mod expected_submodule_field {
+    /// `NumberOfAPIs`.
+    pub const NUMBER_OF_APIS: u8 = 4;
+    /// `API`.
+    pub const API: u8 = 5;
+    /// `SlotNumber`.
+    pub const SLOT: u8 = 6;
+    /// `ModuleIdentNumber`.
+    pub const MODULE_IDENT: u8 = 7;
+    /// `ModuleProperties`.
+    pub const MODULE_PROPERTIES: u8 = 8;
+    /// `NumberOfSubmodules`.
+    pub const NUMBER_OF_SUBMODULES: u8 = 9;
+    /// `SubslotNumber`.
+    pub const SUBSLOT: u8 = 10;
+    /// `SubmoduleIdentNumber`.
+    pub const SUBMODULE_IDENT: u8 = 11;
+    /// `SubmoduleProperties`.
+    pub const SUBMODULE_PROPERTIES: u8 = 12;
+    /// `DataDescription`.
+    pub const DATA_DESCRIPTION: u8 = 13;
+    /// `SubmoduleDataLength`.
+    pub const SUBMODULE_DATA_LENGTH: u8 = 14;
+    /// `LengthIOPS`.
+    pub const LENGTH_IOPS: u8 = 15;
+    /// `LengthIOCS`.
+    pub const LENGTH_IOCS: u8 = 16;
+}
+
+/// `ErrorCode2` positions of an `(AlarmCr, …)` reject: the fields of `AlarmCRBlockReq`.
+pub mod alarm_cr_field {
+    /// `AlarmCRType`.
+    pub const ALARM_CR_TYPE: u8 = 4;
+    /// `LT` (LengthType/EtherType).
+    pub const LT: u8 = 5;
+    /// `AlarmCRProperties`.
+    pub const PROPERTIES: u8 = 6;
+    /// `RTATimeoutFactor`.
+    pub const RTA_TIMEOUT_FACTOR: u8 = 7;
+    /// `RTARetries`.
+    pub const RTA_RETRIES: u8 = 8;
+    /// `LocalAlarmReference`.
+    pub const LOCAL_ALARM_REFERENCE: u8 = 9;
+    /// `MaxAlarmDataLength`.
+    pub const MAX_ALARM_DATA_LENGTH: u8 = 10;
+    /// `AlarmCRTagHeaderHigh`.
+    pub const TAG_HEADER_HIGH: u8 = 11;
+    /// `AlarmCRTagHeaderLow`.
+    pub const TAG_HEADER_LOW: u8 = 12;
+}
+
 /// The 4-byte PNIOStatus word: `Code` (high byte) / `ErrorDecode` / `ErrorCode1` /
 /// `ErrorCode2` (low byte), packed big-endian into a `u32` as it appears on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +186,9 @@ pub struct PnioStatus(pub u32);
 impl PnioStatus {
     /// PNIOStatus.Code = 0: no error.
     pub const OK: PnioStatus = PnioStatus(0);
+
+    /// `ErrorCode1` of a CMRPC Connect rejection (see [`CmrpcReason`]).
+    const CODE1_CMRPC: u8 = 64;
 
     /// Packs the four status bytes big-endian into one `u32`.
     pub fn new(code: u8, decode: u8, code1: u8, code2: u8) -> PnioStatus {
@@ -60,12 +225,21 @@ impl PnioStatus {
         self.0
     }
 
-    /// CMRPC: Connect problem, error in the given block (`Code = 0xDB`,
-    /// `Decode = PNIORW 0x81`, `Code1` = block type, `Code2` = offending field).
-    /// Convention as used by open PROFINET stacks (e.g. p-net); re-verify against the
-    /// purchased IEC 61158-6-10 text (tracked in FOLLOWUPS).
+    /// Connect problem, error in the given block (`Code = 0xDB`, `Decode = PNIO
+    /// 0x81`, `Code1` = block type, `Code2` = offending field). `field` is the field's
+    /// position counted from the block header (`BlockType` = 0); use the per-block
+    /// constants ([`ar_field`], [`iocr_field`], [`expected_submodule_field`],
+    /// [`alarm_cr_field`], [`block_field`]) rather than literal numbers. Numbering per
+    /// IEC 61158-6-10.
     pub fn connect_reject(block: ConnectBlock, field: u8) -> PnioStatus {
         PnioStatus::new(0xDB, 0x81, block as u8, field)
+    }
+
+    /// Connect problem with the request as a whole (`Code = 0xDB`, `Decode = PNIO
+    /// 0x81`, `Code1 = 64` CMRPC, `Code2` = [`CmrpcReason`]): wrong block count,
+    /// unknown block, missing IOCR, bad args length. Values per IEC 61158-6-10.
+    pub fn connect_reject_cmrpc(reason: CmrpcReason) -> PnioStatus {
+        PnioStatus::new(0xDB, 0x81, Self::CODE1_CMRPC, reason as u8)
     }
 
     /// CMDEV: Connect problem, AR already exists (state conflict). Convention as used
@@ -163,18 +337,48 @@ mod tests {
 
     #[test]
     fn pack_and_unpack() {
-        let s = PnioStatus::new(0xdb, 0x81, 0x03, 0x07);
-        assert_eq!(s.to_u32(), 0xdb81_0307);
+        let s = PnioStatus::new(0xdb, 0x81, 0x03, 0x0e);
+        assert_eq!(s.to_u32(), 0xdb81_030e);
         assert_eq!(
             (s.code(), s.decode(), s.code1(), s.code2()),
-            (0xdb, 0x81, 0x03, 0x07)
+            (0xdb, 0x81, 0x03, 0x0e)
         );
         assert!(!s.is_ok());
         assert!(PnioStatus::OK.is_ok());
         assert_eq!(
-            PnioStatus::connect_reject(ConnectBlock::ExpectedSubmodule, 7),
+            PnioStatus::connect_reject(
+                ConnectBlock::ExpectedSubmodule,
+                expected_submodule_field::SUBMODULE_DATA_LENGTH
+            ),
             s
         );
+    }
+
+    #[test]
+    fn cmrpc_reject_uses_code1_64() {
+        let s = PnioStatus::connect_reject_cmrpc(CmrpcReason::WrongBlockCount);
+        assert_eq!(s.to_u32(), 0xdb81_4003);
+        assert_eq!(
+            PnioStatus::connect_reject_cmrpc(CmrpcReason::ArgsLengthInvalid).to_u32(),
+            0xdb81_4000
+        );
+        assert_eq!(
+            PnioStatus::connect_reject_cmrpc(CmrpcReason::OutOfProviderConsumerOrAlarmResources)
+                .code2(),
+            7
+        );
+    }
+
+    #[test]
+    fn field_positions_count_from_the_block_header() {
+        // One number per field, in wire order, after the 4 header positions.
+        assert_eq!(block_field::BLOCK_VERSION_LOW + 1, ar_field::AR_TYPE);
+        assert_eq!(ar_field::AR_TYPE, iocr_field::IOCR_TYPE);
+        assert_eq!(iocr_field::IOCR_TYPE, alarm_cr_field::ALARM_CR_TYPE);
+        assert_eq!(iocr_field::FRAME_ID, iocr_field::DATA_LENGTH + 1);
+        assert_eq!(iocr_field::NUMBER_OF_APIS, 19);
+        assert_eq!(expected_submodule_field::SUBMODULE_DATA_LENGTH, 14);
+        assert_eq!(alarm_cr_field::MAX_ALARM_DATA_LENGTH, 10);
     }
 
     #[test]

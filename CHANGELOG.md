@@ -6,6 +6,32 @@ follows SemVer's 0.y.z rules (breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Fixed
+
+- Connect rejections name the offending field the way IEC 61158-6-10 counts it,
+  from the block header (`BlockType` = 0, `BlockLength` = 1, the two version bytes,
+  then the block's own fields). `ErrorCode2` was counted without the header, so a
+  controller's diagnostic buffer pointed at the wrong field: ARType is now 4 (was 1),
+  a NIL ARUUID 5 (was 2), an IOCR's DataLength 8 (was 5), FrameID 9 (was 6) and
+  NumberOfAPIs 19 (was 15), an ExpectedSubmodule's ModuleIdentNumber 7 (was 4), a
+  missing subslot 10 (was 7), SubmoduleIdentNumber 11 (was 6) and SubmoduleDataLength
+  14 (was 7), AlarmCRType 4 (was 1).
+- Problems with the Connect request as a whole are reported under `ErrorCode1 = 64`
+  (CMRPC) instead of being attributed to a block: a missing or duplicated
+  ARBlockReq/AlarmCRBlockReq is `WrongBlockCount` (3), an unknown block type
+  `UnknownBlocks` (1), no Input or no Output CR `IOCRMissing` (2), a third CR
+  `OutOfProviderConsumerOrAlarmResources` (7), and blocks that do not fit the NDR args
+  `ArgsLengthInvalid` (0) — previously `(ARBlock, 0)`, `(ARBlock, 0xff)`,
+  `(IOCRBlock, 1)` and `(ARBlock, 0xfe)`. A block whose body does not parse is reported
+  against its own `BlockLength`, a bad block version against `BlockVersionHigh`/`Low`.
+
+### Added
+
+- `cm::status`: the `ErrorCode2` field positions of every Connect-request block as
+  named constants (`block_field`, `ar_field`, `iocr_field`, `expected_submodule_field`,
+  `alarm_cr_field`), `CmrpcReason` and `PnioStatus::connect_reject_cmrpc` for the
+  `ErrorCode1 = 64` rejections. All re-exported from `cm`.
+
 ### Changed
 
 - MSRV raised from 1.74 to 1.77: `thiserror` 2.0.21 requires rustc 1.77.

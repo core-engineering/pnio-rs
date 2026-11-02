@@ -86,6 +86,10 @@ Open points recorded from the AR-establishment HIL run (`docs/bench-pnet-device.
   aborted AR is now announced on the wire, not just inferred from the next reconnect.
 - **`PnioStatus` constants** to re-verify against the purchased IEC 61158-6-10 once
   available (current values inferred from captures and p-net's public headers).
+  2026-11-02: the Connect-reject `ErrorCode2` field numbering (counted from the block
+  header) and the CMRPC `ErrorCode1 = 64` reasons are now per the standard's counting
+  rule; the remaining constants
+  (`0x3d` CMDEV, PNIORW `0xB0`/`0xC3`, RPC `0x05`) are still conventions.
 - **RPC fragmentation** (multi-fragment DCE-RPC requests/responses) — out of scope for Plan 3,
   rejected explicitly; not exercised by the bench (CPU's PDUs all fit one fragment). Revisit
   if a larger config triggers it.
