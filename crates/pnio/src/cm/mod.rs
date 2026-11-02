@@ -23,7 +23,10 @@ pub use connect::{build_connect_res, validate, ArParams, ConnectReq, IocrParams}
 pub use control::{app_ready_req, cmd, prm_end_done, release_done, ControlBlock};
 pub use model::{DeviceModel, SlotModel, SubmoduleModel};
 pub use records::{build_read_res, read_record, write_im_record, ReadReq, RecordCtx};
-pub use status::{ConnectBlock, PnioStatus};
+pub use status::{
+    alarm_cr_field, ar_field, block_field, expected_submodule_field, iocr_field, CmrpcReason,
+    ConnectBlock, PnioStatus,
+};
 pub use write::{build_write_res, Record, WriteReq, INDEX_MULTIPLE_WRITE};
 
 use crate::im::{Im0, ImStore, INDEX_IM1, INDEX_IM3};
@@ -290,7 +293,7 @@ impl Cm {
                     Ok(req) => self.ar.on(Event::ConnectReq(req), now),
                     Err(e) => respond(error_status(
                         &e,
-                        PnioStatus::connect_reject(ConnectBlock::ArBlock, 0xfe),
+                        PnioStatus::connect_reject_cmrpc(CmrpcReason::ArgsLengthInvalid),
                     )),
                 };
                 // Remember the controller's address (PrmEnd, later on the same AR, needs
@@ -731,7 +734,39 @@ mod tests {
             crate::rpc::NdrResponse::parse(&o.send[0].bytes[80..], crate::rpc::Drep::BIG).unwrap();
         assert_eq!(
             PnioStatus(n.status),
-            PnioStatus::connect_reject(ConnectBlock::ExpectedSubmodule, 7)
+            PnioStatus::connect_reject(
+                ConnectBlock::ExpectedSubmodule,
+                expected_submodule_field::SUBSLOT
+            )
+        );
+        assert_eq!(
+            n.status, 0xdb81_030a,
+            "what the controller's diagnostics decode"
+        );
+        assert!(blocks.is_empty());
+        assert_eq!(cm.state(), ArState::Idle);
+    }
+
+    #[test]
+    fn truncated_connect_blocks_get_args_length_invalid() {
+        let mut cm = cm();
+        // Cut 4 bytes off the last block's body and re-wrap the blocks in consistent
+        // RPC/NDR headers: only the PNIO blocks are now inconsistent.
+        let good = pdu("connect_req");
+        let mut hdr = RpcHeader::parse(&good).unwrap();
+        let (ndr, blocks) = NdrRequest::parse(&good[RpcHeader::LEN..], hdr.drep).unwrap();
+        let cut = &blocks[..blocks.len() - 4];
+        hdr.frag_len = (NdrRequest::LEN + cut.len()) as u16;
+        let mut bad = Vec::new();
+        hdr.write(&mut bad);
+        NdrRequest::for_blocks(ndr.args_max, cut.len() as u32).write(&mut bad, hdr.drep);
+        bad.extend_from_slice(cut);
+        let o = cm.handle_datagram(&bad, cpu(), Instant::now()).unwrap();
+        let (n, blocks) =
+            crate::rpc::NdrResponse::parse(&o.send[0].bytes[80..], crate::rpc::Drep::BIG).unwrap();
+        assert_eq!(
+            PnioStatus(n.status),
+            PnioStatus::connect_reject_cmrpc(CmrpcReason::ArgsLengthInvalid)
         );
         assert!(blocks.is_empty());
         assert_eq!(cm.state(), ArState::Idle);
